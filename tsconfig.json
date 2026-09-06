@@ -1,0 +1,12 @@
+{
+  "compilerOptions": {},
+  "files": [],
+  "references": [
+    { "path": "packages/protocol" },
+    { "path": "packages/core" },
+    { "path": "packages/sdk" },
+    { "path": "apps/meepo-server" },
+    { "path": "apps/meepo-worker" },
+    { "path": "apps/meepo-console" }
+  ]
+}

@@ -1,0 +1,35 @@
+# Shared tasks for all Node/TypeScript projects
+# https://moonrepo.dev/docs/config/tasks
+
+inheritedBy:
+  languages: ['javascript', 'typescript']
+
+tasks:
+  format-check:
+    command: "prettier --check ."
+    inputs:
+      - "**/*"
+
+  format:
+    command: "prettier --write ."
+    inputs:
+      - "**/*"
+
+  lint:
+    script: "prettier --check . && eslint --no-error-on-unmatched-pattern ."
+    inputs:
+      - "**/*"
+
+  typecheck:
+    command: "tsc -b"
+    deps:
+      - "^:build"
+    inputs:
+      - "**/*"
+
+  test:
+    command: "vitest run --passWithNoTests"
+    deps:
+      - "^:build"
+    inputs:
+      - "**/*"

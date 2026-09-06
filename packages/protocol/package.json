@@ -1,0 +1,25 @@
+{
+  "name": "@meepo/protocol",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Wire protocol, message envelopes, event streaming definitions, and heartbeat schemas for Meepo",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./src/index.ts",
+      "types": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.5"
+  }
+}

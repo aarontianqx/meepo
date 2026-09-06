@@ -1,0 +1,27 @@
+{
+  "name": "meepo-console",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Admin console for Meepo: Space administration, worker topology, and live slot monitoring",
+  "scripts": {
+    "build": "tsc -b && vite build",
+    "typecheck": "tsc -b",
+    "dev": "vite",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "@meepo/core": "workspace:*",
+    "@meepo/protocol": "workspace:*",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.4.0",
+    "typescript": "^5.9.3",
+    "vite": "^6.2.0",
+    "vitest": "^4.1.5"
+  }
+}
