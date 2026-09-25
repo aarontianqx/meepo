@@ -35,7 +35,7 @@ export interface FeishuClient {
     text: string,
     opts?: { replyInThread?: boolean }
   ): Promise<ReplyResult>;
-  replyCard(messageId: string, cardId: string): Promise<void>;
+  replyCard(messageId: string, cardId: string, opts?: { replyInThread?: boolean }): Promise<void>;
   createCard(cardJson: string): Promise<string>;
   updateCardContent(
     cardId: string,
@@ -68,13 +68,17 @@ export class LarkFeishuClient implements FeishuClient {
     return { messageId: res.data?.message_id ?? '', threadId: res.data?.thread_id };
   }
 
-  async replyCard(messageId: string, cardId: string): Promise<void> {
+  async replyCard(
+    messageId: string,
+    cardId: string,
+    opts?: { replyInThread?: boolean }
+  ): Promise<void> {
     const res = await this.client.im.v1.message.reply({
       path: { message_id: messageId },
       data: {
         msg_type: 'interactive',
         content: JSON.stringify({ type: 'card', data: { card_id: cardId } }),
-        reply_in_thread: true,
+        reply_in_thread: opts?.replyInThread,
       },
     });
     if (res.code) throw new Error(`im message.reply (card) failed: ${res.code} ${res.msg}`);

@@ -88,7 +88,11 @@ export class CardStreamer {
       }
       const cardId = await this.deps.client.createCard(buildStreamingCardJson());
       task.cardId = cardId;
-      await this.deps.client.replyCard(session.anchorMessageId, cardId);
+      // main sessions (private chats) reply in the main flow; task sessions
+      // (group threads) reply inside their thread.
+      await this.deps.client.replyCard(session.anchorMessageId, cardId, {
+        replyInThread: session.kind !== 'main',
+      });
     });
     await task.queue;
   }

@@ -56,15 +56,15 @@ export class FeishuGateway {
   async handleInbound(msg: InboundMessage): Promise<void> {
     if (this.dedup.has(msg.messageId)) return;
 
+    const spaceByChat = await this.chatSpaceMap();
+    const spaceId = msg.chatType === 'p2p' ? this.deps.defaultSpaceId : spaceByChat.get(msg.chatId);
+    if (spaceId && msg.threadId) await this.warmThreadWindow(spaceId, msg.chatId, msg.threadId);
+
     if (msg.text === NEW_COMMAND) {
       this.dedup.add(msg.messageId);
       await this.handleNewCommand(msg);
       return;
     }
-
-    const spaceByChat = await this.chatSpaceMap();
-    const spaceId = msg.chatType === 'p2p' ? this.deps.defaultSpaceId : spaceByChat.get(msg.chatId);
-    if (spaceId && msg.threadId) await this.warmThreadWindow(spaceId, msg.chatId, msg.threadId);
 
     const decision = decideInbound(msg, {
       botOpenId: this.deps.botOpenId,
