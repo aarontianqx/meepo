@@ -94,7 +94,13 @@ export interface SessionDispatchEnvelope {
   prompt: string;
   source: DispatchSource;
   delivery: DeliveryMode;
+  /**
+   * Explicit repo workspace. Null for chat sessions — they start in a neutral
+   * per-session directory and the agent picks up repos on demand.
+   */
   workspace: WorkspaceSpec | null;
+  /** Space memory and repo hints primed into the agent's system prompt */
+  systemPromptContribution?: string;
   model: ModelConfig;
   timeoutSeconds?: number;
 }

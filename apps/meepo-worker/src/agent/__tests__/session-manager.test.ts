@@ -1,7 +1,24 @@
-import type { ModelConfig, TranscriptMessage } from '@meepo/protocol';
-import { describe, expect, it } from 'vitest';
+import { existsSync } from 'node:fs';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
-import { transcriptToAgentMessage } from '../session-manager.js';
+import type { AgentEvent, AgentMessage, AgentOptions } from '@earendil-works/pi-agent-core';
+import {
+  WORKER_CHANNEL_METHODS,
+  type ModelConfig,
+  type SessionDispatchEnvelope,
+  type TranscriptMessage,
+} from '@meepo/protocol';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+
+import {
+  SessionManager,
+  buildSessionSystemPrompt,
+  transcriptToAgentMessage,
+  type SessionManagerDeps,
+} from '../session-manager.js';
+import type { RunnerAgent } from '../session-runner.js';
 
 const model: ModelConfig = {
   provider: 'internal-gw',
@@ -59,5 +76,129 @@ describe('transcriptToAgentMessage', () => {
       content: [{ type: 'text', text: 'ls output' }],
       isError: false,
     });
+  });
+});
+
+class StubAgent implements RunnerAgent {
+  readonly state: { messages: AgentMessage[] } = { messages: [] };
+  subscribe(_listener: (event: AgentEvent) => void): () => void {
+    return () => undefined;
+  }
+  prompt(_input: string): Promise<void> {
+    return new Promise(() => undefined);
+  }
+  steer(_message: AgentMessage): void {}
+  abort(): void {}
+}
+
+function envelope(partial: Partial<SessionDispatchEnvelope> = {}): SessionDispatchEnvelope {
+  return {
+    taskId: 'task-1',
+    sessionId: 'sess-1',
+    spaceId: 'space-1',
+    sessionKind: 'main',
+    prompt: 'hi',
+    source: { kind: 'system' },
+    delivery: 'wait',
+    workspace: null,
+    model,
+    ...partial,
+  };
+}
+
+describe('buildSessionSystemPrompt', () => {
+  it('contains the working directory, worktree rule, contribution, and cron note', () => {
+    const prompt = buildSessionSystemPrompt('/tmp/sess-1', 'Space memory: prefers pnpm.');
+    expect(prompt).toContain('/tmp/sess-1');
+    expect(prompt).toContain('git worktree');
+    expect(prompt).toContain('Space memory: prefers pnpm.');
+    expect(prompt).toContain('CronCreate');
+  });
+
+  it('omits the contribution when absent', () => {
+    const prompt = buildSessionSystemPrompt('/tmp/sess-1');
+    expect(prompt).toContain('git worktree');
+    expect(prompt).not.toContain('Space memory');
+  });
+});
+
+describe('SessionManager runner creation', () => {
+  let sessionsDir: string;
+
+  beforeAll(async () => {
+    sessionsDir = await mkdtemp(join(tmpdir(), 'meepo-sessions-test-'));
+  });
+
+  afterAll(async () => {
+    await rm(sessionsDir, { recursive: true, force: true });
+  });
+
+  function setup(deps: Partial<SessionManagerDeps> = {}) {
+    const captured: AgentOptions[] = [];
+    const manager = new SessionManager({
+      workerId: 'w1',
+      rpc: (method) => {
+        if (method === WORKER_CHANNEL_METHODS.sessionSnapshot) {
+          return Promise.resolve({ sessionId: 'sess-1', version: 1, messages: [] });
+        }
+        return Promise.resolve({});
+      },
+      emit: () => undefined,
+      sessionsDir,
+      sessionTtlMs: 60_000,
+      createAgent: (options) => {
+        captured.push(options);
+        return new StubAgent();
+      },
+      ...deps,
+    });
+    return { manager, captured };
+  }
+
+  it('creates a neutral per-session directory and equips coding + cron tools', async () => {
+    const { manager, captured } = setup();
+
+    await manager.handleDispatch(envelope());
+
+    const workDir = join(sessionsDir, 'sess-1');
+    expect(existsSync(workDir)).toBe(true);
+    expect(captured).toHaveLength(1);
+    const initial = captured[0].initialState;
+    expect(initial?.systemPrompt).toContain(workDir);
+    expect(initial?.systemPrompt).toContain('git worktree');
+    const toolNames = (initial?.tools ?? []).map((tool) => tool.name);
+    expect(toolNames).toEqual(expect.arrayContaining(['read', 'bash', 'edit', 'write']));
+    expect(toolNames).toEqual(expect.arrayContaining(['CronCreate', 'CronList', 'CronDelete']));
+  });
+
+  it('appends the server systemPromptContribution verbatim', async () => {
+    const { manager, captured } = setup();
+
+    await manager.handleDispatch(
+      envelope({ systemPromptContribution: 'Space memory: prefers pnpm.' })
+    );
+
+    expect(captured[0].initialState?.systemPrompt).toContain('Space memory: prefers pnpm.');
+  });
+
+  it('treats task sessions the same: neutral directory with coding tools', async () => {
+    const { manager, captured } = setup();
+
+    await manager.handleDispatch(envelope({ sessionId: 'sess-task', sessionKind: 'task' }));
+
+    const workDir = join(sessionsDir, 'sess-task');
+    expect(existsSync(workDir)).toBe(true);
+    const toolNames = (captured[0].initialState?.tools ?? []).map((tool) => tool.name);
+    expect(toolNames).toEqual(expect.arrayContaining(['read', 'bash', 'edit', 'write']));
+  });
+
+  it('reuses the runner (and directory) for subsequent dispatches', async () => {
+    const { manager, captured } = setup();
+
+    await manager.handleDispatch(envelope());
+    await manager.handleDispatch(envelope({ taskId: 'task-2', prompt: 'again' }));
+
+    expect(captured).toHaveLength(1);
+    expect(manager.runnerForSession('sess-1')).toBeDefined();
   });
 });

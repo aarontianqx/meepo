@@ -10,8 +10,10 @@ export interface WorkerConfig {
   workerId: string;
   tags: string[];
   maxSlots: number;
-  /** Base directory for repo caches and git worktrees */
+  /** Base directory for repo caches and git worktrees (tickets) */
   workspaceDir: string;
+  /** Root for neutral per-session working directories */
+  sessionsDir: string;
   /** Idle session runners are dropped after this many milliseconds */
   sessionTtlMs: number;
 }
@@ -31,6 +33,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
       .filter(Boolean),
     maxSlots: Number(env.MEEPO_MAX_SLOTS ?? 1),
     workspaceDir: env.MEEPO_WORKSPACE_DIR ?? join(homedir(), '.meepo', 'workspaces'),
+    sessionsDir: env.MEEPO_SESSIONS_DIR ?? join(homedir(), '.meepo', 'sessions'),
     sessionTtlMs: Number(env.MEEPO_SESSION_TTL_MS ?? 3_600_000),
   };
 }

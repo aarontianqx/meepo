@@ -28,7 +28,7 @@ const sessionManager = new SessionManager({
   workerId: config.workerId,
   rpc: (method, params) => client.rpc(method, params),
   emit,
-  ensureWorktree,
+  sessionsDir: config.sessionsDir,
   sessionTtlMs: config.sessionTtlMs,
 });
 

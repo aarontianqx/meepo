@@ -1,3 +1,6 @@
+import { mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
+
 import { Agent, type AgentMessage, type AgentOptions } from '@earendil-works/pi-agent-core';
 import type { AssistantMessage, Usage } from '@earendil-works/pi-ai';
 import { createCodingTools } from '@earendil-works/pi-coding-agent';
@@ -10,7 +13,6 @@ import {
   type TaskSteerPayload,
   type TranscriptMessage,
   type WorkerStreamEvent,
-  type WorkspaceSpec,
 } from '@meepo/protocol';
 
 import { createModel, createStreamFn } from './model-factory.js';
@@ -24,28 +26,41 @@ export interface SessionManagerDeps {
   workerId: string;
   rpc: RpcFn;
   emit: (event: WorkerStreamEvent) => void;
-  ensureWorktree: (id: string, spec: WorkspaceSpec) => Promise<string>;
+  /** Root for neutral per-session working directories (`<sessionsDir>/<sessionId>`). */
+  sessionsDir: string;
   sessionTtlMs: number;
   now?: () => number;
+  /** Factory seam for tests; defaults to mkdir -p under sessionsDir. */
+  ensureSessionDir?: (sessionId: string) => Promise<string>;
   /** Factory seam for tests; defaults to the real pi Agent. */
   createAgent?: (options: AgentOptions) => RunnerAgent;
 }
 
-const MAIN_SESSION_SYSTEM_PROMPT = [
-  'You are Meepo, an assistant embedded in a team chat. Answer concisely and helpfully.',
-  'You have no workspace in this session: no file or shell tools are available.',
-  'You can schedule future wakeups of this conversation with the cron tools:',
-  'CronCreate (5-field cron expression + prompt + recurring flag), CronList, CronDelete.',
-  'Use CronCreate with recurring=false for one-shot reminders.',
-].join('\n');
-
-const TASK_SESSION_SYSTEM_PROMPT = [
-  'You are Meepo, a coding agent working in a dedicated git worktree.',
-  'Use the read/bash/edit/write tools to inspect and modify the codebase to accomplish the task.',
-  'You can schedule future wakeups of this session with the cron tools:',
-  'CronCreate (5-field cron expression + prompt + recurring flag), CronList, CronDelete.',
-  'Use CronCreate with recurring=false for one-shot reminders.',
-].join('\n');
+/**
+ * Assemble the session system prompt: base identity + working rules, the
+ * server-injected space contribution verbatim, and the cron tools note.
+ */
+export function buildSessionSystemPrompt(workDir: string, contribution?: string): string {
+  const parts = [
+    `You are Meepo, a coding and collaboration agent. Your current working directory is ${workDir}.`,
+    [
+      'Working rules:',
+      '- When a task involves code, clone the repository yourself into your working directory,',
+      '  or into a path the user specifies. Do not assume any repository already exists.',
+      '- Before modifying any code, always create an isolated git worktree for your changes',
+      '  to avoid conflicts with concurrent sessions.',
+    ].join('\n'),
+  ];
+  if (contribution) parts.push(contribution);
+  parts.push(
+    [
+      'You can schedule future wakeups of this session with the cron tools:',
+      'CronCreate (5-field cron expression + prompt + recurring flag), CronList, CronDelete.',
+      'Use CronCreate with recurring=false for one-shot reminders.',
+    ].join('\n')
+  );
+  return parts.join('\n\n');
+}
 
 function emptyUsage(): Usage {
   return {
@@ -172,15 +187,15 @@ export class SessionManager {
 
   private async createRunner(envelope: SessionDispatchEnvelope): Promise<SessionRunner> {
     const messages = await this.fetchSnapshot(envelope);
+    const workDir = await this.ensureSessionDir(envelope.sessionId);
     const tools = [
-      ...(await this.buildTools(envelope)),
+      ...createCodingTools(workDir),
       ...buildCronTools(this.deps.rpc, envelope.sessionId),
     ];
     const createAgent = this.deps.createAgent ?? ((options: AgentOptions) => new Agent(options));
     const agent = createAgent({
       initialState: {
-        systemPrompt:
-          envelope.sessionKind === 'main' ? MAIN_SESSION_SYSTEM_PROMPT : TASK_SESSION_SYSTEM_PROMPT,
+        systemPrompt: buildSessionSystemPrompt(workDir, envelope.systemPromptContribution),
         model: createModel(envelope.model),
         tools,
         messages,
@@ -200,6 +215,13 @@ export class SessionManager {
     return runner;
   }
 
+  private async ensureSessionDir(sessionId: string): Promise<string> {
+    if (this.deps.ensureSessionDir) return this.deps.ensureSessionDir(sessionId);
+    const dir = join(this.deps.sessionsDir, sessionId);
+    await mkdir(dir, { recursive: true });
+    return dir;
+  }
+
   private async fetchSnapshot(envelope: SessionDispatchEnvelope): Promise<AgentMessage[]> {
     const snapshot = (await this.deps.rpc(WORKER_CHANNEL_METHODS.sessionSnapshot, {
       sessionId: envelope.sessionId,
@@ -207,11 +229,5 @@ export class SessionManager {
     return snapshot.messages.map((message, index) =>
       transcriptToAgentMessage(message, index, envelope.model)
     );
-  }
-
-  private async buildTools(envelope: SessionDispatchEnvelope) {
-    if (envelope.sessionKind === 'main' || !envelope.workspace) return [];
-    const worktreePath = await this.deps.ensureWorktree(envelope.sessionId, envelope.workspace);
-    return createCodingTools(worktreePath);
   }
 }

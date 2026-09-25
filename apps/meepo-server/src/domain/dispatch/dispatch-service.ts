@@ -220,11 +220,22 @@ export class DispatchService {
       prompt: input.prompt,
       source: input.source,
       delivery: input.delivery,
-      workspace:
-        sessionKind === 'main' ? null : { repoUrl: space.repoUrl, branch: space.defaultBranch },
+      workspace: null,
+      systemPromptContribution: composeSystemPromptContribution(space),
       model,
     };
   }
+}
+
+function composeSystemPromptContribution(space: Space): string {
+  const parts: string[] = [];
+  parts.push(
+    `You are chatting in space "${space.name}". Its default repository is ${space.repoUrl} (branch ${space.defaultBranch}), but nothing is cloned for you — clone or worktree it yourself only when the task actually involves code.`
+  );
+  if (space.longTermMemory.trim()) {
+    parts.push(`Space long-term memory:\n${space.longTermMemory.trim()}`);
+  }
+  return parts.join('\n\n');
 }
 
 function mergeQueued(queued: QueuedDispatch[]): SessionDispatchEnvelope {
