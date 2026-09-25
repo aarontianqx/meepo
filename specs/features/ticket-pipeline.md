@@ -41,6 +41,8 @@ interface Ticket {
   title: string;
   objective: string;
   contextSummary?: string;
+  /** Repo binding for this ticket; falls back to the space default repo when absent */
+  workspace?: { repoUrl: string; branch: string; commitSha?: string };
   requiredTags: string[];
   status: 'pending' | 'claimed' | 'running' | 'completed' | 'failed';
   assignedWorkerId?: string;
@@ -54,6 +56,8 @@ interface Ticket {
   completedAt?: number;
 }
 ```
+
+The repo binding is **ticket-scoped**: which repository a task should touch is part of the objective bundle, not a space-global assumption. Repository credentials belong to the worker's own environment (the machine owner's git/SSH configuration) — the server never handles repo auth.
 
 ## 4. Triggers
 

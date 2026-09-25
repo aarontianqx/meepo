@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import type { Ticket } from '@meepo/core';
+import type { WorkspaceSpec } from '@meepo/protocol';
 
 import { conflict, notFound, validation } from '../errors.js';
 import type { SpaceRepository } from '../spaces/space-repository.js';
@@ -12,6 +13,7 @@ export interface CreateTicketInput {
   objective: string;
   contextSummary?: string;
   requiredTags?: string[];
+  workspace?: WorkspaceSpec;
 }
 
 export interface CompleteTicketInput {
@@ -39,6 +41,7 @@ export class TicketService {
       title: input.title.trim(),
       objective: input.objective,
       contextSummary: input.contextSummary,
+      workspace: input.workspace,
       requiredTags: input.requiredTags ?? space.requiredTags,
       status: 'pending',
       createdAt: now,

@@ -112,7 +112,7 @@ export class DispatchService {
       spaceId: space.id,
       objective: ticket.objective,
       contextSummary: ticket.contextSummary,
-      workspace: { repoUrl: space.repoUrl, branch: space.defaultBranch },
+      workspace: ticket.workspace ?? { repoUrl: space.repoUrl, branch: space.defaultBranch },
       model,
       source: { kind: 'system' },
     };

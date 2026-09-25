@@ -144,6 +144,13 @@ export const migrations: Migration[] = [
       db.exec('ALTER TABLE sessions ADD COLUMN anchor_message_id TEXT');
     },
   },
+  {
+    version: 4,
+    name: 'ticket workspace binding',
+    up(db) {
+      db.exec('ALTER TABLE tickets ADD COLUMN workspace TEXT');
+    },
+  },
 ];
 
 /** Applies pending migrations in version order, tracking progress via `user_version`. */
