@@ -8,8 +8,7 @@ The `meepo-worker` is a self-hosted runner daemon executing on developer machine
 
 - Establishes a persistent outbound connection to `meepo-server` via WebSocket.
 - Authenticates with an enrollment token issued by a space owner; the token alone determines which spaces the worker may serve.
-- Uses a stable `workerId` persisted across restarts — bindings are restored against it on reconnect.
-- On (re)connect, reports a manifest of local sessions and workspaces; the server reconciles bindings from it.
+- Uses a stable `workerId` persisted across restarts — bindings and queued dispatches are restored against it on reconnect.
 - Emits periodic heartbeats including active slot utilization, CPU/memory stats, and current task IDs.
 
 ### 2. Workspace & Git Worktree Manager

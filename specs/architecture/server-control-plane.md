@@ -25,7 +25,7 @@ The `meepo-server` application coordinates multi-chat inbound traffic, manages s
 
 - Persists the authoritative session event stream: user and agent messages, tool executions, and durable state records (e.g. cron definitions) as one ordered log per session, plus a materialized current-state projection for routing and queries.
 - Buffers incoming stream deltas per turn and persists them at turn boundaries.
-- Provides cold-start snapshots to the bound worker: full on the first cold-start, incremental thereafter, full re-sync on version mismatch.
+- Provides full snapshots for worker cold-starts (incremental sync is a later optimization).
 
 ### 4. Dispatcher & Load Balancer
 
@@ -33,13 +33,14 @@ The `meepo-server` application coordinates multi-chat inbound traffic, manages s
 - Session routing is binding lookup, not selection: a session always routes to the worker it was bound to at creation.
 - Creation-time binding depends on session type: main sessions (private-chat and main-window conversations) bind to the space's `boundWorkerId`; task sessions pick a randomly chosen eligible worker — a routing-policy hook is reserved for future identity-aware placement (e.g. preferring the triggering user's own machine).
 - Only tickets involve worker selection: any enrolled, tag-matched worker with a free slot, preferring the least-loaded.
-- When the bound worker is offline, session messages queue server-side and coalesce; delivery resumes when the worker reconnects and its manifest handshake reconciles bindings.
+- When the bound worker is offline, session messages queue server-side and coalesce; delivery resumes when the worker reconnects under its stable `workerId` and queued dispatches flush.
+- A periodic sweep retries pending tickets as worker slots free up.
 
 ### 5. Card Streamer
 
 - Aggregates worker stream events into full-snapshot render frames (not deltas), keeping the core IM-agnostic and immune to out-of-order frames.
 - Throttles CardKit patch calls (~0.5s) to adhere to Feishu rate limits while providing smooth streaming output.
-- Anchors replies inside threads via `message_id_in_thread` — `reply_in_thread` is rejected inside threads (Feishu error 99992354).
+- Sends thread messages via `receive_id_type=thread_id`; `reply_in_thread` is used only to prewarm a thread from a main-stream mention (it is rejected inside threads, Feishu error 99992354).
 
 ### 6. Scheduler
 
