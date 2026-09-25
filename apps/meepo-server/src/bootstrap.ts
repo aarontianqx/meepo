@@ -14,11 +14,11 @@ import { WorkerService } from './domain/workers/worker-service.js';
 import { HeaderAuthenticator } from './infra/auth/header-authenticator.js';
 import type { ServiceContainer } from './service-container.js';
 import { openDatabase } from './store/sqlite/database.js';
-import { SqliteCronRepository } from './store/sqlite/cron-sqlite.js';
 import { SqliteDispatchQueueRepository } from './store/sqlite/dispatch-queue-sqlite.js';
 import { SqliteEnrollmentTokenRepository } from './store/sqlite/enrollment-sqlite.js';
 import { SqliteMembershipRepository } from './store/sqlite/membership-sqlite.js';
-import { SqliteReminderRepository } from './store/sqlite/reminder-sqlite.js';
+import { SqliteRunRepository } from './store/sqlite/run-sqlite.js';
+import { SqliteScheduleRepository } from './store/sqlite/schedule-sqlite.js';
 import { SqliteSessionEventRepository } from './store/sqlite/session-event-sqlite.js';
 import { SqliteSessionRepository } from './store/sqlite/session-sqlite.js';
 import { SqliteSpaceRepository } from './store/sqlite/space-sqlite.js';
@@ -55,8 +55,8 @@ export async function bootstrap(): Promise<ServerRuntime> {
   const ticketRepository = new SqliteTicketRepository(db);
   const sessionRepository = new SqliteSessionRepository(db);
   const sessionEvents = new SqliteSessionEventRepository(db);
-  const reminderRepository = new SqliteReminderRepository(db);
-  const cronRepository = new SqliteCronRepository(db);
+  const scheduleRepository = new SqliteScheduleRepository(db);
+  const runRepository = new SqliteRunRepository(db);
   const dispatchQueue = new SqliteDispatchQueueRepository(db);
 
   const membershipService = new MembershipService(membershipRepository);
@@ -73,17 +73,18 @@ export async function bootstrap(): Promise<ServerRuntime> {
   const ticketService = new TicketService(ticketRepository, spaceRepository);
   const sessionService = new SessionService(sessionRepository, spaceRepository);
   const schedulerService = new SchedulerService(
-    reminderRepository,
-    cronRepository,
+    scheduleRepository,
     sessionRepository,
     spaceRepository
   );
   const transcriptService = new TranscriptService(sessionEvents, sessionRepository);
-  const streamProcessor = new StreamProcessor(transcriptService, ticketService);
+  const streamProcessor = new StreamProcessor(transcriptService, ticketService, runRepository);
 
   const workerChannel = new WorkerChannelHandler({
     workerService,
     schedulerService,
+    sessionService,
+    ticketService,
     transcriptService,
     streamProcessor,
   });
@@ -92,11 +93,13 @@ export async function bootstrap(): Promise<ServerRuntime> {
     spaceRepository,
     workerRepository,
     ticketRepository,
+    runRepository,
     dispatchQueue,
     workerChannel,
     transcriptService,
     config.defaultModel
   );
+  workerChannel.setDispatchService(dispatchService);
 
   const services: ServiceContainer = {
     membershipService,
@@ -165,7 +168,10 @@ export async function bootstrap(): Promise<ServerRuntime> {
   return { app, config, services, dispatchService, schedulerService };
 }
 
-/** Scheduler fire loop: cron fires wake sessions, reminder fires become tickets. */
+/**
+ * Scheduler fire loop: `resume_session` fires wake their session, `create_ticket`
+ * fires materialize a ticket (linked back to its origin session) and dispatch it.
+ */
 async function fireDueSchedules(
   scheduler: SchedulerService,
   dispatch: DispatchService,
@@ -173,13 +179,14 @@ async function fireDueSchedules(
 ): Promise<void> {
   const fires = await scheduler.collectDueFires();
   for (const fire of fires) {
-    if (fire.kind === 'cron') {
+    const { schedule } = fire;
+    if (schedule.action.kind === 'resume_session') {
       await dispatch.dispatchSessionTurn({
-        sessionId: fire.job.sessionId,
-        prompt: fire.job.prompt,
+        sessionId: schedule.action.sessionId,
+        prompt: schedule.action.prompt,
         source: {
-          kind: 'cron',
-          jobId: fire.job.id,
+          kind: 'schedule',
+          scheduleId: schedule.id,
           coalescedCount: fire.coalescedCount,
           stale: fire.stale,
         },
@@ -187,12 +194,14 @@ async function fireDueSchedules(
       });
       continue;
     }
+    const action = schedule.action;
     const ticket = await tickets.createTicket({
-      spaceId: fire.reminder.spaceId,
-      title: fire.reminder.objective.slice(0, 80),
-      objective: fire.reminder.objective,
-      contextSummary: fire.reminder.contextSummary,
-      requiredTags: fire.reminder.requiredTags,
+      spaceId: schedule.spaceId,
+      title: action.objective.slice(0, 80),
+      objective: action.objective,
+      contextSummary: action.contextSummary,
+      requiredTags: action.requiredTags,
+      originSessionId: action.originSessionId,
     });
     await dispatch.dispatchTicket(ticket.id);
   }

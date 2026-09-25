@@ -7,7 +7,7 @@ import type { AgentEvent, AgentMessage, AgentOptions } from '@earendil-works/pi-
 import {
   WORKER_CHANNEL_METHODS,
   type ModelConfig,
-  type SessionDispatchEnvelope,
+  type TurnDispatchEnvelope,
   type TranscriptMessage,
 } from '@meepo/protocol';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -91,9 +91,9 @@ class StubAgent implements RunnerAgent {
   abort(): void {}
 }
 
-function envelope(partial: Partial<SessionDispatchEnvelope> = {}): SessionDispatchEnvelope {
+function envelope(partial: Partial<TurnDispatchEnvelope> = {}): TurnDispatchEnvelope {
   return {
-    taskId: 'task-1',
+    runId: 'run-1',
     sessionId: 'sess-1',
     spaceId: 'space-1',
     sessionKind: 'main',
@@ -154,7 +154,7 @@ describe('SessionManager runner creation', () => {
     return { manager, captured };
   }
 
-  it('creates a neutral per-session directory and equips coding + cron tools', async () => {
+  it('creates a neutral per-session directory and equips coding + cron + ticket tools', async () => {
     const { manager, captured } = setup();
 
     await manager.handleDispatch(envelope());
@@ -168,6 +168,7 @@ describe('SessionManager runner creation', () => {
     const toolNames = (initial?.tools ?? []).map((tool) => tool.name);
     expect(toolNames).toEqual(expect.arrayContaining(['read', 'bash', 'edit', 'write']));
     expect(toolNames).toEqual(expect.arrayContaining(['CronCreate', 'CronList', 'CronDelete']));
+    expect(toolNames).toContain('TicketCreate');
   });
 
   it('appends the server systemPromptContribution verbatim', async () => {
@@ -180,12 +181,12 @@ describe('SessionManager runner creation', () => {
     expect(captured[0].initialState?.systemPrompt).toContain('Space memory: prefers pnpm.');
   });
 
-  it('treats task sessions the same: neutral directory with coding tools', async () => {
+  it('treats thread sessions the same: neutral directory with coding tools', async () => {
     const { manager, captured } = setup();
 
-    await manager.handleDispatch(envelope({ sessionId: 'sess-task', sessionKind: 'task' }));
+    await manager.handleDispatch(envelope({ sessionId: 'sess-thread', sessionKind: 'thread' }));
 
-    const workDir = join(sessionsDir, 'sess-task');
+    const workDir = join(sessionsDir, 'sess-thread');
     expect(existsSync(workDir)).toBe(true);
     const toolNames = (captured[0].initialState?.tools ?? []).map((tool) => tool.name);
     expect(toolNames).toEqual(expect.arrayContaining(['read', 'bash', 'edit', 'write']));
@@ -195,7 +196,7 @@ describe('SessionManager runner creation', () => {
     const { manager, captured } = setup();
 
     await manager.handleDispatch(envelope());
-    await manager.handleDispatch(envelope({ taskId: 'task-2', prompt: 'again' }));
+    await manager.handleDispatch(envelope({ runId: 'run-2', prompt: 'again' }));
 
     expect(captured).toHaveLength(1);
     expect(manager.runnerForSession('sess-1')).toBeDefined();

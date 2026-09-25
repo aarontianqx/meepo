@@ -7,18 +7,18 @@ import { createCodingTools } from '@earendil-works/pi-coding-agent';
 import {
   WORKER_CHANNEL_METHODS,
   type ModelConfig,
-  type SessionDispatchEnvelope,
+  type RunAbortPayload,
+  type RunSteerPayload,
   type SessionSnapshot,
-  type TaskAbortPayload,
-  type TaskSteerPayload,
   type TranscriptMessage,
+  type TurnDispatchEnvelope,
   type WorkerStreamEvent,
 } from '@meepo/protocol';
 
 import { createModel, createStreamFn } from './model-factory.js';
 import { createCompactor } from './compaction.js';
 import { SessionRunner, type RunnerAgent } from './session-runner.js';
-import { buildCronTools } from './tools.js';
+import { buildCronTools, buildTicketTools } from './tools.js';
 
 type RpcFn = (method: string, params: unknown) => Promise<unknown>;
 
@@ -54,9 +54,11 @@ export function buildSessionSystemPrompt(workDir: string, contribution?: string)
   if (contribution) parts.push(contribution);
   parts.push(
     [
-      'You can schedule future wakeups of this session with the cron tools:',
-      'CronCreate (5-field cron expression + prompt + recurring flag), CronList, CronDelete.',
-      'Use CronCreate with recurring=false for one-shot reminders.',
+      'Scheduling tools:',
+      '- CronCreate/CronList/CronDelete manage wakeups of THIS session (one-shot "at" or recurring',
+      '  "cron" timing), preserving this conversation\'s context.',
+      '- TicketCreate spawns an independent background task with a self-contained objective',
+      '  (optionally scheduled) that runs in a fresh context.',
     ].join('\n')
   );
   return parts.join('\n\n');
@@ -121,26 +123,26 @@ export function transcriptToAgentMessage(
 export class SessionManager {
   private readonly runners = new Map<string, SessionRunner>();
   private readonly pendingCreates = new Map<string, Promise<SessionRunner>>();
-  private readonly taskToSession = new Map<string, string>();
+  private readonly runToSession = new Map<string, string>();
   private sweepTimer?: NodeJS.Timeout;
 
   constructor(private readonly deps: SessionManagerDeps) {}
 
-  async handleDispatch(envelope: SessionDispatchEnvelope): Promise<void> {
+  async handleDispatch(envelope: TurnDispatchEnvelope): Promise<void> {
     const runner = await this.getOrCreateRunner(envelope);
-    this.taskToSession.set(envelope.taskId, envelope.sessionId);
-    runner.runTurn(envelope.taskId, envelope.prompt, envelope.delivery, envelope.timeoutSeconds);
+    this.runToSession.set(envelope.runId, envelope.sessionId);
+    runner.runTurn(envelope.runId, envelope.prompt, envelope.delivery, envelope.timeoutSeconds);
   }
 
-  handleSteer(payload: TaskSteerPayload): void {
-    const runner = this.runnerForTask(payload.taskId);
+  handleSteer(payload: RunSteerPayload): void {
+    const runner = this.runnerForRun(payload.runId);
     runner?.steer(payload.message);
   }
 
-  handleAbort(payload: TaskAbortPayload): void {
-    const runner = this.runnerForTask(payload.taskId);
-    if (runner?.abort(payload.taskId, payload.reason)) {
-      this.taskToSession.delete(payload.taskId);
+  handleAbort(payload: RunAbortPayload): void {
+    const runner = this.runnerForRun(payload.runId);
+    if (runner?.abort(payload.runId, payload.reason)) {
+      this.runToSession.delete(payload.runId);
     }
   }
 
@@ -168,12 +170,12 @@ export class SessionManager {
     return this.runners.get(sessionId);
   }
 
-  private runnerForTask(taskId: string): SessionRunner | undefined {
-    const sessionId = this.taskToSession.get(taskId);
+  private runnerForRun(runId: string): SessionRunner | undefined {
+    const sessionId = this.runToSession.get(runId);
     return sessionId ? this.runners.get(sessionId) : undefined;
   }
 
-  private getOrCreateRunner(envelope: SessionDispatchEnvelope): Promise<SessionRunner> {
+  private getOrCreateRunner(envelope: TurnDispatchEnvelope): Promise<SessionRunner> {
     const existing = this.runners.get(envelope.sessionId);
     if (existing) return Promise.resolve(existing);
     const inflight = this.pendingCreates.get(envelope.sessionId);
@@ -185,12 +187,13 @@ export class SessionManager {
     return created;
   }
 
-  private async createRunner(envelope: SessionDispatchEnvelope): Promise<SessionRunner> {
+  private async createRunner(envelope: TurnDispatchEnvelope): Promise<SessionRunner> {
     const messages = await this.fetchSnapshot(envelope);
     const workDir = await this.ensureSessionDir(envelope.sessionId);
     const tools = [
       ...createCodingTools(workDir),
       ...buildCronTools(this.deps.rpc, envelope.sessionId),
+      ...buildTicketTools(this.deps.rpc, envelope.sessionId),
     ];
     const createAgent = this.deps.createAgent ?? ((options: AgentOptions) => new Agent(options));
     const agent = createAgent({
@@ -222,7 +225,7 @@ export class SessionManager {
     return dir;
   }
 
-  private async fetchSnapshot(envelope: SessionDispatchEnvelope): Promise<AgentMessage[]> {
+  private async fetchSnapshot(envelope: TurnDispatchEnvelope): Promise<AgentMessage[]> {
     const snapshot = (await this.deps.rpc(WORKER_CHANNEL_METHODS.sessionSnapshot, {
       sessionId: envelope.sessionId,
     })) as SessionSnapshot;

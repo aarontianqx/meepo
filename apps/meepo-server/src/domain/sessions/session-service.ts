@@ -36,7 +36,7 @@ export class SessionService {
     const session: Session = {
       id: randomUUID(),
       spaceId: input.spaceId,
-      kind: input.kind ?? 'task',
+      kind: input.kind ?? 'thread',
       chatId: input.chatId,
       threadId: input.threadId,
       anchorMessageId: input.anchorMessageId,

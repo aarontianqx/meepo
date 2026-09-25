@@ -45,7 +45,7 @@ export interface Space {
   defaultBranch: string;
   /** Worker hosting this space's main sessions; unset until the first enrolled worker registers */
   boundWorkerId?: string;
-  /** IANA timezone defaulting scheduled records (reminders, crons) */
+  /** IANA timezone defaulting schedule timing rules */
   timezone: string;
   /** Server-held model credentials injected into dispatches for this space */
   model?: ModelConfig;
@@ -78,6 +78,8 @@ export interface Ticket {
   objective: string;
   contextSummary?: string;
   requiredTags: string[];
+  /** Session the result reports back to, when the ticket was created from one */
+  originSessionId?: string;
   status: 'pending' | 'claimed' | 'running' | 'completed' | 'failed';
   assignedWorkerId?: string;
   result?: {
@@ -92,11 +94,11 @@ export interface Ticket {
 }
 
 /**
- * Session kind: `main` sessions are long-lived conversations (private chat,
- * main window) and follow the space binding; `task` sessions are thread-bound
- * coding sessions pinned to their dispatch target.
+ * Session kind: `main` sessions are long-lived main-flow conversations
+ * (private chat, group main window); `thread` sessions are thread-bound
+ * task conversations pinned to their dispatch target.
  */
-export type SessionKind = 'main' | 'task';
+export type SessionKind = 'main' | 'thread';
 
 /** Session descriptor mapped to a Feishu window */
 export interface Session {
@@ -114,39 +116,50 @@ export interface Session {
   lastActiveAt: number;
 }
 
-export type ScheduleTrigger =
-  { kind: 'delay'; delayMs: number } | { kind: 'at'; at: number } | { kind: 'cron'; cron: string };
+/** Timing rule of a schedule: one-shot (`at`) or recurring (`cron`) */
+export type ScheduleTiming =
+  { kind: 'at'; at: number } | { kind: 'cron'; expression: string; timezone?: string };
 
-export type ReminderStatus = 'scheduled' | 'fired' | 'cancelled';
+/** What a schedule produces at fire time */
+export type ScheduleAction =
+  | {
+      kind: 'create_ticket';
+      objective: string;
+      contextSummary?: string;
+      requiredTags?: string[];
+      /** Session the resulting ticket reports back to, when created from one */
+      originSessionId?: string;
+    }
+  | { kind: 'resume_session'; sessionId: string; prompt: string };
 
-/** Task-level scheduled trigger: fires into a new ticket (space-scoped) */
-export interface Reminder {
+export type ScheduleStatus = 'active' | 'done' | 'deleted';
+
+/**
+ * The single scheduling entity: when work gets produced.
+ * `create_ticket` fires into a new ticket; `resume_session` fires a turn
+ * in an existing session (with a 7-day staleness TTL).
+ */
+export interface Schedule {
   id: string;
   spaceId: string;
-  objective: string;
-  contextSummary?: string;
-  requiredTags: string[];
-  trigger: ScheduleTrigger;
-  timezone: string;
-  status: ReminderStatus;
+  timing: ScheduleTiming;
+  action: ScheduleAction;
+  status: ScheduleStatus;
   createdByUserId: string;
   createdAt: number;
   lastFiredAt?: number;
 }
 
-export type CronJobStatus = 'active' | 'deleted';
+export type RunStatus = 'queued' | 'dispatched' | 'running' | 'completed' | 'failed';
 
-/** Session-level cron: fires a wakeup turn in the same session context */
-export interface CronJob {
+/** One execution attempt of a ticket or a session turn */
+export interface Run {
   id: string;
-  sessionId: string;
-  spaceId: string;
-  /** 5-field cron expression interpreted in `timezone` */
-  cron: string;
-  prompt: string;
-  recurring: boolean;
-  timezone: string;
-  status: CronJobStatus;
+  work: { kind: 'ticket'; ticketId: string } | { kind: 'turn'; sessionId: string };
+  attempt: number;
+  workerId?: string;
+  status: RunStatus;
   createdAt: number;
-  lastFiredAt?: number;
+  startedAt?: number;
+  completedAt?: number;
 }

@@ -1,5 +1,10 @@
 /**
  * Wire protocol event and envelope definitions for Meepo
+ *
+ * Unified execution model:
+ * - Schedule: when work is produced (timing + action).
+ * - Ticket / Turn: the two work units (independent vs session-bound).
+ * - Run: one execution attempt of a Ticket or Turn.
  */
 
 export type ProtocolVersion = 'v1';
@@ -15,7 +20,7 @@ export interface WorkerHeartbeatPayload {
     cpuUsage?: number;
     memoryUsage?: number;
   };
-  activeTaskIds: string[];
+  activeRunIds: string[];
 }
 
 /** Registration payload sent upon initial connection */
@@ -46,23 +51,22 @@ export interface WorkerRegisterResult {
   heartbeatIntervalSeconds: number;
 }
 
-/** Server-initiated steering message injected into an in-flight agent turn */
-export interface TaskSteerPayload {
-  taskId: string;
+/** Server-initiated steering message injected into an in-flight run */
+export interface RunSteerPayload {
+  runId: string;
   message: string;
 }
 
-/** Server-initiated cancellation of a running task */
-export interface TaskAbortPayload {
-  taskId: string;
+/** Server-initiated cancellation of a run */
+export interface RunAbortPayload {
+  runId: string;
   reason?: string;
 }
 
 /** Where a dispatched unit of work originates */
 export type DispatchSource =
   | { kind: 'user_message'; messageId: string }
-  | { kind: 'cron'; jobId: string; coalescedCount: number; stale: boolean }
-  | { kind: 'reminder'; reminderId: string }
+  | { kind: 'schedule'; scheduleId: string; coalescedCount: number; stale: boolean }
   | { kind: 'webhook'; event: string }
   | { kind: 'system' };
 
@@ -78,12 +82,12 @@ export interface ModelConfig {
   model: string;
 }
 
-/** Session dispatch: a turn inside an existing (or newly created) session context */
-export interface SessionDispatchEnvelope {
-  taskId: string;
+/** Turn dispatch: a turn inside an existing (or newly created) session context */
+export interface TurnDispatchEnvelope {
+  runId: string;
   sessionId: string;
   spaceId: string;
-  sessionKind: 'main' | 'task';
+  sessionKind: 'main' | 'thread';
   prompt: string;
   source: DispatchSource;
   delivery: DeliveryMode;
@@ -95,7 +99,7 @@ export interface SessionDispatchEnvelope {
 
 /** Ticket dispatch: a fresh, isolated execution context */
 export interface TicketDispatchEnvelope {
-  taskId: string;
+  runId: string;
   ticketId: string;
   spaceId: string;
   objective: string;
@@ -123,14 +127,25 @@ export interface SessionSnapshot {
   messages: TranscriptMessage[];
 }
 
-/** Cron tool proxy: create a session-scoped cron job */
+/** Timing rule for a schedule: one-shot (`at`) or recurring (`cron`) */
+export type Timing =
+  { kind: 'at'; at: number } | { kind: 'cron'; expression: string; timezone?: string };
+
+/** Agent tool: schedule a wakeup for the calling session (resume_session action) */
 export interface CronCreateParams {
   sessionId: string;
-  /** 5-field cron expression interpreted in `timezone` */
-  cron: string;
   prompt: string;
-  recurring: boolean;
-  timezone?: string;
+  timing: Timing;
+}
+
+/** Agent tool: create an independent ticket (create_ticket action or direct) */
+export interface TicketCreateParams {
+  sessionId: string;
+  objective: string;
+  contextSummary?: string;
+  requiredTags?: string[];
+  /** When to run; omit for immediate dispatch */
+  timing?: Timing;
 }
 
 export interface CronListParams {
@@ -139,52 +154,56 @@ export interface CronListParams {
 
 export interface CronDeleteParams {
   sessionId: string;
-  jobId: string;
+  scheduleId: string;
 }
 
-/** Cron job as returned to the agent and console */
-export interface CronJobView {
+/** Schedule as returned to the agent and console */
+export interface ScheduleView {
   id: string;
-  sessionId: string;
-  cron: string;
-  prompt: string;
-  recurring: boolean;
-  timezone: string;
+  action: 'create_ticket' | 'resume_session';
+  timing: Timing;
+  prompt?: string;
+  objective?: string;
   nextFireAt: number | null;
   createdAt: number;
   lastFiredAt?: number;
 }
 
+/** Result of a ticket.create call: direct ticket or a scheduled action */
+export type TicketCreateResult =
+  | { kind: 'ticket'; ticket: { id: string; objective: string; status: string } }
+  | { kind: 'schedule'; schedule: ScheduleView };
+
 /** Streaming events emitted by Worker -> Server */
 export type WorkerStreamEvent =
   | {
-      type: 'task_started';
-      taskId: string;
+      type: 'run_started';
+      runId: string;
       workerId: string;
       sessionId?: string;
       ticketId?: string;
     }
-  | { type: 'text_delta'; taskId: string; delta: string }
-  | { type: 'thinking_delta'; taskId: string; delta: string }
+  | { type: 'text_delta'; runId: string; delta: string }
+  | { type: 'thinking_delta'; runId: string; delta: string }
   | {
       type: 'tool_execution_start';
-      taskId: string;
+      runId: string;
       toolName: string;
       toolCallId: string;
       args: unknown;
     }
-  | { type: 'tool_execution_update'; taskId: string; toolCallId: string; partialResult: unknown }
+  | { type: 'tool_execution_update'; runId: string; toolCallId: string; partialResult: unknown }
   | {
       type: 'tool_execution_end';
-      taskId: string;
+      runId: string;
       toolCallId: string;
       result: unknown;
       isError: boolean;
     }
   | {
-      type: 'task_completed';
-      taskId: string;
+      type: 'run_completed';
+      runId: string;
       resultSummary?: string;
       usage?: { inputTokens: number; outputTokens: number };
     }
-  | { type: 'task_failed'; taskId: string; error: string; code?: string };
+  | { type: 'run_failed'; runId: string; error: string; code?: string };

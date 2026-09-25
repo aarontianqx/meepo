@@ -2,19 +2,19 @@
 
 ## 1. Overview
 
-While interactive sessions are optimized for synchronous dialogue, complex coding operations (multi-file refactorings, test suite runs, automated migrations, scheduled jobs) are modeled as **Tickets**.
+While interactive sessions are optimized for synchronous dialogue, complex or deferred operations (multi-file refactorings, test suite runs, automated migrations, scheduled jobs) are modeled as **Tickets** — independent, self-contained work units.
 
 ## 2. Ticket Lifecycle
 
 ```
-[Trigger: Bot intent / Webhook / Reminder]
+[Trigger: Agent intent / Webhook / Schedule fire]
                  │
                  ▼
       [Create Ticket in Server]
         (Status: Pending)
                  │
                  ▼
-     [Worker Claim / Dispatch]
+     [Worker Claim / Run Dispatch]
         (Status: Running)
                  │
                  ▼
@@ -29,8 +29,10 @@ While interactive sessions are optimized for synchronous dialogue, complex codin
         (Status: Completed)
                  │
                  ▼
-[Notify Feishu Thread with PR Link]
+[Notify Origin Session / Feishu Thread]
 ```
+
+Every dispatch of a ticket creates a **Run**; a retry is a new Run with an incremented `attempt` (see `specs/features/triggers-and-scheduling.md`).
 
 ## 3. Data Model
 
@@ -42,7 +44,9 @@ interface Ticket {
   objective: string;
   contextSummary?: string;
   requiredTags: string[];
-  status: 'pending' | 'claimed' | 'running' | 'completed' | 'failed';
+  /** Session the result reports back to, when created from one */
+  originSessionId?: string;
+  status: 'pending' | 'claimed' | 'running' | 'completed' | 'failed' | 'cancelled';
   assignedWorkerId?: string;
   result?: {
     branch?: string;
@@ -61,9 +65,9 @@ Tickets are a **generic async-task mechanism**: they may or may not involve a re
 
 A ticket is created by any of:
 
-- **Bot intent**: the main assistant formalizes a user request into a ticket.
+- **Agent intent**: the agent formalizes a request into a ticket via the `TicketCreate` tool.
 - **Webhooks**: external systems (CI, monitoring) push events that materialize as tickets.
-- **Reminders**: a task-level scheduled trigger — a self-contained objective bundle plus a fire time or cron expression — creates a fresh ticket at fire time. Reminders are space-scoped and independent of any conversation (contrast with session crons; see `specs/features/triggers-and-scheduling.md`).
+- **Schedule fires**: a `Schedule` with `action: create_ticket` materializes a fresh ticket at fire time (see `specs/features/triggers-and-scheduling.md`).
 
 Tickets are exempt from session affinity: any enrolled, tag-matched worker with a free slot may claim a ticket.
 
@@ -71,4 +75,4 @@ Tickets are exempt from session affinity: any enrolled, tag-matched worker with 
 
 - **Clean Execution Context**: The worker receives a concise, curated `objective` rather than a sprawling 50-turn chat history.
 - **Fault Tolerance**: If a worker disconnects mid-task, the ticket resets to `pending` and can be claimed by another worker.
-- **Full Traceability**: Output commits, PR links, and token costs are cleanly tracked per ticket.
+- **Full Traceability**: Output commits, PR links, and token costs are cleanly tracked per ticket, and every execution attempt is recorded as a Run.

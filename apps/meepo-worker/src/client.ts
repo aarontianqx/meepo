@@ -7,10 +7,10 @@ import {
   WORKER_CHANNEL_METHODS,
   type RpcErrorBody,
   type RpcFrame,
-  type SessionDispatchEnvelope,
-  type TaskAbortPayload,
-  type TaskSteerPayload,
+  type RunAbortPayload,
+  type RunSteerPayload,
   type TicketDispatchEnvelope,
+  type TurnDispatchEnvelope,
   type WorkerChannelDownstream,
   type WorkerHeartbeatPayload,
   type WorkerRegisterPayload,
@@ -27,10 +27,10 @@ type Logger = Pick<Console, 'info' | 'warn' | 'error'>;
 
 /** Callbacks for server-pushed notifications, injected by the composition root. */
 export interface WorkerClientHandlers {
-  onSessionDispatch: (envelope: SessionDispatchEnvelope) => void;
+  onTurnDispatch: (envelope: TurnDispatchEnvelope) => void;
   onTicketDispatch: (envelope: TicketDispatchEnvelope) => void;
-  onTaskSteer: (payload: TaskSteerPayload) => void;
-  onTaskAbort: (payload: TaskAbortPayload) => void;
+  onRunSteer: (payload: RunSteerPayload) => void;
+  onRunAbort: (payload: RunAbortPayload) => void;
 }
 
 interface PendingRequest {
@@ -50,7 +50,7 @@ export class WorkerClient {
   private reconnectDelayMs = 1_000;
   private requestCounter = 0;
   private readonly pending = new Map<string, PendingRequest>();
-  private readonly activeTaskIds = new Set<string>();
+  private readonly activeRunIds = new Set<string>();
 
   constructor(
     private readonly config: WorkerConfig,
@@ -85,13 +85,13 @@ export class WorkerClient {
     this.send({ kind: 'notification', event, payload });
   }
 
-  /** Track a task as running so heartbeats report accurate capacity. */
-  taskStarted(taskId: string): void {
-    this.activeTaskIds.add(taskId);
+  /** Track a run as active so heartbeats report accurate capacity. */
+  runStarted(runId: string): void {
+    this.activeRunIds.add(runId);
   }
 
-  taskFinished(taskId: string): void {
-    this.activeTaskIds.delete(taskId);
+  runFinished(runId: string): void {
+    this.activeRunIds.delete(runId);
   }
 
   private connect(): void {
@@ -174,17 +174,17 @@ export class WorkerClient {
 
   private onNotification(event: string, payload: unknown): void {
     switch (event) {
-      case WORKER_CHANNEL_EVENTS.sessionDispatch:
-        this.handlers.onSessionDispatch(payload as SessionDispatchEnvelope);
+      case WORKER_CHANNEL_EVENTS.turnDispatch:
+        this.handlers.onTurnDispatch(payload as TurnDispatchEnvelope);
         break;
       case WORKER_CHANNEL_EVENTS.ticketDispatch:
         this.handlers.onTicketDispatch(payload as TicketDispatchEnvelope);
         break;
-      case WORKER_CHANNEL_EVENTS.taskSteer:
-        this.handlers.onTaskSteer(payload as TaskSteerPayload);
+      case WORKER_CHANNEL_EVENTS.runSteer:
+        this.handlers.onRunSteer(payload as RunSteerPayload);
         break;
-      case WORKER_CHANNEL_EVENTS.taskAbort:
-        this.handlers.onTaskAbort(payload as TaskAbortPayload);
+      case WORKER_CHANNEL_EVENTS.runAbort:
+        this.handlers.onRunAbort(payload as RunAbortPayload);
         break;
       default:
         this.logger.warn(`unknown server event: ${event}`);
@@ -197,8 +197,8 @@ export class WorkerClient {
       const payload: WorkerHeartbeatPayload = {
         workerId: this.config.workerId,
         timestamp: Date.now(),
-        capacity: { maxSlots: this.config.maxSlots, activeSlots: this.activeTaskIds.size },
-        activeTaskIds: [...this.activeTaskIds],
+        capacity: { maxSlots: this.config.maxSlots, activeSlots: this.activeRunIds.size },
+        activeRunIds: [...this.activeRunIds],
       };
       this.rpc(WORKER_CHANNEL_METHODS.heartbeat, payload).catch((err: Error) => {
         this.logger.warn(`heartbeat failed: ${err.message}`);

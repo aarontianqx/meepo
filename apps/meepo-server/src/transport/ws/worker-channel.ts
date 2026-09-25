@@ -11,20 +11,28 @@ import {
   type RpcRequest,
   type RpcResponse,
   type SessionSnapshotParams,
+  type TicketCreateParams,
+  type TicketCreateResult,
   type WorkerChannelDownstream,
   type WorkerHeartbeatPayload,
   type WorkerRegisterPayload,
   type WorkerStreamEvent,
 } from '@meepo/protocol';
 
+import type { DispatchService } from '../../domain/dispatch/dispatch-service.js';
 import type { WorkerSender } from '../../domain/dispatch/worker-sender.js';
-import { DomainError } from '../../domain/errors.js';
+import { DomainError, validation } from '../../domain/errors.js';
 import type { SchedulerService } from '../../domain/schedule/scheduler-service.js';
+import type { SessionService } from '../../domain/sessions/session-service.js';
 import type { StreamProcessor } from '../../domain/sessions/stream-processor.js';
 import type { TranscriptService } from '../../domain/sessions/transcript-service.js';
+import type { TicketService } from '../../domain/tickets/ticket-service.js';
 import type { WorkerService } from '../../domain/workers/worker-service.js';
 
 type Logger = Pick<Console, 'info' | 'warn' | 'error'>;
+
+/** Agent-initiated schedules carry no user identity; attributed to the agent itself. */
+const AGENT_USER_ID = 'agent';
 
 const DOMAIN_TO_RPC_CODE: Record<DomainError['code'], string> = {
   not_found: RPC_ERROR_CODES.notFound,
@@ -36,23 +44,32 @@ const DOMAIN_TO_RPC_CODE: Record<DomainError['code'], string> = {
 export interface WorkerChannelDeps {
   workerService: WorkerService;
   schedulerService: SchedulerService;
+  sessionService: SessionService;
+  ticketService: TicketService;
   transcriptService: TranscriptService;
   streamProcessor: StreamProcessor;
 }
 
 /**
  * Handles the persistent worker WebSocket channel: registration, heartbeats,
- * session snapshots, cron tool proxying, and stream event ingestion. Also
- * implements the WorkerSender port used by the dispatch pipeline.
+ * session snapshots, scheduling tool proxying (cron.*, ticket.create), and
+ * stream event ingestion. Also implements the WorkerSender port used by the
+ * dispatch pipeline.
  */
 export class WorkerChannelHandler implements WorkerSender {
   private readonly sockets = new Map<string, WebSocket>();
   private onWorkerReady?: (workerId: string) => void;
+  private dispatchService?: DispatchService;
 
   constructor(
     private readonly deps: WorkerChannelDeps,
     private readonly logger: Logger = console
   ) {}
+
+  /** Late-bound because the dispatch service is created after the channel. */
+  setDispatchService(dispatchService: DispatchService): void {
+    this.dispatchService = dispatchService;
+  }
 
   /** Late-bound because the dispatch service is created after the channel. */
   setOnWorkerReady(callback: (workerId: string) => void): void {
@@ -116,14 +133,12 @@ export class WorkerChannelHandler implements WorkerSender {
           return;
         }
         case WORKER_CHANNEL_METHODS.cronCreate: {
-          const view = await this.deps.schedulerService.createCron(
-            frame.params as CronCreateParams
-          );
+          const view = await this.onCronCreate(frame.params as CronCreateParams);
           this.send(socket, { kind: 'response', id: frame.id, result: view });
           return;
         }
         case WORKER_CHANNEL_METHODS.cronList: {
-          const views = await this.deps.schedulerService.listCrons(
+          const views = await this.deps.schedulerService.listSessionSchedules(
             (frame.params as CronListParams).sessionId
           );
           this.send(socket, { kind: 'response', id: frame.id, result: views });
@@ -131,8 +146,16 @@ export class WorkerChannelHandler implements WorkerSender {
         }
         case WORKER_CHANNEL_METHODS.cronDelete: {
           const params = frame.params as CronDeleteParams;
-          await this.deps.schedulerService.deleteCron(params.sessionId, params.jobId);
+          await this.deps.schedulerService.deleteSessionSchedule(
+            params.sessionId,
+            params.scheduleId
+          );
           this.send(socket, { kind: 'response', id: frame.id, result: { deleted: true } });
+          return;
+        }
+        case WORKER_CHANNEL_METHODS.ticketCreate: {
+          const result = await this.onTicketCreate(frame.params as TicketCreateParams);
+          this.send(socket, { kind: 'response', id: frame.id, result });
           return;
         }
         default:
@@ -148,6 +171,61 @@ export class WorkerChannelHandler implements WorkerSender {
     } catch (err) {
       this.send(socket, { kind: 'response', id: frame.id, error: toRpcError(err) });
     }
+  }
+
+  /** cron.create: schedule a wakeup (`resume_session`) for the calling session. */
+  private async onCronCreate(params: CronCreateParams) {
+    const session = await this.deps.sessionService.getSession(params.sessionId);
+    const schedule = await this.deps.schedulerService.createSchedule(
+      {
+        spaceId: session.spaceId,
+        timing: params.timing,
+        action: { kind: 'resume_session', sessionId: session.id, prompt: params.prompt },
+      },
+      AGENT_USER_ID
+    );
+    return this.deps.schedulerService.toView(schedule);
+  }
+
+  /**
+   * ticket.create: without timing, an independent ticket is created and
+   * dispatched immediately; with timing, a `create_ticket` schedule. Either
+   * way the session becomes the ticket's origin for the result receipt.
+   */
+  private async onTicketCreate(params: TicketCreateParams): Promise<TicketCreateResult> {
+    const session = await this.deps.sessionService.getSession(params.sessionId);
+    if (!params.objective.trim()) throw validation('Ticket objective must not be empty');
+    if (!params.timing) {
+      const ticket = await this.deps.ticketService.createTicket({
+        spaceId: session.spaceId,
+        title: params.objective.trim().slice(0, 80),
+        objective: params.objective,
+        contextSummary: params.contextSummary,
+        requiredTags: params.requiredTags,
+        originSessionId: session.id,
+      });
+      if (!this.dispatchService) throw new Error('dispatch service is not wired');
+      await this.dispatchService.dispatchTicket(ticket.id);
+      return {
+        kind: 'ticket',
+        ticket: { id: ticket.id, objective: ticket.objective, status: ticket.status },
+      };
+    }
+    const schedule = await this.deps.schedulerService.createSchedule(
+      {
+        spaceId: session.spaceId,
+        timing: params.timing,
+        action: {
+          kind: 'create_ticket',
+          objective: params.objective,
+          contextSummary: params.contextSummary,
+          requiredTags: params.requiredTags,
+          originSessionId: session.id,
+        },
+      },
+      AGENT_USER_ID
+    );
+    return { kind: 'schedule', schedule: this.deps.schedulerService.toView(schedule) };
   }
 
   private async onRegister(socket: WebSocket, frame: RpcRequest): Promise<void> {

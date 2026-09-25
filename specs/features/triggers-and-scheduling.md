@@ -1,51 +1,93 @@
 # Feature: Triggers & Scheduling
 
-## 1. Two Primitives
+## 1. The Unified Model
 
-MEEPO distinguishes two scheduling primitives, which must never be conflated:
+MEEPO's execution domain answers exactly three questions:
 
-|                 | **Reminder** (task-level)              | **Cron** (session-level)                           |
-| --------------- | -------------------------------------- | -------------------------------------------------- |
-| Semantics       | Independent scheduled task             | Continuation of a conversation                     |
-| Binding         | Space-scoped; not bound to any session | Bound to one session                               |
-| Context at fire | Self-contained objective bundle        | The session's full transcript plus the cron prompt |
-| Fire action     | Creates a new ticket                   | Wakes the bound session for a new turn             |
-| Output          | A new thread / configured target       | The session's own thread                           |
+```
+Schedule ──fires──▶ Ticket | Turn ──executed as──▶ Run
+```
 
-## 2. Reminders
+| Noun | Question | Definition |
+|---|---|---|
+| **Schedule** | When does work get produced? | The single scheduling entity: `timing` (`at` or `cron`) + `action` (`create_ticket` or `resume_session`) |
+| **Ticket** | What work? (independent) | A self-contained objective bundle, executed in a fresh context; queueable, re-assignable, retryable |
+| **Turn** | What work? (in-session) | One continuation of an existing session, inheriting its context, pinned to its bound worker |
+| **Run** | Who ran it, to what state? | One execution attempt of a Ticket or a Turn |
+| **Session** | In which context? | The window-bound conversation container (`main` / `thread`) |
 
-- Carry everything execution needs in the bundle: objective, context summary, required tags.
-- At fire time the scheduler materializes the reminder as a ticket; from there it follows the normal ticket pipeline (any eligible worker, fresh worktree).
-- Typical uses: "audit the repo every night", "check the dependency advisory feed hourly".
+Retired concepts: **Reminder** and **CronJob** as entities (both are just `Schedule` actions), `cron` as a concept (it is only a time-expression syntax), `recurring` booleans (one-shot is `at`, recurring is `cron`), **wakeup** (a Turn whose source is a schedule fire), and `taskId` (it is `runId`).
 
-## 3. Crons
+## 2. Schedule
 
-- Created by the agent mid-session via `CronCreate` / `CronList` / `CronDelete` tools. The interface takes only a cron expression, a prompt, and a recurring flag — session binding is implicit from the calling session.
-- Crons are either **one-shot** (`recurring: false` — e.g. "check production an hour after the merge": fires once, then auto-deletes) or **recurring**.
-- Records are stored server-side as durable entries in the session's event stream, and are cascade-deleted when the session closes. Workers hold no timers.
-- At fire time the scheduler dispatches a `session.wakeup` to the bound worker: the cron prompt, wrapped in an origin envelope carrying scheduling metadata, starts a new turn in the existing context. Output streams to the session's thread.
-- Typical uses: "poll CI until green, then continue", "check the deployment in 30 minutes and verify the page".
+```typescript
+interface Schedule {
+  id: string;
+  spaceId: string;
+  timing:
+    | { kind: 'at'; at: number }
+    | { kind: 'cron'; expression: string; timezone?: string };
+  action:
+    | { kind: 'create_ticket'; objective: string; contextSummary?: string;
+        requiredTags?: string[]; originSessionId?: string }
+    | { kind: 'resume_session'; sessionId: string; prompt: string };
+  status: 'active' | 'done' | 'deleted';
+  createdByUserId: string;
+  createdAt: number;
+  lastFiredAt?: number;
+}
+```
+
+- **`create_ticket`**: at fire time a new Ticket is materialized and dispatched. No staleness constraint.
+- **`resume_session`**: at fire time a Turn is dispatched into the bound session, in the existing context. A recurring resume schedule older than 7 days fires one final time marked `stale`, then becomes `done` — forgotten automation must never run forever.
 
 ### Reliability Semantics
 
 - **Busy sessions**: a fire due during an active turn is held and delivered at the next idle moment — never injected mid-turn.
-- **Coalescing**: multiple missed fires collapse into a single delivery annotated with a `coalescedCount`; the agent treats it as "only the latest state matters".
-- **Jitter**: deterministic per-job jitter spreads recurring fires to avoid thundering herds.
+- **Coalescing**: multiple missed fires collapse into one, annotated with a `coalescedCount`.
+- **Jitter**: deterministic per-schedule offset spreads recurring fires.
 - **At-least-once**: when no worker is available, the fire queues server-side (coalescing) rather than dropping.
-- **Staleness**: a recurring cron older than 7 days fires one final time marked `stale`, then is deleted — forgotten automation must never run forever, and the agent renews intent by recreating the cron. One-shot crons and reminders are exempt.
 
-## 4. Timezones
+## 3. Ticket
 
-- All records store and schedule in UTC.
-- Each record carries a `timezone` (IANA name) defaulting to the **space's configured timezone** — never the worker's local timezone, since the server is authoritative.
-- Cron expressions and timezone-naive inputs are interpreted in the record's timezone.
-- Cron expressions are strictly 5-field; 6-field Quartz-style expressions are rejected.
+A Ticket is the independent work unit. Its lifecycle:
 
-## 5. Unified Trigger Model
+```
+pending → claimed → running → completed | failed | cancelled
+```
 
-User messages, reminders, crons, and webhooks all enter the same dispatch pipeline, distinguished only by their `source` and delivery semantics (`urgent` / `wait` / `if_idle`). The pipeline forks into exactly two paths:
+- Self-contained by design: the objective bundle carries everything execution needs.
+- Any eligible worker may claim it (no affinity); on worker disconnect it returns to `pending` and another worker picks it up — each retry is a new Run with an incremented `attempt`.
+- A ticket created from a session carries `originSessionId`, so its result can be reported back to that conversation.
 
-- **Ticket dispatch** — builds a new execution context (reminders, webhooks, batch jobs).
-- **Session wakeup** — resumes an existing context (crons, queued user turns).
+## 4. Turn
 
-Non-user triggers render as proactive messages in the thread rather than replies to a specific user message.
+A Turn is one continuation of a session. User messages, schedule fires (`resume_session`), webhooks, and proactive agent triggers all materialize as Turns, distinguished only by their `source` and delivery semantics (`urgent` / `wait` / `if_idle`). A Turn always routes to the session's bound worker and runs in the session's context.
+
+## 5. Run
+
+Every dispatch of a Ticket or a Turn to a worker creates a **Run**:
+
+```typescript
+interface Run {
+  id: string;
+  work: { kind: 'ticket'; ticketId: string } | { kind: 'turn'; sessionId: string };
+  attempt: number;
+  workerId?: string;
+  status: 'queued' | 'dispatched' | 'running' | 'completed' | 'failed';
+  createdAt: number;
+  startedAt?: number;
+  completedAt?: number;
+}
+```
+
+Stream events, heartbeat `activeRunIds`, and execution state all hang off the Run. Every run ends with exactly one terminal state.
+
+## 6. Agent-Facing Tools
+
+The agent sees exactly two scheduling tools, one per action kind:
+
+- **`CronCreate`** — schedules a wakeup for the **current session** (`resume_session`): "continue this conversation later, with full context."
+- **`TicketCreate`** — creates an **independent** task (`create_ticket`), immediately or on a timing rule: "runs in a fresh context with no access to this conversation."
+
+The boundary is context continuity, never timing.

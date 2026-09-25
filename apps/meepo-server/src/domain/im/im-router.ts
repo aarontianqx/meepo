@@ -22,7 +22,7 @@ export type InboundDecision =
       windowId: string;
       /** 'prewarm' means the gateway must spawn the thread first (main-stream mention) */
       threadRef: { kind: 'thread'; threadId: string } | { kind: 'prewarm' };
-      sessionKind: 'main' | 'task';
+      sessionKind: 'main' | 'thread';
       spaceId: string;
       /** Thread sessions are seeded with existing thread history on creation */
       seedThreadHistory: boolean;
@@ -50,8 +50,8 @@ export const GROUP_MAIN_SUB_ID = '_group';
  *
  * Session model:
  * - Private chat: one main session per user, no threads, always answered.
- * - Group thread: the thread's task session (only when engaged or mentioned).
- * - Group main stream: a fresh mention spawns a new thread+task session;
+ * - Group thread: the thread's session (only when engaged or mentioned).
+ * - Group main stream: a fresh mention spawns a new thread+thread session;
  *   a reply involving the bot continues the group's main session instead.
  */
 export function decideInbound(msg: InboundMessage, ctx: InboundContext): InboundDecision {
@@ -90,7 +90,7 @@ export function decideInbound(msg: InboundMessage, ctx: InboundContext): Inbound
         action: 'dispatch',
         windowId,
         threadRef: { kind: 'thread', threadId: msg.threadId },
-        sessionKind: 'task',
+        sessionKind: 'thread',
         spaceId,
         seedThreadHistory: !engaged,
       };
@@ -118,7 +118,7 @@ export function decideInbound(msg: InboundMessage, ctx: InboundContext): Inbound
       action: 'dispatch',
       windowId: windowIdOf(msg.chatId, msg.messageId),
       threadRef: { kind: 'prewarm' },
-      sessionKind: 'task',
+      sessionKind: 'thread',
       spaceId,
       seedThreadHistory: false,
     };

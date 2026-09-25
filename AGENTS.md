@@ -38,7 +38,7 @@ meepo/
 | Space & Chat Mapping  | Multi-chat to Space isolation model                | `specs/features/space-and-chat.md`           |
 | Interactive Session   | Real-time Thread routing & streaming               | `specs/features/interactive-session.md`      |
 | Ticket Pipeline       | Async task & batch run pipeline                    | `specs/features/ticket-pipeline.md`          |
-| Triggers & Scheduling | Reminder vs cron primitives, unified trigger model | `specs/features/triggers-and-scheduling.md`  |
+| Triggers & Scheduling | Unified Schedule/Ticket/Turn/Run execution model | `specs/features/triggers-and-scheduling.md`  |
 | Backend Layering      | Dependency & placement rules for heavy backends    | `specs/architecture/backend-layering.md`     |
 
 ## Coding Style & Guard Rails
@@ -55,7 +55,7 @@ meepo/
 ### Architecture Constraints
 
 - **Server Owns Truth; Worker Owns Live State**: `meepo-server` is the SST for persistent configuration, space long-term memory, session transcripts, and tickets. Workers own inherently local state (agent process, workspace, uncommitted changes): stateless across ticket lifetimes, but sticky for sessions.
-- **Hard Session–Worker Affinity**: A session is pinned to one worker at creation and never migrates implicitly — main sessions follow the space's `boundWorkerId`, task sessions their dispatch target. Worker offline means the session pauses; rebinding is a deliberate user action. Tickets are exempt.
+- **Hard Session–Worker Affinity**: A session is pinned to one worker at creation and never migrates implicitly — main sessions follow the space's `boundWorkerId`, thread sessions their dispatch target. Worker offline means the session pauses; rebinding is a deliberate user action. Tickets are exempt.
 - **Slot Isolation**: A worker's slot defines its maximum concurrency limit. When `slot > 1`, tasks MUST run in isolated `git worktree` directories to prevent file collisions.
 - **Clean Worker Context**: Workers executing coding tasks must receive structured objective bundles rather than uncurated conversational chat logs.
 - **Protocol Independence**: Payloads between server and worker must conform to `@meepo/protocol` contracts and serialize cleanly to JSON/CBOR.

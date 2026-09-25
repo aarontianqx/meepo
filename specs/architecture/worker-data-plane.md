@@ -35,10 +35,10 @@ The `meepo-worker` is a self-hosted runner daemon executing on developer machine
 ### 4. Delivery, Steering & Wakeup
 
 - Applies three delivery semantics to incoming work: `urgent` (steer into the active turn), `wait` (queue behind it), `if_idle` (drop when busy). Consecutive queued messages may merge into a single turn.
-- Handles `session.wakeup` envelopes (cron fires): cold-starts the session from the server snapshot if needed, then runs a turn in the restored context.
+- Handles `turn.dispatch` envelopes (user turns and schedule fires): cold-starts the session from the server snapshot if needed, then runs a turn in the restored context.
 - Listens for server-initiated `abort` signals and cancels running tool child processes.
 
 ### 5. Server-Backed Tools
 
-- Cron tools (`CronCreate` / `CronList` / `CronDelete`) proxy to the server; cron records live server-side, scoped to the calling session. The worker holds no timers or scheduler of its own.
+- Scheduling tools (`CronCreate` / `CronList` / `CronDelete` for session wakeups, `TicketCreate` for independent tasks) proxy to the server; schedule records live server-side. The worker holds no timers or scheduler of its own.
 - Context tools (history, space memory) query the server rather than local state, keeping the worker free of authoritative data.

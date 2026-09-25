@@ -1,15 +1,17 @@
 import { randomUUID } from 'node:crypto';
 
-import type { Space, WorkerNode } from '@meepo/core';
-import type {
-  DeliveryMode,
-  DispatchSource,
-  ModelConfig,
-  SessionDispatchEnvelope,
-  TicketDispatchEnvelope,
+import type { Run, SessionKind, Space, WorkerNode } from '@meepo/core';
+import {
+  WORKER_CHANNEL_EVENTS,
+  type DeliveryMode,
+  type DispatchSource,
+  type ModelConfig,
+  type TicketDispatchEnvelope,
+  type TurnDispatchEnvelope,
 } from '@meepo/protocol';
 
 import { conflict, notFound, validation } from '../errors.js';
+import type { RunRepository } from '../runs/run-repository.js';
 import type { SessionRepository } from '../sessions/session-repository.js';
 import type { TranscriptService } from '../sessions/transcript-service.js';
 import type { SpaceRepository } from '../spaces/space-repository.js';
@@ -33,10 +35,11 @@ export interface DispatchOutcome {
 }
 
 /**
- * Routes work to workers. Sessions are pinned: main sessions to the space's
- * boundWorkerId, task sessions to a randomly chosen eligible worker; a bound
- * worker being offline queues the turn server-side. Tickets are claimed by
- * any eligible, least-loaded worker.
+ * Routes work to workers; every dispatch materializes a Run. Sessions are
+ * pinned: main sessions to the space's boundWorkerId, thread sessions to a
+ * randomly chosen eligible worker; a bound worker being offline queues the
+ * turn server-side. Tickets are claimed by any eligible, least-loaded worker,
+ * each (re)dispatch a new Run with an incremented attempt.
  */
 export class DispatchService {
   constructor(
@@ -44,6 +47,7 @@ export class DispatchService {
     private readonly spaces: SpaceRepository,
     private readonly workers: WorkerRepository,
     private readonly tickets: TicketRepository,
+    private readonly runs: RunRepository,
     private readonly queue: DispatchQueueRepository,
     private readonly sender: WorkerSender,
     private readonly transcripts: TranscriptService,
@@ -65,16 +69,26 @@ export class DispatchService {
     });
 
     const workerId = session.boundWorkerId ?? (await this.bindSessionWorker(session.id, space));
-    const envelope = this.buildSessionEnvelope(session.id, session.kind, space, {
+    const envelope = this.buildTurnEnvelope(session.id, session.kind, space, {
       ...input,
       prompt,
     });
     const worker = await this.workers.getById(workerId);
+    const online = worker && worker.status !== 'offline' && this.sender.isConnected(workerId);
 
-    if (worker && worker.status !== 'offline' && this.sender.isConnected(workerId)) {
+    await this.runs.save({
+      id: envelope.runId,
+      work: { kind: 'turn', sessionId: session.id },
+      attempt: 1,
+      workerId,
+      status: online ? 'dispatched' : 'queued',
+      createdAt: Date.now(),
+    });
+
+    if (online) {
       this.sender.sendToWorker(workerId, {
         kind: 'notification',
-        event: 'session.dispatch',
+        event: WORKER_CHANNEL_EVENTS.turnDispatch,
         payload: envelope,
       });
       return { dispatched: true, queued: false, workerId };
@@ -106,8 +120,16 @@ export class DispatchService {
     )[0];
     if (!worker) return { dispatched: false, queued: false };
 
+    const run: Run = {
+      id: randomUUID(),
+      work: { kind: 'ticket', ticketId: ticket.id },
+      attempt: (await this.runs.latestAttempt(ticket.id)) + 1,
+      workerId: worker.id,
+      status: 'dispatched',
+      createdAt: Date.now(),
+    };
     const envelope: TicketDispatchEnvelope = {
-      taskId: randomUUID(),
+      runId: run.id,
       ticketId: ticket.id,
       spaceId: space.id,
       objective: ticket.objective,
@@ -116,9 +138,10 @@ export class DispatchService {
       model,
       source: { kind: 'system' },
     };
+    await this.runs.save(run);
     this.sender.sendToWorker(worker.id, {
       kind: 'notification',
-      event: 'ticket.dispatch',
+      event: WORKER_CHANNEL_EVENTS.ticketDispatch,
       payload: envelope,
     });
 
@@ -157,10 +180,18 @@ export class DispatchService {
     const merged = mergeQueued(queued);
     this.sender.sendToWorker(workerId, {
       kind: 'notification',
-      event: 'session.dispatch',
+      event: WORKER_CHANNEL_EVENTS.turnDispatch,
       payload: merged,
     });
     await this.queue.deleteBySession(sessionId);
+    for (const item of queued) {
+      const run = await this.runs.getById(item.envelope.runId);
+      if (run && run.status === 'queued') {
+        run.status = 'dispatched';
+        run.workerId = workerId;
+        await this.runs.save(run);
+      }
+    }
     return queued.length;
   }
 
@@ -204,16 +235,16 @@ export class DispatchService {
     );
   }
 
-  private buildSessionEnvelope(
+  private buildTurnEnvelope(
     sessionId: string,
-    sessionKind: 'main' | 'task',
+    sessionKind: SessionKind,
     space: Space,
     input: DispatchSessionTurnInput
-  ): SessionDispatchEnvelope {
+  ): TurnDispatchEnvelope {
     const model = space.model ?? this.defaultModel;
     if (!model) throw validation(`No model configured for space ${space.id} or server default`);
     return {
-      taskId: randomUUID(),
+      runId: randomUUID(),
       sessionId,
       spaceId: space.id,
       sessionKind,
@@ -237,7 +268,7 @@ function composeSystemPromptContribution(space: Space): string {
   return parts.join('\n\n');
 }
 
-function mergeQueued(queued: QueuedDispatch[]): SessionDispatchEnvelope {
+function mergeQueued(queued: QueuedDispatch[]): TurnDispatchEnvelope {
   const latest = queued[queued.length - 1].envelope;
   if (queued.length === 1) return latest;
   const mergedPrompt = queued
@@ -246,16 +277,13 @@ function mergeQueued(queued: QueuedDispatch[]): SessionDispatchEnvelope {
   return { ...latest, prompt: mergedPrompt, delivery: 'wait' };
 }
 
-/** Wraps scheduled triggers in an origin envelope so the agent knows why it woke. */
+/** Wraps schedule fires in an origin envelope so the agent knows why it woke. */
 function formatPromptWithSource(prompt: string, source: DispatchSource): string {
-  if (source.kind === 'cron') {
+  if (source.kind === 'schedule') {
     return (
-      `<cron-fire jobId="${source.jobId}" coalescedCount="${source.coalescedCount}" ` +
-      `stale="${source.stale}">\n${prompt}\n</cron-fire>`
+      `<schedule-fire scheduleId="${source.scheduleId}" coalescedCount="${source.coalescedCount}" ` +
+      `stale="${source.stale}">\n${prompt}\n</schedule-fire>`
     );
-  }
-  if (source.kind === 'reminder') {
-    return `<reminder-fire reminderId="${source.reminderId}">\n${prompt}\n</reminder-fire>`;
   }
   return prompt;
 }

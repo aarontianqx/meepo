@@ -59,7 +59,7 @@ describe('decideInbound', () => {
     expect(decision).toMatchObject({
       action: 'dispatch',
       threadRef: { kind: 'prewarm' },
-      sessionKind: 'task',
+      sessionKind: 'thread',
       spaceId: 'sp1',
     });
   });
@@ -91,7 +91,7 @@ describe('decideInbound', () => {
     expect(decision).toMatchObject({
       action: 'dispatch',
       threadRef: { kind: 'thread', threadId: 'omt_1' },
-      sessionKind: 'task',
+      sessionKind: 'thread',
       seedThreadHistory: false,
     });
   });
@@ -103,7 +103,7 @@ describe('decideInbound', () => {
     );
     expect(decision).toMatchObject({
       action: 'dispatch',
-      sessionKind: 'task',
+      sessionKind: 'thread',
       seedThreadHistory: true,
     });
   });

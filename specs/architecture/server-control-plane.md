@@ -23,15 +23,15 @@ The `meepo-server` application coordinates multi-chat inbound traffic, manages s
 
 ### 3. Session Store (Single Source of Truth)
 
-- Persists the authoritative session event stream: user and agent messages, tool executions, and durable state records (e.g. cron definitions) as one ordered log per session, plus a materialized current-state projection for routing and queries.
+- Persists the authoritative session event stream: user and agent messages, tool executions, and durable state records as one ordered log per session, plus a materialized current-state projection for routing and queries.
 - Buffers incoming stream deltas per turn and persists them at turn boundaries.
 - Provides full snapshots for worker cold-starts (incremental sync is a later optimization).
 
 ### 4. Dispatcher & Load Balancer
 
-- Two dispatch paths share one pipeline: **ticket dispatch** (new execution context) and **session wakeup** (existing context).
+- Two dispatch paths share one pipeline: **ticket dispatch** (new execution context) and **turn dispatch** (existing session context).
 - Session routing is binding lookup, not selection: a session always routes to the worker it was bound to at creation.
-- Creation-time binding depends on session type: main sessions (private-chat and main-window conversations) bind to the space's `boundWorkerId`; task sessions pick a randomly chosen eligible worker — a routing-policy hook is reserved for future identity-aware placement (e.g. preferring the triggering user's own machine).
+- Creation-time binding depends on session type: main sessions (private-chat and main-window conversations) bind to the space's `boundWorkerId`; thread sessions pick a randomly chosen eligible worker — a routing-policy hook is reserved for future identity-aware placement (e.g. preferring the triggering user's own machine).
 - Only tickets involve worker selection: any enrolled, tag-matched worker with a free slot, preferring the least-loaded.
 - When the bound worker is offline, session messages queue server-side and coalesce; delivery resumes when the worker reconnects under its stable `workerId` and queued dispatches flush.
 - A periodic sweep retries pending tickets as worker slots free up.
@@ -44,7 +44,7 @@ The `meepo-server` application coordinates multi-chat inbound traffic, manages s
 
 ### 6. Scheduler
 
-- Owns both time-based primitives: **reminders** (task-level; fire creates a ticket) and **crons** (session-level; fire wakes the bound session). See `specs/features/triggers-and-scheduling.md`.
+- Owns the single scheduling entity **Schedule**, with two action kinds: `create_ticket` (fire creates a ticket) and `resume_session` (fire dispatches a turn into the bound session). See `specs/features/triggers-and-scheduling.md`.
 - Stores durable, server-side records; an in-process fire loop dispatches due entries.
 - Missed fires coalesce into a single delivery with a coalesced count; per-job deterministic jitter avoids thundering herds.
 - Dispatch is at-least-once: when no worker is available, the fire queues (coalescing) rather than dropping.

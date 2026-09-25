@@ -1,224 +1,195 @@
 import { randomUUID } from 'node:crypto';
 
-import type { CronJob, Reminder, ScheduleTrigger } from '@meepo/core';
-import type { CronCreateParams, CronJobView } from '@meepo/protocol';
+import type { Schedule, ScheduleAction, ScheduleTiming } from '@meepo/core';
+import type { ScheduleView } from '@meepo/protocol';
 
 import { notFound, validation } from '../errors.js';
 import type { SessionRepository } from '../sessions/session-repository.js';
 import type { SpaceRepository } from '../spaces/space-repository.js';
 import { assertValidCron, assertValidTimezone, nextFireAfter } from './cron-expression.js';
-import type { CronRepository } from './cron-repository.js';
-import type { ReminderRepository } from './reminder-repository.js';
+import type { ScheduleRepository } from './schedule-repository.js';
 
-export const MAX_CRON_JOBS_PER_SESSION = 50;
-export const CRON_STALE_THRESHOLD_MS = 7 * 24 * 60 * 60 * 1000;
+export const MAX_SCHEDULES_PER_SESSION = 50;
+export const SCHEDULE_STALE_THRESHOLD_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_COALESCE_ITERATIONS = 10_000;
 const MAX_JITTER_MS = 15 * 60_000;
 
-export type DueFire =
-  | { kind: 'cron'; job: CronJob; coalescedCount: number; stale: boolean }
-  | { kind: 'reminder'; reminder: Reminder; coalescedCount: number };
-
-export interface CreateReminderInput {
+export interface CreateScheduleInput {
   spaceId: string;
-  objective: string;
-  contextSummary?: string;
-  requiredTags?: string[];
-  trigger: ScheduleTrigger;
-  timezone?: string;
+  timing: ScheduleTiming;
+  action: ScheduleAction;
 }
 
+export interface DueFire {
+  schedule: Schedule;
+  coalescedCount: number;
+  stale: boolean;
+}
+
+/**
+ * Owns the single scheduling entity. A schedule is `timing` + `action`:
+ * `at` fires once and completes; `cron` recurs, coalescing missed fires
+ * behind a deterministic per-schedule jitter. `resume_session` schedules
+ * older than {@link SCHEDULE_STALE_THRESHOLD_MS} fire one final time marked
+ * stale, then complete — forgotten automation must not run forever.
+ */
 export class SchedulerService {
   constructor(
-    private readonly reminders: ReminderRepository,
-    private readonly crons: CronRepository,
+    private readonly schedules: ScheduleRepository,
     private readonly sessions: SessionRepository,
     private readonly spaces: SpaceRepository
   ) {}
 
-  async createReminder(input: CreateReminderInput, userId: string): Promise<Reminder> {
+  async createSchedule(input: CreateScheduleInput, userId: string): Promise<Schedule> {
     const space = await this.spaces.getById(input.spaceId);
     if (!space) throw validation(`Unknown space: ${input.spaceId}`);
-    if (!input.objective.trim()) throw validation('Reminder objective must not be empty');
-    const timezone = input.timezone ?? space.timezone;
-    assertValidTimezone(timezone);
-    validateTrigger(input.trigger);
-    const reminder: Reminder = {
+    const timing = validateTiming(input.timing, space.timezone);
+    await this.validateAction(input.spaceId, input.action);
+    const schedule: Schedule = {
       id: randomUUID(),
       spaceId: input.spaceId,
-      objective: input.objective.trim(),
-      contextSummary: input.contextSummary,
-      requiredTags: input.requiredTags ?? space.requiredTags,
-      trigger: input.trigger,
-      timezone,
-      status: 'scheduled',
+      timing,
+      action: input.action,
+      status: 'active',
       createdByUserId: userId,
       createdAt: Date.now(),
     };
-    await this.reminders.save(reminder);
-    return reminder;
+    await this.schedules.save(schedule);
+    return schedule;
   }
 
-  async cancelReminder(id: string): Promise<Reminder> {
-    const reminder = await this.reminders.getById(id);
-    if (!reminder) throw notFound(`Reminder not found: ${id}`);
-    reminder.status = 'cancelled';
-    await this.reminders.save(reminder);
-    return reminder;
+  async listSchedules(spaceId?: string): Promise<Schedule[]> {
+    return spaceId ? this.schedules.listBySpace(spaceId) : this.schedules.list();
   }
 
-  async listRemindersBySpace(spaceId: string): Promise<Reminder[]> {
-    return this.reminders.listBySpace(spaceId);
+  async cancelSchedule(id: string): Promise<Schedule> {
+    const schedule = await this.schedules.getById(id);
+    if (!schedule) throw notFound(`Schedule not found: ${id}`);
+    schedule.status = 'deleted';
+    await this.schedules.save(schedule);
+    return schedule;
   }
 
-  async createCron(params: CronCreateParams): Promise<CronJobView> {
-    const session = await this.sessions.getById(params.sessionId);
-    if (!session) throw validation(`Unknown session: ${params.sessionId}`);
-    const space = await this.spaces.getById(session.spaceId);
-    if (!space) throw validation(`Unknown space: ${session.spaceId}`);
-    assertValidCron(params.cron);
-    if (!params.prompt.trim()) throw validation('Cron prompt must not be empty');
-    const timezone = params.timezone ?? space.timezone;
-    assertValidTimezone(timezone);
-    const active = await this.crons.listActiveBySession(params.sessionId);
-    if (active.length >= MAX_CRON_JOBS_PER_SESSION) {
-      throw validation(
-        `Session ${params.sessionId} already has ${MAX_CRON_JOBS_PER_SESSION} crons`
-      );
+  /** Active `resume_session` schedules of a session, as agent-facing views. */
+  async listSessionSchedules(sessionId: string): Promise<ScheduleView[]> {
+    const active = await this.schedules.listActive();
+    return active
+      .filter(
+        (schedule) =>
+          schedule.action.kind === 'resume_session' && schedule.action.sessionId === sessionId
+      )
+      .map((schedule) => this.toView(schedule));
+  }
+
+  /** Deletes a session's `resume_session` schedule; scoped to the owning session. */
+  async deleteSessionSchedule(sessionId: string, scheduleId: string): Promise<void> {
+    const schedule = await this.schedules.getById(scheduleId);
+    if (
+      !schedule ||
+      schedule.status !== 'active' ||
+      schedule.action.kind !== 'resume_session' ||
+      schedule.action.sessionId !== sessionId
+    ) {
+      throw notFound(`Schedule not found in session ${sessionId}: ${scheduleId}`);
     }
-    const job: CronJob = {
-      id: randomUUID(),
-      sessionId: params.sessionId,
-      spaceId: session.spaceId,
-      cron: params.cron,
-      prompt: params.prompt,
-      recurring: params.recurring,
-      timezone,
-      status: 'active',
-      createdAt: Date.now(),
-    };
-    await this.crons.save(job);
-    return this.toView(job);
-  }
-
-  async listCrons(sessionId: string): Promise<CronJobView[]> {
-    const jobs = await this.crons.listActiveBySession(sessionId);
-    return Promise.all(jobs.map((job) => this.toView(job)));
-  }
-
-  async deleteCron(sessionId: string, jobId: string): Promise<void> {
-    const job = await this.crons.getById(jobId);
-    if (!job || job.sessionId !== sessionId || job.status !== 'active') {
-      throw notFound(`Cron not found in session ${sessionId}: ${jobId}`);
-    }
-    job.status = 'deleted';
-    await this.crons.save(job);
+    schedule.status = 'deleted';
+    await this.schedules.save(schedule);
   }
 
   /**
-   * Advances all schedules to `now` and returns the fires to dispatch.
-   * Each due job fires at most once per call; missed ideal fires coalesce.
+   * Advances all active schedules to `now` and returns the fires to dispatch.
+   * Each due schedule fires at most once per call; missed ideal fires coalesce.
    */
   async collectDueFires(now: number = Date.now()): Promise<DueFire[]> {
     const fires: DueFire[] = [];
-    for (const reminder of await this.reminders.listScheduled()) {
-      const fire = await this.collectReminder(reminder, now);
-      if (fire) fires.push(fire);
-    }
-    for (const job of await this.crons.listActive()) {
-      const fire = await this.collectCron(job, now);
+    for (const schedule of await this.schedules.listActive()) {
+      const fire = await this.collect(schedule, now);
       if (fire) fires.push(fire);
     }
     return fires;
   }
 
-  private async collectReminder(reminder: Reminder, now: number): Promise<DueFire | null> {
-    const trigger = reminder.trigger;
-    if (trigger.kind === 'delay') {
-      if (now < reminder.createdAt + trigger.delayMs) return null;
-      reminder.status = 'fired';
-      reminder.lastFiredAt = now;
-      await this.reminders.save(reminder);
-      return { kind: 'reminder', reminder, coalescedCount: 1 };
-    }
-    if (trigger.kind === 'at') {
-      if (now < trigger.at) return null;
-      reminder.status = 'fired';
-      reminder.lastFiredAt = now;
-      await this.reminders.save(reminder);
-      return { kind: 'reminder', reminder, coalescedCount: 1 };
-    }
-    const missed = countMissedFires(
-      trigger.cron,
-      reminder.id,
-      reminder.createdAt,
-      reminder.lastFiredAt,
-      reminder.timezone,
-      now
-    );
-    if (missed === 0) return null;
-    reminder.lastFiredAt = now;
-    await this.reminders.save(reminder);
-    return { kind: 'reminder', reminder, coalescedCount: missed };
-  }
-
-  private async collectCron(job: CronJob, now: number): Promise<DueFire | null> {
-    const missed = countMissedFires(
-      job.cron,
-      job.id,
-      job.createdAt,
-      job.lastFiredAt,
-      job.timezone,
-      now
-    );
-    if (missed === 0) return null;
-    const stale = job.recurring && now - job.createdAt > CRON_STALE_THRESHOLD_MS;
-    if (!job.recurring || stale) {
-      job.status = 'deleted';
-      job.lastFiredAt = now;
-      await this.crons.save(job);
-      return { kind: 'cron', job, coalescedCount: missed, stale };
-    }
-    job.lastFiredAt = now;
-    await this.crons.save(job);
-    return { kind: 'cron', job, coalescedCount: missed, stale: false };
-  }
-
-  private async toView(job: CronJob): Promise<CronJobView> {
+  toView(schedule: Schedule): ScheduleView {
     return {
-      id: job.id,
-      sessionId: job.sessionId,
-      cron: job.cron,
-      prompt: job.prompt,
-      recurring: job.recurring,
-      timezone: job.timezone,
-      nextFireAt:
-        nextJitteredFire(
-          job.cron,
-          job.id,
-          job.lastFiredAt ?? job.createdAt,
-          job.timezone
-        )?.getTime() ?? null,
-      createdAt: job.createdAt,
-      lastFiredAt: job.lastFiredAt,
+      id: schedule.id,
+      action: schedule.action.kind,
+      timing: schedule.timing,
+      prompt: schedule.action.kind === 'resume_session' ? schedule.action.prompt : undefined,
+      objective: schedule.action.kind === 'create_ticket' ? schedule.action.objective : undefined,
+      nextFireAt: schedule.status === 'active' ? nextFireOf(schedule) : null,
+      createdAt: schedule.createdAt,
+      lastFiredAt: schedule.lastFiredAt,
     };
+  }
+
+  private async collect(schedule: Schedule, now: number): Promise<DueFire | null> {
+    const timing = schedule.timing;
+    if (timing.kind === 'at') {
+      if (now < timing.at) return null;
+      schedule.status = 'done';
+      schedule.lastFiredAt = now;
+      await this.schedules.save(schedule);
+      return { schedule, coalescedCount: 1, stale: false };
+    }
+    const missed = countMissedFires(
+      timing.expression,
+      schedule.id,
+      schedule.createdAt,
+      schedule.lastFiredAt,
+      timing.timezone ?? 'UTC',
+      now
+    );
+    if (missed === 0) return null;
+    const stale =
+      schedule.action.kind === 'resume_session' &&
+      now - schedule.createdAt > SCHEDULE_STALE_THRESHOLD_MS;
+    schedule.lastFiredAt = now;
+    if (stale) schedule.status = 'done';
+    await this.schedules.save(schedule);
+    return { schedule, coalescedCount: missed, stale };
+  }
+
+  private async validateAction(spaceId: string, action: ScheduleAction): Promise<void> {
+    if (action.kind === 'create_ticket') {
+      if (!action.objective.trim()) throw validation('Schedule objective must not be empty');
+      return;
+    }
+    if (!action.prompt.trim()) throw validation('Schedule prompt must not be empty');
+    const session = await this.sessions.getById(action.sessionId);
+    if (!session || session.spaceId !== spaceId) {
+      throw validation(`Unknown session: ${action.sessionId}`);
+    }
+    const existing = await this.listSessionSchedules(action.sessionId);
+    if (existing.length >= MAX_SCHEDULES_PER_SESSION) {
+      throw validation(
+        `Session ${action.sessionId} already has ${MAX_SCHEDULES_PER_SESSION} schedules`
+      );
+    }
   }
 }
 
-function validateTrigger(trigger: ScheduleTrigger): void {
-  switch (trigger.kind) {
-    case 'delay':
-      if (!Number.isFinite(trigger.delayMs) || trigger.delayMs <= 0) {
-        throw validation('delayMs must be a positive number');
-      }
-      return;
-    case 'at':
-      if (!Number.isFinite(trigger.at)) throw validation('at must be a timestamp');
-      return;
-    case 'cron':
-      assertValidCron(trigger.cron);
-      return;
+/** Validates timing; cron timezones default to the space timezone. */
+function validateTiming(timing: ScheduleTiming, spaceTimezone: string): ScheduleTiming {
+  if (timing.kind === 'at') {
+    if (!Number.isFinite(timing.at)) throw validation('at must be a finite timestamp');
+    return timing;
   }
+  assertValidCron(timing.expression);
+  const timezone = timing.timezone ?? spaceTimezone;
+  assertValidTimezone(timezone);
+  return { kind: 'cron', expression: timing.expression, timezone };
+}
+
+function nextFireOf(schedule: Schedule): number | null {
+  const timing = schedule.timing;
+  if (timing.kind === 'at') return timing.at;
+  const next = nextJitteredFire(
+    timing.expression,
+    schedule.id,
+    schedule.lastFiredAt ?? schedule.createdAt,
+    timing.timezone ?? 'UTC'
+  );
+  return next?.getTime() ?? null;
 }
 
 /**
@@ -227,14 +198,14 @@ function validateTrigger(trigger: ScheduleTrigger): void {
  */
 function countMissedFires(
   expression: string,
-  jobId: string,
+  scheduleId: string,
   createdAt: number,
   lastFiredAt: number | undefined,
   timezone: string,
   now: number
 ): number {
   let cursor = new Date(lastFiredAt ?? createdAt);
-  const jitter = jitterMs(jobId, expression, timezone, cursor);
+  const jitter = jitterMs(scheduleId, expression, timezone, cursor);
   let count = 0;
   for (let i = 0; i < MAX_COALESCE_ITERATIONS; i += 1) {
     const next = nextFireAfter(expression, cursor, timezone);
@@ -247,17 +218,17 @@ function countMissedFires(
 
 function nextJitteredFire(
   expression: string,
-  jobId: string,
+  scheduleId: string,
   base: number,
   timezone: string
 ): Date | null {
   const next = nextFireAfter(expression, new Date(base), timezone);
   if (!next) return null;
-  return new Date(next.getTime() + jitterMs(jobId, expression, timezone, new Date(base)));
+  return new Date(next.getTime() + jitterMs(scheduleId, expression, timezone, new Date(base)));
 }
 
-/** Deterministic per-job offset, capped at min(10% of the period, 15min). */
-function jitterMs(jobId: string, expression: string, timezone: string, base: Date): number {
+/** Deterministic per-schedule offset, capped at min(10% of the period, 15min). */
+function jitterMs(scheduleId: string, expression: string, timezone: string, base: Date): number {
   const first = nextFireAfter(expression, base, timezone);
   if (!first) return 0;
   const second = nextFireAfter(expression, first, timezone);
@@ -266,6 +237,6 @@ function jitterMs(jobId: string, expression: string, timezone: string, base: Dat
   const cap = Math.min(periodMs * 0.1, MAX_JITTER_MS);
   if (cap < 1) return 0;
   let hash = 0;
-  for (const ch of jobId) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0;
+  for (const ch of scheduleId) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0;
   return hash % Math.floor(cap);
 }

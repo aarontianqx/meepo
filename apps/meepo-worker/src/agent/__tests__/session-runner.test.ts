@@ -117,22 +117,22 @@ describe('SessionRunner', () => {
 
     expect(agent.prompts).toEqual(['p1', 'p2']);
     expect(events).toContainEqual({
-      type: 'task_started',
-      taskId: 't1',
+      type: 'run_started',
+      runId: 't1',
       workerId: 'w1',
       sessionId: 's1',
       ticketId: undefined,
     });
-    expect(events).toContainEqual({ type: 'text_delta', taskId: 't1', delta: 'ans' });
+    expect(events).toContainEqual({ type: 'text_delta', runId: 't1', delta: 'ans' });
     expect(events).toContainEqual({
-      type: 'task_completed',
-      taskId: 't1',
+      type: 'run_completed',
+      runId: 't1',
       resultSummary: 'answer 1',
       usage: { inputTokens: 10, outputTokens: 5 },
     });
     expect(events).toContainEqual({
-      type: 'task_started',
-      taskId: 't2',
+      type: 'run_started',
+      runId: 't2',
       workerId: 'w1',
       sessionId: 's1',
       ticketId: undefined,
@@ -142,9 +142,7 @@ describe('SessionRunner', () => {
     agent.emitEvent({ type: 'message_end', message: assistantMessage('answer 2') });
     agent.finishRun();
     await flush();
-    expect(events).toContainEqual(
-      expect.objectContaining({ type: 'task_completed', taskId: 't2' })
-    );
+    expect(events).toContainEqual(expect.objectContaining({ type: 'run_completed', runId: 't2' }));
   });
 
   it('drops if_idle turns while busy', async () => {
@@ -158,7 +156,7 @@ describe('SessionRunner', () => {
     await flush();
 
     expect(agent.prompts).toEqual(['p1']);
-    expect(events.some((e) => 'taskId' in e && e.taskId === 't2')).toBe(false);
+    expect(events.some((e) => 'runId' in e && e.runId === 't2')).toBe(false);
   });
 
   it('starts if_idle turns immediately when idle', () => {
@@ -183,12 +181,12 @@ describe('SessionRunner', () => {
     agent.emitEvent({ type: 'message_start', message: userMessage('p2') });
 
     expect(events).toContainEqual({
-      type: 'task_completed',
-      taskId: 't1',
+      type: 'run_completed',
+      runId: 't1',
       resultSummary: 'partial answer',
       usage: { inputTokens: 10, outputTokens: 5 },
     });
-    expect(events).toContainEqual(expect.objectContaining({ type: 'task_started', taskId: 't2' }));
+    expect(events).toContainEqual(expect.objectContaining({ type: 'run_started', runId: 't2' }));
 
     agent.emitEvent({ type: 'message_end', message: assistantMessage('final answer') });
     agent.finishRun();
@@ -196,8 +194,8 @@ describe('SessionRunner', () => {
 
     expect(events).toContainEqual(
       expect.objectContaining({
-        type: 'task_completed',
-        taskId: 't2',
+        type: 'run_completed',
+        runId: 't2',
         resultSummary: 'final answer',
       })
     );
@@ -211,8 +209,8 @@ describe('SessionRunner', () => {
     expect(runner.abort('t2')).toBe(true);
 
     expect(events).toContainEqual({
-      type: 'task_failed',
-      taskId: 't2',
+      type: 'run_failed',
+      runId: 't2',
       error: 'aborted before execution',
       code: 'aborted',
     });
@@ -222,7 +220,7 @@ describe('SessionRunner', () => {
     expect(agent.prompts).toEqual(['p1']);
   });
 
-  it('aborts the running turn through the agent and reports task_failed', async () => {
+  it('aborts the running turn through the agent and reports run_failed', async () => {
     const { agent, events, runner } = setup();
 
     runner.runTurn('t1', 'p1', 'wait');
@@ -231,11 +229,11 @@ describe('SessionRunner', () => {
 
     await flush();
     expect(events).toContainEqual(
-      expect.objectContaining({ type: 'task_failed', taskId: 't1', code: 'aborted' })
+      expect.objectContaining({ type: 'run_failed', runId: 't1', code: 'aborted' })
     );
   });
 
-  it('reports task_failed when the assistant turn errors', async () => {
+  it('reports run_failed when the assistant turn errors', async () => {
     const { agent, events, runner } = setup();
 
     runner.runTurn('t1', 'p1', 'wait');
@@ -246,8 +244,8 @@ describe('SessionRunner', () => {
     await flush();
 
     expect(events).toContainEqual({
-      type: 'task_failed',
-      taskId: 't1',
+      type: 'run_failed',
+      runId: 't1',
       error: 'upstream 500',
       code: 'error',
     });
@@ -273,7 +271,7 @@ describe('SessionRunner', () => {
 
     expect(events).toContainEqual({
       type: 'tool_execution_start',
-      taskId: 't1',
+      runId: 't1',
       toolName: 'bash',
       toolCallId: 'call-1',
       args: { command: 'ls' },
@@ -281,7 +279,7 @@ describe('SessionRunner', () => {
     expect(events).toContainEqual(
       expect.objectContaining({
         type: 'tool_execution_end',
-        taskId: 't1',
+        runId: 't1',
         toolCallId: 'call-1',
         isError: false,
       })
@@ -295,18 +293,18 @@ describe('mergeQueuedTurns', () => {
   });
 
   it('passes a single turn through unchanged', () => {
-    const turn = { taskId: 't1', prompt: 'p1', timeoutSeconds: 30 };
+    const turn = { runId: 't1', prompt: 'p1', timeoutSeconds: 30 };
     expect(mergeQueuedTurns([turn])).toBe(turn);
   });
 
-  it('merges multiple turns, annotating each prompt and taking the last taskId', () => {
+  it('merges multiple turns, annotating each prompt and taking the last runId', () => {
     const merged = mergeQueuedTurns([
-      { taskId: 't1', prompt: '[Alice] first' },
-      { taskId: 't2', prompt: '[Bob] second' },
-      { taskId: 't3', prompt: 'third', timeoutSeconds: 60 },
+      { runId: 't1', prompt: '[Alice] first' },
+      { runId: 't2', prompt: '[Bob] second' },
+      { runId: 't3', prompt: 'third', timeoutSeconds: 60 },
     ]);
     expect(merged).toEqual({
-      taskId: 't3',
+      runId: 't3',
       timeoutSeconds: 60,
       prompt: '[1/3] [Alice] first\n\n[2/3] [Bob] second\n\n[3/3] third',
     });
@@ -314,7 +312,7 @@ describe('mergeQueuedTurns', () => {
 });
 
 describe('SessionRunner queue merging', () => {
-  it('merges consecutive wait turns into one execution attributed to the last taskId', async () => {
+  it('merges consecutive wait turns into one execution attributed to the last runId', async () => {
     const { agent, events, runner } = setup();
 
     runner.runTurn('t1', 'p1', 'wait');
@@ -329,15 +327,13 @@ describe('SessionRunner queue merging', () => {
     // One merged turn instead of three separate ones.
     expect(agent.prompts).toHaveLength(2);
     expect(agent.prompts[1]).toBe('[1/3] [Alice] p2\n\n[2/3] [Bob] p3\n\n[3/3] [Carol] p4');
-    expect(events).toContainEqual(expect.objectContaining({ type: 'task_started', taskId: 't4' }));
-    expect(events.some((e) => 'taskId' in e && e.taskId === 't2')).toBe(false);
-    expect(events.some((e) => 'taskId' in e && e.taskId === 't3')).toBe(false);
+    expect(events).toContainEqual(expect.objectContaining({ type: 'run_started', runId: 't4' }));
+    expect(events.some((e) => 'runId' in e && e.runId === 't2')).toBe(false);
+    expect(events.some((e) => 'runId' in e && e.runId === 't3')).toBe(false);
 
     agent.finishRun();
     await flush();
-    expect(events).toContainEqual(
-      expect.objectContaining({ type: 'task_completed', taskId: 't4' })
-    );
+    expect(events).toContainEqual(expect.objectContaining({ type: 'run_completed', runId: 't4' }));
     expect(agent.prompts).toHaveLength(2);
   });
 });

@@ -3,7 +3,7 @@ import { join } from 'node:path';
 
 import { Agent, type AgentOptions } from '@earendil-works/pi-agent-core';
 import { createCodingTools } from '@earendil-works/pi-coding-agent';
-import type { TaskAbortPayload, TicketDispatchEnvelope, WorkerStreamEvent } from '@meepo/protocol';
+import type { RunAbortPayload, TicketDispatchEnvelope, WorkerStreamEvent } from '@meepo/protocol';
 
 import { createModel, createStreamFn } from './model-factory.js';
 import { StreamForwarder, type RunnerAgent } from './session-runner.js';
@@ -58,7 +58,7 @@ export class TicketRunner {
 
   async handleDispatch(envelope: TicketDispatchEnvelope): Promise<void> {
     const forwarder = new StreamForwarder(this.deps.emit);
-    forwarder.beginTask(envelope.taskId, {
+    forwarder.beginRun(envelope.runId, {
       workerId: this.deps.workerId,
       ticketId: envelope.ticketId,
     });
@@ -76,7 +76,7 @@ export class TicketRunner {
         streamFn: createStreamFn(envelope.model),
         sessionId: envelope.ticketId,
       });
-      this.active.set(envelope.taskId, agent);
+      this.active.set(envelope.runId, agent);
       agent.subscribe((event) => forwarder.handleEvent(event));
 
       let timedOut = false;
@@ -90,20 +90,20 @@ export class TicketRunner {
 
       await agent.prompt(buildTicketPrompt(envelope));
       if (timedOut) {
-        forwarder.failTask(`ticket timed out after ${envelope.timeoutSeconds}s`, 'timeout');
+        forwarder.failRun(`ticket timed out after ${envelope.timeoutSeconds}s`, 'timeout');
       } else {
-        forwarder.completeTask();
+        forwarder.completeRun();
       }
     } catch (err) {
-      forwarder.failTask((err as Error).message, 'internal');
+      forwarder.failRun((err as Error).message, 'internal');
     } finally {
       if (timeoutTimer) clearTimeout(timeoutTimer);
-      this.active.delete(envelope.taskId);
+      this.active.delete(envelope.runId);
     }
   }
 
-  handleAbort(payload: TaskAbortPayload): void {
-    this.active.get(payload.taskId)?.abort();
+  handleAbort(payload: RunAbortPayload): void {
+    this.active.get(payload.runId)?.abort();
   }
 
   private async ensureTicketDir(ticketId: string): Promise<string> {

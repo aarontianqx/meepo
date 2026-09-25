@@ -158,6 +158,40 @@ export const migrations: Migration[] = [
       db.exec('ALTER TABLE tickets DROP COLUMN workspace');
     },
   },
+  {
+    version: 6,
+    name: 'unified schedules and runs',
+    up(db) {
+      db.exec(`
+        CREATE TABLE schedules (
+          id TEXT PRIMARY KEY,
+          space_id TEXT NOT NULL,
+          timing TEXT NOT NULL,
+          action TEXT NOT NULL,
+          status TEXT NOT NULL,
+          created_by_user_id TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          last_fired_at INTEGER
+        );
+
+        CREATE TABLE runs (
+          id TEXT PRIMARY KEY,
+          work TEXT NOT NULL,
+          attempt INTEGER NOT NULL,
+          worker_id TEXT,
+          status TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          started_at INTEGER,
+          completed_at INTEGER
+        );
+
+        ALTER TABLE tickets ADD COLUMN origin_session_id TEXT;
+
+        DROP TABLE reminders;
+        DROP TABLE cron_jobs;
+      `);
+    },
+  },
 ];
 
 /** Applies pending migrations in version order, tracking progress via `user_version`. */

@@ -9,13 +9,15 @@ import type { RpcNotification, RpcRequest, RpcResponse } from './rpc.js';
 import type {
   CronCreateParams,
   CronDeleteParams,
-  CronJobView,
   CronListParams,
-  SessionDispatchEnvelope,
+  RunAbortPayload,
+  RunSteerPayload,
+  ScheduleView,
   SessionSnapshot,
-  TaskAbortPayload,
-  TaskSteerPayload,
+  TicketCreateParams,
+  TicketCreateResult,
   TicketDispatchEnvelope,
+  TurnDispatchEnvelope,
   WorkerHeartbeatPayload,
   WorkerRegisterPayload,
   WorkerRegisterResult,
@@ -32,14 +34,15 @@ export const WORKER_CHANNEL_METHODS = {
   cronCreate: 'cron.create',
   cronList: 'cron.list',
   cronDelete: 'cron.delete',
+  ticketCreate: 'ticket.create',
 } as const;
 
 /** Notifications the server pushes to the worker. */
 export const WORKER_CHANNEL_EVENTS = {
-  sessionDispatch: 'session.dispatch',
+  turnDispatch: 'turn.dispatch',
   ticketDispatch: 'ticket.dispatch',
-  taskSteer: 'task.steer',
-  taskAbort: 'task.abort',
+  runSteer: 'run.steer',
+  runAbort: 'run.abort',
 } as const;
 
 /** Notifications the worker pushes to the server. */
@@ -58,16 +61,18 @@ export type WorkerChannelUpstream =
   | RpcRequest<typeof WORKER_CHANNEL_METHODS.cronCreate, CronCreateParams>
   | RpcRequest<typeof WORKER_CHANNEL_METHODS.cronList, CronListParams>
   | RpcRequest<typeof WORKER_CHANNEL_METHODS.cronDelete, CronDeleteParams>
+  | RpcRequest<typeof WORKER_CHANNEL_METHODS.ticketCreate, TicketCreateParams>
   | RpcNotification<typeof SERVER_CHANNEL_EVENTS.stream, WorkerStreamEvent>;
 
 export type WorkerChannelDownstream =
   | RpcResponse<WorkerRegisterResult>
   | RpcResponse<{ accepted: true }>
   | RpcResponse<SessionSnapshot>
-  | RpcResponse<CronJobView>
-  | RpcResponse<CronJobView[]>
+  | RpcResponse<ScheduleView>
+  | RpcResponse<ScheduleView[]>
   | RpcResponse<{ deleted: true }>
-  | RpcNotification<typeof WORKER_CHANNEL_EVENTS.sessionDispatch, SessionDispatchEnvelope>
+  | RpcResponse<TicketCreateResult>
+  | RpcNotification<typeof WORKER_CHANNEL_EVENTS.turnDispatch, TurnDispatchEnvelope>
   | RpcNotification<typeof WORKER_CHANNEL_EVENTS.ticketDispatch, TicketDispatchEnvelope>
-  | RpcNotification<typeof WORKER_CHANNEL_EVENTS.taskSteer, TaskSteerPayload>
-  | RpcNotification<typeof WORKER_CHANNEL_EVENTS.taskAbort, TaskAbortPayload>;
+  | RpcNotification<typeof WORKER_CHANNEL_EVENTS.runSteer, RunSteerPayload>
+  | RpcNotification<typeof WORKER_CHANNEL_EVENTS.runAbort, RunAbortPayload>;

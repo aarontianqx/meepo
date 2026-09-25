@@ -10,7 +10,7 @@ function makeItem(overrides: Partial<QueuedDispatch> = {}): QueuedDispatch {
     id: 'dispatch-1',
     sessionId: 'session-1',
     envelope: {
-      taskId: 'task-1',
+      runId: 'run-1',
       sessionId: 'session-1',
       spaceId: 'space-1',
       sessionKind: 'main',
@@ -51,12 +51,12 @@ describe('SqliteDispatchQueueRepository', () => {
   it('round-trips the full envelope', async () => {
     const item = makeItem({
       envelope: {
-        taskId: 'task-2',
+        runId: 'run-2',
         sessionId: 'session-1',
         spaceId: 'space-1',
-        sessionKind: 'task',
+        sessionKind: 'thread',
         prompt: 'run',
-        source: { kind: 'cron', jobId: 'job-1', coalescedCount: 3, stale: true },
+        source: { kind: 'schedule', scheduleId: 'sched-1', coalescedCount: 3, stale: true },
         delivery: 'urgent',
         model: {
           provider: 'openai-completions',

@@ -37,19 +37,19 @@ export function keepRecentMessages(messages: AgentMessage[], count: number): Age
   return messages.slice(Math.max(0, messages.length - count));
 }
 
-interface TaskContext {
+interface RunContext {
   workerId: string;
   sessionId?: string;
   ticketId?: string;
 }
 
 /**
- * Maps pi agent events to Meepo stream events and tracks per-task outcome
+ * Maps pi agent events to Meepo stream events and tracks per-run outcome
  * (final assistant text, token usage, failure) so the owner can emit
- * `task_completed` / `task_failed` when a run settles.
+ * `run_completed` / `run_failed` when a run settles.
  */
 export class StreamForwarder {
-  private taskId?: string;
+  private runId?: string;
   private lastAssistantText = '';
   private inputTokens = 0;
   private outputTokens = 0;
@@ -57,23 +57,23 @@ export class StreamForwarder {
 
   constructor(private readonly emit: (event: WorkerStreamEvent) => void) {}
 
-  get currentTaskId(): string | undefined {
-    return this.taskId;
+  get currentRunId(): string | undefined {
+    return this.runId;
   }
 
   get failed(): { error: string; code?: string } | undefined {
     return this.failure;
   }
 
-  beginTask(taskId: string, context: TaskContext): void {
-    this.taskId = taskId;
+  beginRun(runId: string, context: RunContext): void {
+    this.runId = runId;
     this.lastAssistantText = '';
     this.inputTokens = 0;
     this.outputTokens = 0;
     this.failure = undefined;
     this.emit({
-      type: 'task_started',
-      taskId,
+      type: 'run_started',
+      runId,
       workerId: context.workerId,
       sessionId: context.sessionId,
       ticketId: context.ticketId,
@@ -81,21 +81,21 @@ export class StreamForwarder {
   }
 
   handleEvent(event: AgentEvent): void {
-    if (!this.taskId) return;
-    const taskId = this.taskId;
+    if (!this.runId) return;
+    const runId = this.runId;
     switch (event.type) {
       case 'message_update': {
         const e = event.assistantMessageEvent;
-        if (e.type === 'text_delta') this.emit({ type: 'text_delta', taskId, delta: e.delta });
+        if (e.type === 'text_delta') this.emit({ type: 'text_delta', runId, delta: e.delta });
         if (e.type === 'thinking_delta') {
-          this.emit({ type: 'thinking_delta', taskId, delta: e.delta });
+          this.emit({ type: 'thinking_delta', runId, delta: e.delta });
         }
         break;
       }
       case 'tool_execution_start':
         this.emit({
           type: 'tool_execution_start',
-          taskId,
+          runId,
           toolName: event.toolName,
           toolCallId: event.toolCallId,
           args: event.args as unknown,
@@ -104,7 +104,7 @@ export class StreamForwarder {
       case 'tool_execution_update':
         this.emit({
           type: 'tool_execution_update',
-          taskId,
+          runId,
           toolCallId: event.toolCallId,
           partialResult: event.partialResult as unknown,
         });
@@ -112,7 +112,7 @@ export class StreamForwarder {
       case 'tool_execution_end':
         this.emit({
           type: 'tool_execution_end',
-          taskId,
+          runId,
           toolCallId: event.toolCallId,
           result: event.result as unknown,
           isError: event.isError,
@@ -126,32 +126,32 @@ export class StreamForwarder {
     }
   }
 
-  /** Emit the terminal event for the current task: failed if the run errored/aborted, else completed. */
-  completeTask(): void {
-    if (!this.taskId) return;
+  /** Emit the terminal event for the current run: failed if it errored/aborted, else completed. */
+  completeRun(): void {
+    if (!this.runId) return;
     if (this.failure) {
-      this.emit({ type: 'task_failed', taskId: this.taskId, ...this.failure });
+      this.emit({ type: 'run_failed', runId: this.runId, ...this.failure });
     } else {
       this.emit({
-        type: 'task_completed',
-        taskId: this.taskId,
+        type: 'run_completed',
+        runId: this.runId,
         resultSummary: this.lastAssistantText.slice(0, RESULT_SUMMARY_MAX_CHARS) || undefined,
         usage: { inputTokens: this.inputTokens, outputTokens: this.outputTokens },
       });
     }
-    this.taskId = undefined;
+    this.runId = undefined;
   }
 
-  /** Unconditionally fail the current task (timeout, abort before any assistant output, ...). */
-  failTask(error: string, code?: string): void {
-    if (!this.taskId) return;
-    this.emit({ type: 'task_failed', taskId: this.taskId, error, code });
-    this.taskId = undefined;
+  /** Unconditionally fail the current run (timeout, abort before any assistant output, ...). */
+  failRun(error: string, code?: string): void {
+    if (!this.runId) return;
+    this.emit({ type: 'run_failed', runId: this.runId, error, code });
+    this.runId = undefined;
   }
 
-  /** Fail a task that never started (dropped from a queue); does not touch the current task. */
-  failPendingTask(taskId: string, error: string, code?: string): void {
-    this.emit({ type: 'task_failed', taskId, error, code });
+  /** Fail a run that never started (dropped from a queue); does not touch the current run. */
+  failPendingRun(runId: string, error: string, code?: string): void {
+    this.emit({ type: 'run_failed', runId, error, code });
   }
 
   private trackAssistantMessage(message: AssistantMessage): void {
@@ -171,7 +171,7 @@ export class StreamForwarder {
 }
 
 export interface QueuedTurn {
-  taskId: string;
+  runId: string;
   prompt: string;
   timeoutSeconds?: number;
 }
@@ -180,7 +180,7 @@ export interface QueuedTurn {
  * Merge queued `wait` turns into a single turn: several chat messages that
  * arrived while the agent was busy are answered together. Each prompt keeps
  * its `[author]` prefix (if any) and is annotated with its position; the
- * merged turn takes the last taskId, which identifies all stream events.
+ * merged turn takes the last runId, which identifies all stream events.
  */
 export function mergeQueuedTurns(turns: QueuedTurn[]): QueuedTurn | undefined {
   if (turns.length === 0) return undefined;
@@ -189,7 +189,7 @@ export function mergeQueuedTurns(turns: QueuedTurn[]): QueuedTurn | undefined {
   const prompt = turns
     .map((turn, index) => `[${index + 1}/${turns.length}] ${turn.prompt}`)
     .join('\n\n');
-  return { taskId: last.taskId, prompt, timeoutSeconds: last.timeoutSeconds };
+  return { runId: last.runId, prompt, timeoutSeconds: last.timeoutSeconds };
 }
 
 export interface SessionRunnerOptions {
@@ -245,8 +245,8 @@ export class SessionRunner {
     return this.running || this.queue.length > 0;
   }
 
-  runTurn(taskId: string, prompt: string, delivery: DeliveryMode, timeoutSeconds?: number): void {
-    const turn: QueuedTurn = { taskId, prompt, timeoutSeconds };
+  runTurn(runId: string, prompt: string, delivery: DeliveryMode, timeoutSeconds?: number): void {
+    const turn: QueuedTurn = { runId, prompt, timeoutSeconds };
     if (!this.running) {
       void this.startTurn(turn);
       return;
@@ -264,33 +264,33 @@ export class SessionRunner {
     }
   }
 
-  /** Inject a free-form steering message into the in-flight turn. */
+  /** Inject a free-form steering message into the in-flight run. */
   steer(message: string): void {
     this.agent.steer({ role: 'user', content: message, timestamp: this.now() });
   }
 
   /**
-   * Abort a task: the running turn via the agent's abort signal; queued or
-   * steered-but-not-started tasks are failed immediately. Returns false when
-   * the task is unknown to this runner.
+   * Abort a run: the running turn via the agent's abort signal; queued or
+   * steered-but-not-started runs are failed immediately. Returns false when
+   * the run is unknown to this runner.
    */
-  abort(taskId: string, reason?: string): boolean {
-    if (this.current?.taskId === taskId) {
+  abort(runId: string, reason?: string): boolean {
+    if (this.current?.runId === runId) {
       this.abortedCurrent = true;
       this.agent.abort();
       return true;
     }
     const queued =
-      this.removePending(this.queue, taskId) ?? this.removePending(this.steeredTurns, taskId);
+      this.removePending(this.queue, runId) ?? this.removePending(this.steeredTurns, runId);
     if (queued) {
-      this.forwarder.failPendingTask(taskId, reason ?? 'aborted before execution', 'aborted');
+      this.forwarder.failPendingRun(runId, reason ?? 'aborted before execution', 'aborted');
       return true;
     }
     return false;
   }
 
-  private removePending(list: QueuedTurn[], taskId: string): QueuedTurn | undefined {
-    const index = list.findIndex((turn) => turn.taskId === taskId);
+  private removePending(list: QueuedTurn[], runId: string): QueuedTurn | undefined {
+    const index = list.findIndex((turn) => turn.runId === runId);
     if (index < 0) return undefined;
     return list.splice(index, 1)[0];
   }
@@ -304,7 +304,7 @@ export class SessionRunner {
 
   /**
    * A user message entering the transcript mid-run is a steered message being
-   * injected: hand the stream over from the interrupted task to the steered one.
+   * injected: hand the stream over from the interrupted run to the steered one.
    */
   private onUserMessageStart(): void {
     if (!this.running) return;
@@ -317,7 +317,7 @@ export class SessionRunner {
     this.completeCurrent();
     this.current = next;
     this.abortedCurrent = false;
-    this.forwarder.beginTask(next.taskId, { workerId: this.workerId, sessionId: this.sessionId });
+    this.forwarder.beginRun(next.runId, { workerId: this.workerId, sessionId: this.sessionId });
   }
 
   private async startTurn(turn: QueuedTurn): Promise<void> {
@@ -326,7 +326,7 @@ export class SessionRunner {
     this.sawInitialUserMessage = false;
     this.timedOut = false;
     this.abortedCurrent = false;
-    this.forwarder.beginTask(turn.taskId, { workerId: this.workerId, sessionId: this.sessionId });
+    this.forwarder.beginRun(turn.runId, { workerId: this.workerId, sessionId: this.sessionId });
     this.armTimeout(turn);
     try {
       // Awaited only when configured, keeping prompt() same-tick otherwise.
@@ -334,12 +334,12 @@ export class SessionRunner {
       await this.agent.prompt(turn.prompt);
       this.completeCurrent();
     } catch (err) {
-      this.forwarder.failTask((err as Error).message, 'internal');
+      this.forwarder.failRun((err as Error).message, 'internal');
     } finally {
       this.clearTimeout();
       for (const skipped of this.steeredTurns.splice(0)) {
-        this.forwarder.failPendingTask(
-          skipped.taskId,
+        this.forwarder.failPendingRun(
+          skipped.runId,
           'run ended before steering took effect',
           'aborted'
         );
@@ -370,11 +370,11 @@ export class SessionRunner {
 
   private completeCurrent(): void {
     if (this.timedOut) {
-      this.forwarder.failTask(`turn timed out`, 'timeout');
+      this.forwarder.failRun(`turn timed out`, 'timeout');
     } else if (this.abortedCurrent && !this.forwarder.failed) {
-      this.forwarder.failTask('turn aborted', 'aborted');
+      this.forwarder.failRun('turn aborted', 'aborted');
     } else {
-      this.forwarder.completeTask();
+      this.forwarder.completeRun();
     }
   }
 

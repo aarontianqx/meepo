@@ -38,7 +38,7 @@ class StubAgent implements RunnerAgent {
 
 function envelope(partial: Partial<TicketDispatchEnvelope> = {}): TicketDispatchEnvelope {
   return {
-    taskId: 'task-1',
+    runId: 'task-1',
     ticketId: 'ticket-1',
     spaceId: 'space-1',
     objective: 'Fix the flaky login test',
@@ -121,14 +121,14 @@ describe('TicketRunner', () => {
       '# Objective\nFix the flaky login test\n\n# Context\nFails on CI only',
     ]);
     expect(events).toContainEqual({
-      type: 'task_started',
-      taskId: 'task-1',
+      type: 'run_started',
+      runId: 'task-1',
       workerId: 'w1',
       sessionId: undefined,
       ticketId: 'ticket-1',
     });
     expect(events).toContainEqual(
-      expect.objectContaining({ type: 'task_completed', taskId: 'task-1' })
+      expect.objectContaining({ type: 'run_completed', runId: 'task-1' })
     );
   });
 
@@ -142,7 +142,7 @@ describe('TicketRunner', () => {
     expect(captured[0].initialState?.systemPrompt).toContain('Space memory: prefers pnpm.');
   });
 
-  it('aborts the in-flight ticket by taskId', async () => {
+  it('aborts the in-flight ticket by runId', async () => {
     let aborted = 0;
     let resolvePrompt!: () => void;
     let markPromptStarted!: () => void;
@@ -168,7 +168,7 @@ describe('TicketRunner', () => {
 
     const dispatch = runner.handleDispatch(envelope());
     await promptStarted;
-    runner.handleAbort({ taskId: 'task-1' });
+    runner.handleAbort({ runId: 'task-1' });
 
     expect(aborted).toBe(1);
     await dispatch;

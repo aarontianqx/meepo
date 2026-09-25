@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import type { Space, WorkerNode } from '@meepo/core';
-import type { SessionDispatchEnvelope, WorkerChannelDownstream } from '@meepo/protocol';
+import type { TurnDispatchEnvelope, WorkerChannelDownstream } from '@meepo/protocol';
 
 import { DispatchService } from '../../../domain/dispatch/dispatch-service.js';
 import type { WorkerSender } from '../../../domain/dispatch/worker-sender.js';
@@ -9,6 +9,7 @@ import type { InboundMessage } from '../../../domain/im/im-router.js';
 import { SessionService } from '../../../domain/sessions/session-service.js';
 import { TranscriptService } from '../../../domain/sessions/transcript-service.js';
 import { MemoryDispatchQueueRepository } from '../../../store/memory/dispatch-queue-memory.js';
+import { MemoryRunRepository } from '../../../store/memory/run-memory.js';
 import { MemorySessionEventRepository } from '../../../store/memory/session-event-memory.js';
 import { MemorySessionRepository } from '../../../store/memory/session-memory.js';
 import { MemorySpaceRepository } from '../../../store/memory/space-memory.js';
@@ -61,10 +62,10 @@ class FakeSender implements WorkerSender {
     this.sent.push({ workerId, frame });
   }
 
-  dispatches(): SessionDispatchEnvelope[] {
+  dispatches(): TurnDispatchEnvelope[] {
     return this.sent
-      .filter((item) => 'event' in item.frame && item.frame.event === 'session.dispatch')
-      .map((item) => (item.frame as { payload: SessionDispatchEnvelope }).payload);
+      .filter((item) => 'event' in item.frame && item.frame.event === 'turn.dispatch')
+      .map((item) => (item.frame as { payload: TurnDispatchEnvelope }).payload);
   }
 }
 
@@ -138,6 +139,7 @@ describe('FeishuGateway', () => {
       spaces,
       workers,
       tickets,
+      new MemoryRunRepository(),
       queue,
       sender,
       transcriptService,
@@ -156,7 +158,7 @@ describe('FeishuGateway', () => {
     });
   });
 
-  it('prewarms a thread for a main-stream mention, then dispatches a task session', async () => {
+  it('prewarms a thread for a main-stream mention, then dispatches a thread session', async () => {
     await gateway.handleInbound(makeMsg({ mentionedOpenIds: [BOT], text: 'help me' }));
 
     expect(client.replies).toHaveLength(1);
@@ -164,13 +166,13 @@ describe('FeishuGateway', () => {
 
     const session = await sessionService.findByThread('sp_group', 'oc_group', 'omt_prewarm');
     expect(session).toBeDefined();
-    expect(session?.kind).toBe('task');
+    expect(session?.kind).toBe('thread');
 
     const dispatches = sender.dispatches();
     expect(dispatches).toHaveLength(1);
     expect(dispatches[0]).toMatchObject({
       sessionId: session?.id,
-      sessionKind: 'task',
+      sessionKind: 'thread',
       prompt: 'help me',
       delivery: 'wait',
       source: { kind: 'user_message', messageId: 'om_1' },

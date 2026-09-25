@@ -1,9 +1,9 @@
-import type { SessionDispatchEnvelope } from '@meepo/protocol';
+import type { TurnDispatchEnvelope } from '@meepo/protocol';
 
 export interface QueuedDispatch {
   id: string;
   sessionId: string;
-  envelope: SessionDispatchEnvelope;
+  envelope: TurnDispatchEnvelope;
   queuedAt: number;
 }
 

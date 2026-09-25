@@ -12,10 +12,10 @@ A **window** is the IM address a session is bound to: `window_id = feishu:{chat_
 
 **Group chat** — two session shapes coexist:
 
-- **Thread sessions** (`sub_id = thread_id`, kind `task`): one per thread, used for focused coding work. When the bot is first mentioned midway through a thread, the new session is seeded with the thread's existing history so it has the full context.
+- **Thread sessions** (`sub_id = thread_id`, kind `thread`): one per thread, used for focused coding work. When the bot is first mentioned midway through a thread, the new session is seeded with the thread's existing history so it has the full context.
 - **The group's main session** (`sub_id = _group`, kind `main`): the long-lived conversation of the main stream. A **reply** that involves the bot (a reply mentioning it) continues this session and is answered in the main flow — it never spawns a thread.
 
-Routing inside the group main stream: a fresh `@bot` mention (not a reply) prewarms a **new thread** and a new task session; a reply mentioning the bot goes to the group main session.
+Routing inside the group main stream: a fresh `@bot` mention (not a reply) prewarms a **new thread** and a new thread session; a reply mentioning the bot goes to the group main session.
 
 **`/new` rotates a main session** (private chat or group main flow): it closes the current session (transcript retained server-side) and opens a fresh one. It is rejected inside threads — threads auto-compact instead.
 
@@ -34,7 +34,7 @@ When a message arrives, the server applies these gates in order:
 4. **Routing**:
    - Window has a live session → reuse it (deliver per §5 semantics).
    - Session creation already in flight for this window → piggyback on the same pending session; a second one is never created.
-   - Otherwise → create and dispatch. Creation-time binding depends on session type: private-chat and main-window sessions bind to the space's `boundWorkerId`; task sessions pick a randomly chosen eligible worker, then stay pinned for life.
+   - Otherwise → create and dispatch. Creation-time binding depends on session type: private-chat and main-window sessions bind to the space's `boundWorkerId`; thread sessions pick a randomly chosen eligible worker, then stay pinned for life.
 
 ## 4. Turn Batching & Speaker Attribution
 

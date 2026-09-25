@@ -174,7 +174,7 @@ export class FeishuGateway {
       spaceId: string;
       chatId: string;
       threadId: string;
-      kind: 'main' | 'task';
+      kind: 'main' | 'thread';
       anchorMessageId: string;
     }
   ): Promise<string> {

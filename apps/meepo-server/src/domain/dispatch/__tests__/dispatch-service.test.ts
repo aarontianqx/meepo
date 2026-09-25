@@ -1,11 +1,12 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import type { Session, Space, Ticket, WorkerNode } from '@meepo/core';
-import type { SessionDispatchEnvelope, WorkerChannelDownstream } from '@meepo/protocol';
+import type { TurnDispatchEnvelope, WorkerChannelDownstream } from '@meepo/protocol';
 
 import { DispatchService } from '../dispatch-service.js';
 import { DomainError } from '../../errors.js';
 import { MemoryDispatchQueueRepository } from '../../../store/memory/dispatch-queue-memory.js';
+import { MemoryRunRepository } from '../../../store/memory/run-memory.js';
 import { MemorySessionEventRepository } from '../../../store/memory/session-event-memory.js';
 import { MemorySessionRepository } from '../../../store/memory/session-memory.js';
 import { MemorySpaceRepository } from '../../../store/memory/space-memory.js';
@@ -92,6 +93,7 @@ describe('DispatchService', () => {
   let spaces: MemorySpaceRepository;
   let workers: MemoryWorkerRepository;
   let tickets: MemoryTicketRepository;
+  let runs: MemoryRunRepository;
   let queue: MemoryDispatchQueueRepository;
   let sender: FakeSender;
   let service: DispatchService;
@@ -101,10 +103,20 @@ describe('DispatchService', () => {
     spaces = new MemorySpaceRepository();
     workers = new MemoryWorkerRepository();
     tickets = new MemoryTicketRepository();
+    runs = new MemoryRunRepository();
     queue = new MemoryDispatchQueueRepository();
     sender = new FakeSender();
     const transcripts = new TranscriptService(new MemorySessionEventRepository(), sessions);
-    service = new DispatchService(sessions, spaces, workers, tickets, queue, sender, transcripts);
+    service = new DispatchService(
+      sessions,
+      spaces,
+      workers,
+      tickets,
+      runs,
+      queue,
+      sender,
+      transcripts
+    );
   });
 
   const turn = {
@@ -121,7 +133,7 @@ describe('DispatchService', () => {
     );
   });
 
-  it('routes a main session to the space bound worker', async () => {
+  it('routes a main session to the space bound worker and records a run', async () => {
     await spaces.save(makeSpace('sp1', 'w1'));
     await workers.save(makeWorker('w1', ['sp1']));
     await sessions.save(makeSession('se1', 'sp1', 'main'));
@@ -130,18 +142,25 @@ describe('DispatchService', () => {
     const outcome = await service.dispatchSessionTurn({ sessionId: 'se1', ...turn });
     expect(outcome).toMatchObject({ dispatched: true, queued: false, workerId: 'w1' });
     const frame = sender.sent[0].frame;
-    if (frame.kind !== 'notification' || frame.event !== 'session.dispatch') {
-      throw new Error('expected session.dispatch');
+    if (frame.kind !== 'notification' || frame.event !== 'turn.dispatch') {
+      throw new Error('expected turn.dispatch');
     }
-    const envelope = frame.payload as SessionDispatchEnvelope;
+    const envelope = frame.payload as TurnDispatchEnvelope;
     expect(envelope.sessionKind).toBe('main');
-    expect(envelope.sessionKind).toBe('main');
+
+    const run = await runs.getById(envelope.runId);
+    expect(run).toMatchObject({
+      work: { kind: 'turn', sessionId: 'se1' },
+      attempt: 1,
+      workerId: 'w1',
+      status: 'dispatched',
+    });
   });
 
-  it('pins a task session to its dispatch target across turns', async () => {
+  it('pins a thread session to its dispatch target across turns', async () => {
     await spaces.save(makeSpace('sp1'));
     await workers.save(makeWorker('w1', ['sp1']));
-    await sessions.save(makeSession('se1', 'sp1', 'task'));
+    await sessions.save(makeSession('se1', 'sp1', 'thread'));
     sender.connected.add('w1');
 
     await service.dispatchSessionTurn({ sessionId: 'se1', ...turn });
@@ -160,7 +179,11 @@ describe('DispatchService', () => {
 
     await service.dispatchSessionTurn({ sessionId: 'se1', ...turn });
     await service.dispatchSessionTurn({ sessionId: 'se1', ...turn, prompt: 'second' });
-    expect((await queue.listBySession('se1')).length).toBe(2);
+    const queued = await queue.listBySession('se1');
+    expect(queued).toHaveLength(2);
+    for (const item of queued) {
+      expect((await runs.getById(item.envelope.runId))?.status).toBe('queued');
+    }
 
     sender.connected.add('w1');
     const flushed = await service.flushWorkerQueues('w1');
@@ -168,9 +191,12 @@ describe('DispatchService', () => {
     expect((await queue.listBySession('se1')).length).toBe(0);
     const frame = sender.sent[sender.sent.length - 1].frame;
     if (frame.kind !== 'notification') throw new Error('expected notification');
-    const envelope = frame.payload as SessionDispatchEnvelope;
+    const envelope = frame.payload as TurnDispatchEnvelope;
     expect(envelope.prompt).toContain('hi');
     expect(envelope.prompt).toContain('second');
+    for (const item of queued) {
+      expect((await runs.getById(item.envelope.runId))?.status).toBe('dispatched');
+    }
   });
 
   it('dispatches a ticket to the least-loaded eligible worker and claims it', async () => {
@@ -185,14 +211,44 @@ describe('DispatchService', () => {
     const ticket = await tickets.getById('t1');
     expect(ticket?.status).toBe('claimed');
     expect(ticket?.assignedWorkerId).toBe('w2');
+
+    const frame = sender.sent[0].frame;
+    if (frame.kind !== 'notification' || frame.event !== 'ticket.dispatch') {
+      throw new Error('expected ticket.dispatch');
+    }
+    const run = await runs.getById((frame.payload as { runId: string }).runId);
+    expect(run).toMatchObject({
+      work: { kind: 'ticket', ticketId: 't1' },
+      attempt: 1,
+      workerId: 'w2',
+      status: 'dispatched',
+    });
   });
 
-  it('leaves a ticket pending when no worker is eligible', async () => {
+  it('increments the run attempt on ticket redispatch', async () => {
+    await spaces.save(makeSpace('sp1'));
+    await workers.save(makeWorker('w1', ['sp1']));
+    await tickets.save(makeTicket('t1', 'sp1'));
+    sender.connected.add('w1');
+
+    await service.dispatchTicket('t1');
+    const ticket = await tickets.getById('t1');
+    await tickets.save({ ...ticket!, status: 'pending', assignedWorkerId: undefined });
+
+    await service.dispatchTicket('t1');
+    const ticketRuns = await runs.listByTicket('t1');
+    expect(ticketRuns).toHaveLength(2);
+    expect(ticketRuns.map((run) => run.attempt)).toEqual([1, 2]);
+    expect(await runs.latestAttempt('t1')).toBe(2);
+  });
+
+  it('leaves a ticket pending without a run when no worker is eligible', async () => {
     await spaces.save(makeSpace('sp1'));
     await tickets.save(makeTicket('t1', 'sp1'));
     const outcome = await service.dispatchTicket('t1');
     expect(outcome.dispatched).toBe(false);
     expect((await tickets.getById('t1'))?.status).toBe('pending');
+    expect(await runs.listByTicket('t1')).toHaveLength(0);
   });
 
   it('retries pending tickets once a worker becomes eligible', async () => {

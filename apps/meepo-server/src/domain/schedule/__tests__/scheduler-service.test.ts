@@ -1,15 +1,14 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import type { CronJob, Reminder, Session, Space } from '@meepo/core';
+import type { Schedule, Session, Space } from '@meepo/core';
 
 import { DomainError } from '../../errors.js';
 import {
-  CRON_STALE_THRESHOLD_MS,
-  MAX_CRON_JOBS_PER_SESSION,
+  MAX_SCHEDULES_PER_SESSION,
+  SCHEDULE_STALE_THRESHOLD_MS,
   SchedulerService,
 } from '../scheduler-service.js';
-import { MemoryCronRepository } from '../../../store/memory/cron-memory.js';
-import { MemoryReminderRepository } from '../../../store/memory/reminder-memory.js';
+import { MemoryScheduleRepository } from '../../../store/memory/schedule-memory.js';
 import { MemorySessionRepository } from '../../../store/memory/session-memory.js';
 import { MemorySpaceRepository } from '../../../store/memory/space-memory.js';
 
@@ -34,7 +33,7 @@ function makeSession(id: string, spaceId: string): Session {
   return {
     id,
     spaceId,
-    kind: 'task',
+    kind: 'thread',
     chatId: 'chat',
     threadId: 'thread',
     status: 'active',
@@ -43,229 +42,305 @@ function makeSession(id: string, spaceId: string): Session {
   };
 }
 
+function makeSchedule(overrides: Partial<Schedule> = {}): Schedule {
+  return {
+    id: 'sc1',
+    spaceId: 'sp1',
+    timing: { kind: 'at', at: NOW - 1000 },
+    action: { kind: 'create_ticket', objective: 'audit' },
+    status: 'active',
+    createdByUserId: 'u1',
+    createdAt: NOW - 60_000,
+    ...overrides,
+  };
+}
+
 describe('SchedulerService', () => {
-  let reminders: MemoryReminderRepository;
-  let crons: MemoryCronRepository;
+  let schedules: MemoryScheduleRepository;
   let sessions: MemorySessionRepository;
   let spaces: MemorySpaceRepository;
   let service: SchedulerService;
 
   beforeEach(async () => {
-    reminders = new MemoryReminderRepository();
-    crons = new MemoryCronRepository();
+    schedules = new MemoryScheduleRepository();
     sessions = new MemorySessionRepository();
     spaces = new MemorySpaceRepository();
-    service = new SchedulerService(reminders, crons, sessions, spaces);
+    service = new SchedulerService(schedules, sessions, spaces);
     await spaces.save(makeSpace('sp1'));
     await sessions.save(makeSession('se1', 'sp1'));
   });
 
-  describe('createReminder', () => {
-    it('rejects unknown space, bad timezone, 6-field cron, empty objective', async () => {
+  describe('createSchedule', () => {
+    it('rejects unknown space, non-finite at, 6-field cron, bad timezone', async () => {
+      const action = { kind: 'create_ticket', objective: 'x' } as const;
       await expect(
-        service.createReminder(
-          { spaceId: 'ghost', objective: 'x', trigger: { kind: 'delay', delayMs: 1000 } },
+        service.createSchedule({ spaceId: 'ghost', timing: { kind: 'at', at: 1 }, action }, 'u1')
+      ).rejects.toThrow(DomainError);
+      await expect(
+        service.createSchedule(
+          { spaceId: 'sp1', timing: { kind: 'at', at: Number.NaN }, action },
           'u1'
         )
       ).rejects.toThrow(DomainError);
       await expect(
-        service.createReminder(
+        service.createSchedule(
+          { spaceId: 'sp1', timing: { kind: 'cron', expression: '0 9 * * * *' }, action },
+          'u1'
+        )
+      ).rejects.toThrow(DomainError);
+      await expect(
+        service.createSchedule(
           {
             spaceId: 'sp1',
-            objective: 'x',
-            trigger: { kind: 'delay', delayMs: 1000 },
-            timezone: 'Mars/Olympus',
+            timing: { kind: 'cron', expression: '0 9 * * *', timezone: 'Mars/Olympus' },
+            action,
+          },
+          'u1'
+        )
+      ).rejects.toThrow(DomainError);
+    });
+
+    it('rejects an empty objective and an empty prompt', async () => {
+      await expect(
+        service.createSchedule(
+          {
+            spaceId: 'sp1',
+            timing: { kind: 'at', at: NOW },
+            action: { kind: 'create_ticket', objective: '  ' },
           },
           'u1'
         )
       ).rejects.toThrow(DomainError);
       await expect(
-        service.createReminder(
-          { spaceId: 'sp1', objective: 'x', trigger: { kind: 'cron', cron: '0 9 * * * *' } },
+        service.createSchedule(
+          {
+            spaceId: 'sp1',
+            timing: { kind: 'at', at: NOW },
+            action: { kind: 'resume_session', sessionId: 'se1', prompt: ' ' },
+          },
+          'u1'
+        )
+      ).rejects.toThrow(DomainError);
+    });
+
+    it('rejects resume_session for a missing or foreign session', async () => {
+      await spaces.save(makeSpace('sp2'));
+      await sessions.save(makeSession('se2', 'sp2'));
+      const timing = { kind: 'at', at: NOW } as const;
+      await expect(
+        service.createSchedule(
+          {
+            spaceId: 'sp1',
+            timing,
+            action: { kind: 'resume_session', sessionId: 'ghost', prompt: 'x' },
+          },
           'u1'
         )
       ).rejects.toThrow(DomainError);
       await expect(
-        service.createReminder(
-          { spaceId: 'sp1', objective: '  ', trigger: { kind: 'delay', delayMs: 1000 } },
+        service.createSchedule(
+          {
+            spaceId: 'sp1',
+            timing,
+            action: { kind: 'resume_session', sessionId: 'se2', prompt: 'x' },
+          },
           'u1'
         )
       ).rejects.toThrow(DomainError);
     });
 
-    it('defaults timezone to the space timezone', async () => {
-      const reminder = await service.createReminder(
-        { spaceId: 'sp1', objective: 'audit', trigger: { kind: 'delay', delayMs: 60_000 } },
+    it('caps resume_session schedules per session', async () => {
+      for (let i = 0; i < MAX_SCHEDULES_PER_SESSION; i += 1) {
+        await schedules.save(
+          makeSchedule({
+            id: `sc${i}`,
+            timing: { kind: 'cron', expression: '0 9 * * *', timezone: 'UTC' },
+            action: { kind: 'resume_session', sessionId: 'se1', prompt: 'x' },
+          })
+        );
+      }
+      await expect(
+        service.createSchedule(
+          {
+            spaceId: 'sp1',
+            timing: { kind: 'cron', expression: '0 10 * * *' },
+            action: { kind: 'resume_session', sessionId: 'se1', prompt: 'x' },
+          },
+          'u1'
+        )
+      ).rejects.toThrow(DomainError);
+    });
+
+    it('defaults the cron timezone to the space timezone', async () => {
+      const schedule = await service.createSchedule(
+        {
+          spaceId: 'sp1',
+          timing: { kind: 'cron', expression: '0 9 * * *' },
+          action: { kind: 'create_ticket', objective: 'audit' },
+        },
         'u1'
       );
-      expect(reminder.timezone).toBe('Asia/Shanghai');
-      expect(reminder.status).toBe('scheduled');
+      expect(schedule.timing).toEqual({
+        kind: 'cron',
+        expression: '0 9 * * *',
+        timezone: 'Asia/Shanghai',
+      });
+      expect(schedule.status).toBe('active');
     });
   });
 
-  describe('reminder firing', () => {
-    it('fires a due delay reminder exactly once', async () => {
-      const reminder: Reminder = {
-        id: 'r1',
-        spaceId: 'sp1',
-        objective: 'audit',
-        requiredTags: [],
-        trigger: { kind: 'delay', delayMs: 60_000 },
-        timezone: 'UTC',
-        status: 'scheduled',
-        createdByUserId: 'u1',
-        createdAt: NOW - 120_000,
-      };
-      await reminders.save(reminder);
+  describe('at schedules', () => {
+    it('fires a due at schedule exactly once, then completes it', async () => {
+      await schedules.save(makeSchedule({ id: 'a1', timing: { kind: 'at', at: NOW - 1000 } }));
 
       const fires = await service.collectDueFires(NOW);
       expect(fires).toHaveLength(1);
-      expect(fires[0]).toMatchObject({ kind: 'reminder', coalescedCount: 1 });
-      expect((await reminders.getById('r1'))?.status).toBe('fired');
+      expect(fires[0]).toMatchObject({ coalescedCount: 1, stale: false });
+      expect((await schedules.getById('a1'))?.status).toBe('done');
 
       expect(await service.collectDueFires(NOW + 60_000)).toHaveLength(0);
     });
 
-    it('does not fire a delay reminder before its time', async () => {
-      await reminders.save({
-        id: 'r2',
-        spaceId: 'sp1',
-        objective: 'audit',
-        requiredTags: [],
-        trigger: { kind: 'delay', delayMs: 60_000 },
-        timezone: 'UTC',
-        status: 'scheduled',
-        createdByUserId: 'u1',
-        createdAt: NOW - 30_000,
-      });
+    it('does not fire before its time', async () => {
+      await schedules.save(makeSchedule({ id: 'a2', timing: { kind: 'at', at: NOW + 1000 } }));
+      expect(await service.collectDueFires(NOW)).toHaveLength(0);
+    });
+  });
+
+  describe('cron schedules', () => {
+    it('coalesces missed fires into one', async () => {
+      await schedules.save(
+        makeSchedule({
+          id: 'c1',
+          timing: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' },
+          createdAt: NOW - 3_600_000,
+        })
+      );
+      const fires = await service.collectDueFires(NOW);
+      expect(fires).toHaveLength(1);
+      expect(fires[0].coalescedCount).toBeGreaterThanOrEqual(55);
+      expect(fires[0].coalescedCount).toBeLessThanOrEqual(60);
+      expect((await schedules.getById('c1'))?.lastFiredAt).toBe(NOW);
+    });
+
+    it('fires a stale resume_session schedule one final time, then completes it', async () => {
+      await schedules.save(
+        makeSchedule({
+          id: 'c2',
+          timing: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' },
+          action: { kind: 'resume_session', sessionId: 'se1', prompt: 'check' },
+          createdAt: NOW - SCHEDULE_STALE_THRESHOLD_MS - 60_000,
+        })
+      );
+      const fires = await service.collectDueFires(NOW);
+      expect(fires).toHaveLength(1);
+      expect(fires[0]).toMatchObject({ stale: true });
+      expect((await schedules.getById('c2'))?.status).toBe('done');
+    });
+
+    it('never goes stale for create_ticket schedules', async () => {
+      await schedules.save(
+        makeSchedule({
+          id: 'c3',
+          timing: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' },
+          createdAt: NOW - SCHEDULE_STALE_THRESHOLD_MS - 60_000,
+        })
+      );
+      const fires = await service.collectDueFires(NOW);
+      expect(fires).toHaveLength(1);
+      expect(fires[0].stale).toBe(false);
+      expect((await schedules.getById('c3'))?.status).toBe('active');
+    });
+  });
+
+  describe('cancelSchedule', () => {
+    it('marks the schedule deleted and stops it from firing', async () => {
+      const schedule = await service.createSchedule(
+        {
+          spaceId: 'sp1',
+          timing: { kind: 'at', at: NOW - 1000 },
+          action: { kind: 'create_ticket', objective: 'audit' },
+        },
+        'u1'
+      );
+      const cancelled = await service.cancelSchedule(schedule.id);
+      expect(cancelled.status).toBe('deleted');
       expect(await service.collectDueFires(NOW)).toHaveLength(0);
     });
 
-    it('coalesces missed cron-trigger fires into one', async () => {
-      await reminders.save({
-        id: 'r3',
-        spaceId: 'sp1',
+    it('rejects an unknown schedule', async () => {
+      await expect(service.cancelSchedule('ghost')).rejects.toThrow(DomainError);
+    });
+  });
+
+  describe('views', () => {
+    it('maps an at schedule with its fire time as nextFireAt', async () => {
+      await schedules.save(makeSchedule({ id: 'v1', timing: { kind: 'at', at: NOW + 60_000 } }));
+      const schedule = await schedules.getById('v1');
+      const view = service.toView(schedule!);
+      expect(view).toMatchObject({
+        id: 'v1',
+        action: 'create_ticket',
         objective: 'audit',
-        requiredTags: [],
-        trigger: { kind: 'cron', cron: '* * * * *' },
-        timezone: 'UTC',
-        status: 'scheduled',
-        createdByUserId: 'u1',
-        createdAt: NOW - 3_600_000,
+        nextFireAt: NOW + 60_000,
       });
-      const fires = await service.collectDueFires(NOW);
-      expect(fires).toHaveLength(1);
-      const fire = fires[0] as { coalescedCount: number };
-      expect(fire.coalescedCount).toBeGreaterThanOrEqual(55);
-      expect(fire.coalescedCount).toBeLessThanOrEqual(60);
     });
-  });
 
-  describe('createCron', () => {
-    it('rejects unknown session and caps jobs per session', async () => {
-      await expect(
-        service.createCron({ sessionId: 'ghost', cron: '* * * * *', prompt: 'x', recurring: true })
-      ).rejects.toThrow(DomainError);
-
-      for (let i = 0; i < MAX_CRON_JOBS_PER_SESSION; i += 1) {
-        await crons.save({
-          id: `j${i}`,
-          sessionId: 'se1',
+    it('maps a cron schedule with a future nextFireAt and null after completion', async () => {
+      const schedule = await service.createSchedule(
+        {
           spaceId: 'sp1',
-          cron: '0 9 * * *',
-          prompt: 'x',
-          recurring: true,
-          timezone: 'UTC',
-          status: 'active',
-          createdAt: NOW,
-        });
-      }
-      await expect(
-        service.createCron({ sessionId: 'se1', cron: '* * * * *', prompt: 'x', recurring: true })
-      ).rejects.toThrow(DomainError);
-    });
-
-    it('returns a view with a future nextFireAt', async () => {
-      const view = await service.createCron({
-        sessionId: 'se1',
-        cron: '0 9 * * *',
-        prompt: 'standup',
-        recurring: true,
-      });
-      expect(view.timezone).toBe('Asia/Shanghai');
+          timing: { kind: 'cron', expression: '0 9 * * *' },
+          action: { kind: 'resume_session', sessionId: 'se1', prompt: 'standup' },
+        },
+        'u1'
+      );
+      const view = service.toView(schedule);
+      expect(view.action).toBe('resume_session');
+      expect(view.prompt).toBe('standup');
       expect(view.nextFireAt).toBeGreaterThan(Date.now());
+
+      schedule.status = 'done';
+      expect(service.toView(schedule).nextFireAt).toBeNull();
     });
   });
 
-  describe('cron firing', () => {
-    it('fires a one-shot cron once then deletes it', async () => {
-      await crons.save({
-        id: 'c1',
-        sessionId: 'se1',
-        spaceId: 'sp1',
-        cron: '* * * * *',
-        prompt: 'check',
-        recurring: false,
-        timezone: 'UTC',
-        status: 'active',
-        createdAt: NOW - 120_000,
-      });
-      const fires = await service.collectDueFires(NOW);
-      expect(fires).toHaveLength(1);
-      expect(fires[0]).toMatchObject({ kind: 'cron', stale: false });
-      expect(await crons.listActiveBySession('se1')).toHaveLength(0);
+  describe('session schedules', () => {
+    it('lists only active resume_session schedules of the session', async () => {
+      await schedules.save(
+        makeSchedule({
+          id: 's1',
+          timing: { kind: 'cron', expression: '0 9 * * *', timezone: 'UTC' },
+          action: { kind: 'resume_session', sessionId: 'se1', prompt: 'wake' },
+        })
+      );
+      await schedules.save(
+        makeSchedule({
+          id: 's2',
+          timing: { kind: 'cron', expression: '0 10 * * *', timezone: 'UTC' },
+          action: { kind: 'resume_session', sessionId: 'se1', prompt: 'wake' },
+          status: 'deleted',
+        })
+      );
+      await schedules.save(makeSchedule({ id: 's3' }));
+
+      const views = await service.listSessionSchedules('se1');
+      expect(views.map((view) => view.id)).toEqual(['s1']);
     });
 
-    it('advances a recurring cron without deleting it', async () => {
-      await crons.save({
-        id: 'c2',
-        sessionId: 'se1',
-        spaceId: 'sp1',
-        cron: '* * * * *',
-        prompt: 'check',
-        recurring: true,
-        timezone: 'UTC',
-        status: 'active',
-        createdAt: NOW - 120_000,
-      });
-      const fires = await service.collectDueFires(NOW);
-      expect(fires).toHaveLength(1);
-      const job = await crons.getById('c2');
-      expect(job?.status).toBe('active');
-      expect(job?.lastFiredAt).toBe(NOW);
-    });
-
-    it('fires a stale recurring cron one final time then deletes it', async () => {
-      const job: CronJob = {
-        id: 'c3',
-        sessionId: 'se1',
-        spaceId: 'sp1',
-        cron: '* * * * *',
-        prompt: 'check',
-        recurring: true,
-        timezone: 'UTC',
-        status: 'active',
-        createdAt: NOW - CRON_STALE_THRESHOLD_MS - 60_000,
-      };
-      await crons.save(job);
-      const fires = await service.collectDueFires(NOW);
-      expect(fires).toHaveLength(1);
-      expect(fires[0]).toMatchObject({ kind: 'cron', stale: true });
-      expect((await crons.getById('c3'))?.status).toBe('deleted');
-    });
-  });
-
-  describe('deleteCron', () => {
     it('deletes only within the owning session', async () => {
-      const view = await service.createCron({
-        sessionId: 'se1',
-        cron: '0 9 * * *',
-        prompt: 'x',
-        recurring: true,
-      });
-      await expect(service.deleteCron('other-session', view.id)).rejects.toThrow(DomainError);
-      await service.deleteCron('se1', view.id);
-      expect(await service.listCrons('se1')).toHaveLength(0);
+      await schedules.save(
+        makeSchedule({
+          id: 's4',
+          timing: { kind: 'cron', expression: '0 9 * * *', timezone: 'UTC' },
+          action: { kind: 'resume_session', sessionId: 'se1', prompt: 'wake' },
+        })
+      );
+      await expect(service.deleteSessionSchedule('other-session', 's4')).rejects.toThrow(
+        DomainError
+      );
+      await service.deleteSessionSchedule('se1', 's4');
+      expect((await schedules.getById('s4'))?.status).toBe('deleted');
     });
   });
 });

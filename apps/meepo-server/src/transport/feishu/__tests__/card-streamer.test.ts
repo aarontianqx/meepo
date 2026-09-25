@@ -55,7 +55,7 @@ class FakeFeishuClient implements FeishuClient {
 const SESSION: Session = {
   id: 's1',
   spaceId: 'sp1',
-  kind: 'task',
+  kind: 'thread',
   chatId: 'oc_1',
   threadId: 'omt_1',
   anchorMessageId: 'om_root',
@@ -74,15 +74,15 @@ function makeStreamer(client: FakeFeishuClient): CardStreamer {
   });
 }
 
-function started(taskId = 't1'): WorkerStreamEvent {
-  return { type: 'task_started', taskId, workerId: 'w1', sessionId: 's1' };
+function started(runId = 't1'): WorkerStreamEvent {
+  return { type: 'run_started', runId, workerId: 'w1', sessionId: 's1' };
 }
 
 describe('CardStreamer', () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
 
-  it('creates a streaming card and sends it to the session thread on task_started', async () => {
+  it('creates a streaming card and sends it to the session thread on run_started', async () => {
     const client = new FakeFeishuClient();
     const streamer = makeStreamer(client);
 
@@ -106,8 +106,8 @@ describe('CardStreamer', () => {
     streamer.handleEvent(started(), REF);
     await vi.advanceTimersByTimeAsync(0);
 
-    streamer.handleEvent({ type: 'text_delta', taskId: 't1', delta: 'Hello ' }, REF);
-    streamer.handleEvent({ type: 'text_delta', taskId: 't1', delta: 'world' }, REF);
+    streamer.handleEvent({ type: 'text_delta', runId: 't1', delta: 'Hello ' }, REF);
+    streamer.handleEvent({ type: 'text_delta', runId: 't1', delta: 'world' }, REF);
     await vi.advanceTimersByTimeAsync(499);
     expect(client.contentUpdates).toHaveLength(0);
 
@@ -122,20 +122,20 @@ describe('CardStreamer', () => {
       },
     ]);
 
-    streamer.handleEvent({ type: 'text_delta', taskId: 't1', delta: '!' }, REF);
+    streamer.handleEvent({ type: 'text_delta', runId: 't1', delta: '!' }, REF);
     await vi.advanceTimersByTimeAsync(500);
     expect(client.contentUpdates).toHaveLength(2);
     expect(client.contentUpdates[1]).toMatchObject({ content: 'Hello world!', sequence: 2 });
   });
 
-  it('flushes and closes streaming mode on task_completed', async () => {
+  it('flushes and closes streaming mode on run_completed', async () => {
     const client = new FakeFeishuClient();
     const streamer = makeStreamer(client);
 
     streamer.handleEvent(started(), REF);
     await vi.advanceTimersByTimeAsync(0);
-    streamer.handleEvent({ type: 'text_delta', taskId: 't1', delta: 'done' }, REF);
-    streamer.handleEvent({ type: 'task_completed', taskId: 't1' }, REF);
+    streamer.handleEvent({ type: 'text_delta', runId: 't1', delta: 'done' }, REF);
+    streamer.handleEvent({ type: 'run_completed', runId: 't1' }, REF);
     await vi.advanceTimersByTimeAsync(0);
 
     expect(client.contentUpdates).toHaveLength(1);
@@ -149,14 +149,14 @@ describe('CardStreamer', () => {
     ]);
   });
 
-  it('appends a failure marker on task_failed before closing', async () => {
+  it('appends a failure marker on run_failed before closing', async () => {
     const client = new FakeFeishuClient();
     const streamer = makeStreamer(client);
 
     streamer.handleEvent(started(), REF);
     await vi.advanceTimersByTimeAsync(0);
-    streamer.handleEvent({ type: 'text_delta', taskId: 't1', delta: 'partial' }, REF);
-    streamer.handleEvent({ type: 'task_failed', taskId: 't1', error: 'boom' }, REF);
+    streamer.handleEvent({ type: 'text_delta', runId: 't1', delta: 'partial' }, REF);
+    streamer.handleEvent({ type: 'run_failed', runId: 't1', error: 'boom' }, REF);
     await vi.advanceTimersByTimeAsync(0);
 
     expect(client.contentUpdates).toHaveLength(1);
@@ -166,12 +166,12 @@ describe('CardStreamer', () => {
     expect(client.settingsUpdates).toHaveLength(1);
   });
 
-  it('ignores ticket tasks', async () => {
+  it('ignores ticket runs', async () => {
     const client = new FakeFeishuClient();
     const streamer = makeStreamer(client);
 
     streamer.handleEvent(
-      { type: 'task_started', taskId: 't1', workerId: 'w1', ticketId: 'tk1' },
+      { type: 'run_started', runId: 't1', workerId: 'w1', ticketId: 'tk1' },
       { kind: 'ticket', ticketId: 'tk1' }
     );
     await vi.advanceTimersByTimeAsync(1_000);

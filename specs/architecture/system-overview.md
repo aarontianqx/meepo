@@ -61,7 +61,19 @@ The deployment is centrally operated; spaces and workers join freely:
         └─ Space: membership (userId→role) + boundWorkerId (console-configured)
 ```
 
+### Domain Glossary
+
+The execution domain has exactly five nouns:
+
+- **Schedule** — when work gets produced (`timing` + `action: create_ticket | resume_session`).
+- **Ticket** — an independent, self-contained work unit (queueable, retryable).
+- **Turn** — one continuation of an existing session.
+- **Run** — one execution attempt of a Ticket or a Turn.
+- **Session** — a window-bound conversation container (`main` / `thread`).
+
+Everything else is an attribute or an action, not a concept.
+
 - **Space is the tenant**: context, memory, sessions, and tickets are isolated per space. Access is governed by space membership keyed to the SSO `userId` — every member may administer the space, and exactly one member is the `owner`.
 - **Worker Enrollment Tokens** (`mep_...`) are issued by a space owner for a chosen set of spaces. At registration the worker presents only its token; the server resolves the authorized space set (`WorkerNode.spaceIds`). Workers never self-select spaces.
-- **Space Worker Binding** (`Space.boundWorkerId`): each space designates the worker that hosts its main sessions; task sessions dispatch to a randomly chosen enrolled worker at creation, then stay pinned. See `specs/features/space-and-chat.md` for the full binding and migration semantics.
+- **Space Worker Binding** (`Space.boundWorkerId`): each space designates the worker that hosts its main sessions; thread sessions dispatch to a randomly chosen enrolled worker at creation, then stay pinned. See `specs/features/space-and-chat.md` for the full binding and migration semantics.
 - The dispatcher only ever routes a space's work to workers enrolled for that space (tag matching applies as a secondary filter).

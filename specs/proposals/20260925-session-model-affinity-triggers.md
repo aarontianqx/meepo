@@ -55,6 +55,18 @@ Model provider credentials are stored per space by the server and injected into 
 
 All scheduling stores and compares in UTC. Each reminder/cron record carries a `timezone` (IANA) defaulting to the **space's configured timezone** — never the worker's local timezone, since the server is authoritative. Timezone-naive inputs are interpreted in the record's timezone; cron expressions are strictly 5-field.
 
+### D10. Unified execution model (Schedule / Ticket / Turn / Run)
+
+The execution domain is reduced to five nouns answering three questions:
+
+- **Schedule** (when does work get produced): the single scheduling entity — `timing` (`at` | `cron`) + `action` (`create_ticket` | `resume_session`). Reminder and CronJob as entities are retired; both are just Schedule actions. Session resume schedules keep the 7-day staleness TTL.
+- **Ticket** (independent work): self-contained objective, fresh context, queueable and retryable. A ticket created from a session carries `originSessionId` for report-back.
+- **Turn** (in-session work): one continuation of a session, pinned to its bound worker. User messages and schedule fires both materialize as Turns; wakeup is not a separate concept.
+- **Run** (one execution attempt): every dispatch creates a Run (`work`, `attempt`, `workerId`, `status`); stream events, heartbeat `activeRunIds`, and terminal states hang off it. `taskId` is renamed `runId`; `SessionKind` is `main | thread`.
+- **Timing**: `at` for one-shot, `cron` for recurring — the `recurring` boolean is gone.
+
+The agent's tool surface is unchanged by this model: `CronCreate` (resume_session) and `TicketCreate` (create_ticket, now or scheduled) — the boundary is context continuity, never timing.
+
 ## 3. Consequences
 
 - Session migration between workers is no longer a system concern; it is an explicit user action with documented state loss. This removes the hardest class of edge cases at the cost of sessions pausing when their worker is offline.

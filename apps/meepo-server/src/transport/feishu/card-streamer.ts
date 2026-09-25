@@ -7,7 +7,7 @@ import type { FeishuClient } from './feishu-client.js';
 const MARKDOWN_ELEMENT_ID = 'md';
 const DEFAULT_FLUSH_INTERVAL_MS = 500;
 
-interface CardTask {
+interface CardRun {
   cardId?: string;
   text: string;
   sequence: number;
@@ -26,14 +26,14 @@ export interface CardStreamerDeps {
 }
 
 /**
- * Renders worker stream events into a Feishu streaming card per session task:
+ * Renders worker stream events into a Feishu streaming card per session run:
  * a CardKit entity card (schema 2.0, streaming_mode) is created on
- * task_started and sent into the session's thread; text deltas are
+ * run_started and sent into the session's thread; text deltas are
  * accumulated and pushed as full-text element updates on a throttle; the
- * terminal event flushes and closes streaming mode. Ticket tasks are skipped.
+ * terminal event flushes and closes streaming mode. Ticket runs are skipped.
  */
 export class CardStreamer {
-  private readonly tasks = new Map<string, CardTask>();
+  private readonly runs = new Map<string, CardRun>();
   private readonly flushIntervalMs: number;
   private readonly onError: (err: unknown) => void;
 
@@ -50,109 +50,109 @@ export class CardStreamer {
 
   private async track(event: WorkerStreamEvent, sessionId: string): Promise<void> {
     switch (event.type) {
-      case 'task_started':
-        await this.startCard(event.taskId, sessionId);
+      case 'run_started':
+        await this.startCard(event.runId, sessionId);
         return;
       case 'text_delta': {
-        const task = this.tasks.get(event.taskId);
-        if (!task || task.closed) return;
-        task.text += event.delta;
-        task.dirty = true;
-        this.scheduleFlush(event.taskId, task);
+        const run = this.runs.get(event.runId);
+        if (!run || run.closed) return;
+        run.text += event.delta;
+        run.dirty = true;
+        this.scheduleFlush(event.runId, run);
         return;
       }
-      case 'task_completed':
-        await this.finishCard(event.taskId, false);
+      case 'run_completed':
+        await this.finishCard(event.runId, false);
         return;
-      case 'task_failed':
-        await this.finishCard(event.taskId, true, event.error);
+      case 'run_failed':
+        await this.finishCard(event.runId, true, event.error);
         return;
       default:
         return;
     }
   }
 
-  private async startCard(taskId: string, sessionId: string): Promise<void> {
-    const task: CardTask = {
+  private async startCard(runId: string, sessionId: string): Promise<void> {
+    const run: CardRun = {
       text: '',
       sequence: 0,
       dirty: false,
       closed: false,
       queue: Promise.resolve(),
     };
-    this.tasks.set(taskId, task);
-    task.queue = task.queue.then(async () => {
+    this.runs.set(runId, run);
+    run.queue = run.queue.then(async () => {
       const session = await this.deps.sessions.getSession(sessionId);
       if (!session.anchorMessageId) {
         throw new Error(`session ${sessionId} has no reply anchor; cannot stream card`);
       }
       const cardId = await this.deps.client.createCard(buildStreamingCardJson());
-      task.cardId = cardId;
-      // main sessions (private chats) reply in the main flow; task sessions
+      run.cardId = cardId;
+      // main sessions (private chats) reply in the main flow; thread sessions
       // (group threads) reply inside their thread.
       await this.deps.client.replyCard(session.anchorMessageId, cardId, {
         replyInThread: session.kind !== 'main',
       });
     });
-    await task.queue;
+    await run.queue;
   }
 
-  private scheduleFlush(taskId: string, task: CardTask): void {
-    if (task.timer) return;
-    task.timer = setTimeout(() => {
-      task.timer = undefined;
-      if (task.closed || !task.dirty) return;
-      task.dirty = false;
-      this.enqueue(taskId, task, () => this.pushContent(task));
+  private scheduleFlush(runId: string, run: CardRun): void {
+    if (run.timer) return;
+    run.timer = setTimeout(() => {
+      run.timer = undefined;
+      if (run.closed || !run.dirty) return;
+      run.dirty = false;
+      this.enqueue(runId, run, () => this.pushContent(run));
     }, this.flushIntervalMs);
   }
 
-  private async finishCard(taskId: string, failed: boolean, error?: string): Promise<void> {
-    const task = this.tasks.get(taskId);
-    if (!task) return;
-    task.closed = true;
-    if (task.timer) {
-      clearTimeout(task.timer);
-      task.timer = undefined;
+  private async finishCard(runId: string, failed: boolean, error?: string): Promise<void> {
+    const run = this.runs.get(runId);
+    if (!run) return;
+    run.closed = true;
+    if (run.timer) {
+      clearTimeout(run.timer);
+      run.timer = undefined;
     }
     if (failed) {
-      task.text += `\n\n> ⚠️ 任务失败：${error ?? 'unknown error'}`;
-      task.dirty = true;
+      run.text += `\n\n> ⚠️ 任务失败：${error ?? 'unknown error'}`;
+      run.dirty = true;
     }
-    this.enqueue(taskId, task, async () => {
-      if (task.dirty) {
-        task.dirty = false;
-        await this.pushContent(task);
+    this.enqueue(runId, run, async () => {
+      if (run.dirty) {
+        run.dirty = false;
+        await this.pushContent(run);
       }
-      if (!task.cardId) return;
-      task.sequence += 1;
+      if (!run.cardId) return;
+      run.sequence += 1;
       await this.deps.client.updateCardSettings(
-        task.cardId,
+        run.cardId,
         JSON.stringify({ config: { streaming_mode: false } }),
-        task.sequence
+        run.sequence
       );
     });
-    await task.queue;
-    this.tasks.delete(taskId);
+    await run.queue;
+    this.runs.delete(runId);
   }
 
-  /** Chains an operation onto the task's queue, waiting for card creation first. */
-  private enqueue(taskId: string, task: CardTask, op: () => Promise<void>): void {
-    task.queue = task.queue.then(op).catch((err: unknown) => {
-      this.tasks.delete(taskId);
+  /** Chains an operation onto the run's queue, waiting for card creation first. */
+  private enqueue(runId: string, run: CardRun, op: () => Promise<void>): void {
+    run.queue = run.queue.then(op).catch((err: unknown) => {
+      this.runs.delete(runId);
       this.onError(err);
     });
   }
 
-  private async pushContent(task: CardTask): Promise<void> {
-    if (!task.cardId || !task.text) return;
-    task.sequence += 1;
+  private async pushContent(run: CardRun): Promise<void> {
+    if (!run.cardId || !run.text) return;
+    run.sequence += 1;
     await this.deps.client.updateCardContent(
-      task.cardId,
+      run.cardId,
       MARKDOWN_ELEMENT_ID,
-      task.text,
-      task.sequence,
-      `${task.cardId}_${task.sequence}`
+      run.text,
+      run.sequence,
+      `${run.cardId}_${run.sequence}`
     );
   }
 }

@@ -1,4 +1,4 @@
-import type { SessionDispatchEnvelope } from '@meepo/protocol';
+import type { TurnDispatchEnvelope } from '@meepo/protocol';
 import type { Database } from 'better-sqlite3';
 
 import type {
@@ -17,7 +17,7 @@ function rowToDispatch(row: DispatchQueueRow): QueuedDispatch {
   return {
     id: row.id,
     sessionId: row.session_id,
-    envelope: JSON.parse(row.envelope) as SessionDispatchEnvelope,
+    envelope: JSON.parse(row.envelope) as TurnDispatchEnvelope,
     queuedAt: row.queued_at,
   };
 }

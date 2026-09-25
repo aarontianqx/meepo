@@ -44,7 +44,7 @@ describe('SqliteSessionRepository', () => {
 
   it('finds a session by thread coordinates', async () => {
     await repo.save(makeSession());
-    await repo.save(makeSession({ id: 'session-2', threadId: 'thread-2', kind: 'task' }));
+    await repo.save(makeSession({ id: 'session-2', threadId: 'thread-2', kind: 'thread' }));
 
     expect(await repo.getByThread('space-1', 'chat-1', 'thread-1')).toEqual(makeSession());
     expect(await repo.getByThread('space-1', 'chat-1', 'thread-unknown')).toBeUndefined();

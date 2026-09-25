@@ -1,29 +1,28 @@
 import type { FastifyInstance } from 'fastify';
 
-import type { CreateReminderInput } from '../../../domain/schedule/scheduler-service.js';
+import type { CreateScheduleInput } from '../../../domain/schedule/scheduler-service.js';
 import type { ServiceContainer } from '../../../service-container.js';
 import { identityOf } from '../auth.js';
 
-interface ReminderParams {
+interface ScheduleParams {
   id: string;
 }
 
-interface ListRemindersQuery {
+interface ListSchedulesQuery {
   spaceId?: string;
 }
 
 export function registerScheduleRoutes(app: FastifyInstance, services: ServiceContainer): void {
-  app.post('/api/reminders', async (req) => {
-    const body = req.body as CreateReminderInput;
-    return services.schedulerService.createReminder(body, identityOf(req).userId);
+  app.post('/api/schedules', async (req) => {
+    const body = req.body as CreateScheduleInput;
+    return services.schedulerService.createSchedule(body, identityOf(req).userId);
   });
 
-  app.get<{ Querystring: ListRemindersQuery }>('/api/reminders', async (req) => {
-    if (!req.query.spaceId) return [];
-    return services.schedulerService.listRemindersBySpace(req.query.spaceId);
-  });
+  app.get<{ Querystring: ListSchedulesQuery }>('/api/schedules', async (req) =>
+    services.schedulerService.listSchedules(req.query.spaceId)
+  );
 
-  app.post<{ Params: ReminderParams }>('/api/reminders/:id/cancel', async (req) =>
-    services.schedulerService.cancelReminder(req.params.id)
+  app.post<{ Params: ScheduleParams }>('/api/schedules/:id/cancel', async (req) =>
+    services.schedulerService.cancelSchedule(req.params.id)
   );
 }

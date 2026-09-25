@@ -7,17 +7,17 @@ import { loadConfig } from './config.js';
 
 const config = loadConfig();
 
-/** Upstream stream events; also drives the client's active-task bookkeeping. */
+/** Upstream stream events; also drives the client's active-run bookkeeping. */
 const emit = (event: WorkerStreamEvent): void => {
-  if (event.type === 'task_started') client.taskStarted(event.taskId);
-  if (event.type === 'task_completed' || event.type === 'task_failed') {
-    client.taskFinished(event.taskId);
+  if (event.type === 'run_started') client.runStarted(event.runId);
+  if (event.type === 'run_completed' || event.type === 'run_failed') {
+    client.runFinished(event.runId);
   }
   client.sendNotification(SERVER_CHANNEL_EVENTS.stream, event);
 };
 
-const reportDispatchFailure = (taskId: string, err: unknown): void => {
-  emit({ type: 'task_failed', taskId, error: (err as Error).message, code: 'dispatch_failed' });
+const reportDispatchFailure = (runId: string, err: unknown): void => {
+  emit({ type: 'run_failed', runId, error: (err as Error).message, code: 'dispatch_failed' });
 };
 
 const sessionManager = new SessionManager({
@@ -35,18 +35,18 @@ const ticketRunner = new TicketRunner({
 });
 
 const client = new WorkerClient(config, {
-  onSessionDispatch: (envelope) => {
+  onTurnDispatch: (envelope) => {
     sessionManager.handleDispatch(envelope).catch((err) => {
-      reportDispatchFailure(envelope.taskId, err);
+      reportDispatchFailure(envelope.runId, err);
     });
   },
   onTicketDispatch: (envelope) => {
     ticketRunner.handleDispatch(envelope).catch((err) => {
-      reportDispatchFailure(envelope.taskId, err);
+      reportDispatchFailure(envelope.runId, err);
     });
   },
-  onTaskSteer: (payload) => sessionManager.handleSteer(payload),
-  onTaskAbort: (payload) => {
+  onRunSteer: (payload) => sessionManager.handleSteer(payload),
+  onRunAbort: (payload) => {
     sessionManager.handleAbort(payload);
     ticketRunner.handleAbort(payload);
   },

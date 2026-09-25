@@ -12,6 +12,8 @@ export interface CreateTicketInput {
   objective: string;
   contextSummary?: string;
   requiredTags?: string[];
+  /** Session the result reports back to, when created from one */
+  originSessionId?: string;
 }
 
 export interface CompleteTicketInput {
@@ -40,6 +42,7 @@ export class TicketService {
       objective: input.objective,
       contextSummary: input.contextSummary,
       requiredTags: input.requiredTags ?? space.requiredTags,
+      originSessionId: input.originSessionId,
       status: 'pending',
       createdAt: now,
       updatedAt: now,
