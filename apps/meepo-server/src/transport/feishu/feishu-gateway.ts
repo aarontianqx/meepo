@@ -96,13 +96,16 @@ export class FeishuGateway {
     decision: Extract<InboundDecision, { action: 'dispatch' }>
   ): Promise<void> {
     let threadId: string;
+    let anchorMessageId: string;
     if (decision.threadRef.kind === 'prewarm') {
       const reply = await this.deps.client.replyText(msg.messageId, PREWARM_TEXT, {
         replyInThread: true,
       });
       threadId = reply.threadId ?? msg.messageId;
+      anchorMessageId = msg.messageId;
     } else {
       threadId = decision.threadRef.threadId;
+      anchorMessageId = msg.rootId ?? msg.messageId;
     }
 
     const sessionId = await this.resolveSession(decision.windowId, {
@@ -110,6 +113,7 @@ export class FeishuGateway {
       chatId: msg.chatId,
       threadId,
       kind: decision.sessionKind,
+      anchorMessageId,
     });
     this.windowSessions.set(decision.windowId, sessionId);
     this.windowSessions.set(windowIdOf(msg.chatId, threadId), sessionId);
@@ -124,12 +128,18 @@ export class FeishuGateway {
 
   private async resolveSession(
     windowId: string,
-    input: { spaceId: string; chatId: string; threadId: string; kind: 'main' | 'task' }
+    input: {
+      spaceId: string;
+      chatId: string;
+      threadId: string;
+      kind: 'main' | 'task';
+      anchorMessageId: string;
+    }
   ): Promise<string> {
     const cached = this.windowSessions.get(windowId);
     if (cached) {
       try {
-        const session = await this.deps.sessionService.getSession(cached);
+        const session = await this.deps.sessionService.ensureAnchor(cached, input.anchorMessageId);
         if (session.status !== 'closed') return session.id;
       } catch {
         // session vanished; fall through and create a fresh one
@@ -191,6 +201,7 @@ export function normalizeMessage(event: FeishuMessageEvent): InboundMessage | nu
     chatId: message.chat_id,
     chatType: message.chat_type,
     threadId: message.thread_id,
+    rootId: message.root_id,
     senderOpenId,
     text: text.trim(),
     mentionedOpenIds,

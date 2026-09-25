@@ -137,6 +137,13 @@ export const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 3,
+    name: 'session anchor message',
+    up(db) {
+      db.exec('ALTER TABLE sessions ADD COLUMN anchor_message_id TEXT');
+    },
+  },
 ];
 
 /** Applies pending migrations in version order, tracking progress via `user_version`. */

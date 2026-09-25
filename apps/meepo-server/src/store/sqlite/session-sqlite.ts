@@ -9,6 +9,7 @@ interface SessionRow {
   kind: string;
   chat_id: string;
   thread_id: string;
+  anchor_message_id: string | null;
   bound_worker_id: string | null;
   status: string;
   created_at: number;
@@ -22,6 +23,7 @@ function rowToSession(row: SessionRow): Session {
     kind: row.kind as Session['kind'],
     chatId: row.chat_id,
     threadId: row.thread_id,
+    anchorMessageId: row.anchor_message_id ?? undefined,
     boundWorkerId: row.bound_worker_id ?? undefined,
     status: row.status as Session['status'],
     createdAt: row.created_at,
@@ -36,9 +38,9 @@ export class SqliteSessionRepository implements SessionRepository {
     this.db
       .prepare(
         `INSERT OR REPLACE INTO sessions (
-          id, space_id, kind, chat_id, thread_id, bound_worker_id,
+          id, space_id, kind, chat_id, thread_id, anchor_message_id, bound_worker_id,
           status, created_at, last_active_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         session.id,
@@ -46,6 +48,7 @@ export class SqliteSessionRepository implements SessionRepository {
         session.kind,
         session.chatId,
         session.threadId,
+        session.anchorMessageId ?? null,
         session.boundWorkerId ?? null,
         session.status,
         session.createdAt,

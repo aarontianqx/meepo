@@ -5,6 +5,8 @@ export interface InboundMessage {
   chatType: 'p2p' | 'group';
   /** Present when the message lives inside a thread */
   threadId?: string;
+  /** The thread's top-level (root) message id, used as the reply anchor */
+  rootId?: string;
   senderOpenId: string;
   text: string;
   mentionedOpenIds: string[];

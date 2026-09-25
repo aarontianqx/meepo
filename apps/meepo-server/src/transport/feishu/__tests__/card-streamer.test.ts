@@ -8,7 +8,7 @@ import type { FeishuClient, ReplyResult } from '../feishu-client.js';
 
 class FakeFeishuClient implements FeishuClient {
   readonly createdCards: string[] = [];
-  readonly cardsSentTo: { threadId: string; cardId: string }[] = [];
+  readonly cardsSentTo: { messageId: string; cardId: string }[] = [];
   readonly contentUpdates: {
     cardId: string;
     elementId: string;
@@ -23,8 +23,8 @@ class FakeFeishuClient implements FeishuClient {
     throw new Error('not used by the card streamer');
   }
 
-  async sendCardToThread(threadId: string, cardId: string): Promise<void> {
-    this.cardsSentTo.push({ threadId, cardId });
+  async replyCard(messageId: string, cardId: string): Promise<void> {
+    this.cardsSentTo.push({ messageId, cardId });
   }
 
   async createCard(cardJson: string): Promise<string> {
@@ -54,6 +54,7 @@ const SESSION: Session = {
   kind: 'task',
   chatId: 'oc_1',
   threadId: 'omt_1',
+  anchorMessageId: 'om_root',
   status: 'active',
   createdAt: 0,
   lastActiveAt: 0,
@@ -91,7 +92,7 @@ describe('CardStreamer', () => {
     };
     expect(cardJson.schema).toBe('2.0');
     expect(cardJson.config.streaming_mode).toBe(true);
-    expect(client.cardsSentTo).toEqual([{ threadId: 'omt_1', cardId: 'card_1' }]);
+    expect(client.cardsSentTo).toEqual([{ messageId: 'om_root', cardId: 'card_1' }]);
   });
 
   it('throttles deltas into full-text updates with increasing sequence', async () => {

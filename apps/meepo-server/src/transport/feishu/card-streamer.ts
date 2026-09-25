@@ -83,9 +83,12 @@ export class CardStreamer {
     this.tasks.set(taskId, task);
     task.queue = task.queue.then(async () => {
       const session = await this.deps.sessions.getSession(sessionId);
+      if (!session.anchorMessageId) {
+        throw new Error(`session ${sessionId} has no reply anchor; cannot stream card`);
+      }
       const cardId = await this.deps.client.createCard(buildStreamingCardJson());
       task.cardId = cardId;
-      await this.deps.client.sendCardToThread(session.threadId, cardId);
+      await this.deps.client.replyCard(session.anchorMessageId, cardId);
     });
     await task.queue;
   }

@@ -40,7 +40,7 @@ The `meepo-server` application coordinates multi-chat inbound traffic, manages s
 
 - Aggregates worker stream events into full-snapshot render frames (not deltas), keeping the core IM-agnostic and immune to out-of-order frames.
 - Throttles CardKit patch calls (~0.5s) to adhere to Feishu rate limits while providing smooth streaming output.
-- Sends thread messages via `receive_id_type=thread_id`; `reply_in_thread` is used only to prewarm a thread from a main-stream mention (it is rejected inside threads, Feishu error 99992354).
+- Sends thread messages as `reply_in_thread` replies to the session's anchor (root) message; creating a message with `receive_id_type=thread_id` is rejected by the API, and `reply_in_thread` is rejected on messages already inside a thread (error 99992354).
 
 ### 6. Scheduler
 

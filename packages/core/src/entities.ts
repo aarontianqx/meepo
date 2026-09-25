@@ -105,6 +105,8 @@ export interface Session {
   kind: SessionKind;
   chatId: string;
   threadId: string;
+  /** Feishu root message used as the reply anchor for thread messages */
+  anchorMessageId?: string;
   /** Worker this session is pinned to */
   boundWorkerId?: string;
   status: 'active' | 'idle' | 'closed';

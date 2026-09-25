@@ -11,6 +11,7 @@ export interface OpenSessionInput {
   chatId: string;
   threadId: string;
   kind?: SessionKind;
+  anchorMessageId?: string;
 }
 
 export class SessionService {
@@ -24,7 +25,13 @@ export class SessionService {
     const space = await this.spaces.getById(input.spaceId);
     if (!space) throw validation(`Unknown space: ${input.spaceId}`);
     const existing = await this.sessions.getByThread(input.spaceId, input.chatId, input.threadId);
-    if (existing && existing.status !== 'closed') return existing;
+    if (existing && existing.status !== 'closed') {
+      if (input.anchorMessageId && !existing.anchorMessageId) {
+        existing.anchorMessageId = input.anchorMessageId;
+        await this.sessions.save(existing);
+      }
+      return existing;
+    }
     const now = Date.now();
     const session: Session = {
       id: randomUUID(),
@@ -32,6 +39,7 @@ export class SessionService {
       kind: input.kind ?? 'task',
       chatId: input.chatId,
       threadId: input.threadId,
+      anchorMessageId: input.anchorMessageId,
       status: 'active',
       createdAt: now,
       lastActiveAt: now,
@@ -74,6 +82,16 @@ export class SessionService {
     session.lastActiveAt = Date.now();
     if (session.status === 'idle') session.status = 'active';
     await this.sessions.save(session);
+    return session;
+  }
+
+  /** Backfills the reply anchor for sessions created before anchors existed. */
+  async ensureAnchor(id: string, anchorMessageId: string): Promise<Session> {
+    const session = await this.getSession(id);
+    if (!session.anchorMessageId) {
+      session.anchorMessageId = anchorMessageId;
+      await this.sessions.save(session);
+    }
     return session;
   }
 

@@ -18,6 +18,7 @@ export interface FeishuMessageEvent {
     chat_id: string;
     chat_type: string;
     thread_id?: string;
+    root_id?: string;
     message_type: string;
     content: string;
     mentions?: { key: string; name?: string; id?: { open_id?: string } }[];
@@ -34,7 +35,7 @@ export interface FeishuClient {
     text: string,
     opts?: { replyInThread?: boolean }
   ): Promise<ReplyResult>;
-  sendCardToThread(threadId: string, cardId: string): Promise<void>;
+  replyCard(messageId: string, cardId: string): Promise<void>;
   createCard(cardJson: string): Promise<string>;
   updateCardContent(
     cardId: string,
@@ -67,16 +68,16 @@ export class LarkFeishuClient implements FeishuClient {
     return { messageId: res.data?.message_id ?? '', threadId: res.data?.thread_id };
   }
 
-  async sendCardToThread(threadId: string, cardId: string): Promise<void> {
-    await this.client.im.v1.message.create({
-      // the OpenAPI accepts thread_id here; the SDK type union lags behind
-      params: { receive_id_type: 'thread_id' as 'chat_id' },
+  async replyCard(messageId: string, cardId: string): Promise<void> {
+    const res = await this.client.im.v1.message.reply({
+      path: { message_id: messageId },
       data: {
-        receive_id: threadId,
         msg_type: 'interactive',
         content: JSON.stringify({ type: 'card', data: { card_id: cardId } }),
+        reply_in_thread: true,
       },
     });
+    if (res.code) throw new Error(`im message.reply (card) failed: ${res.code} ${res.msg}`);
   }
 
   async createCard(cardJson: string): Promise<string> {

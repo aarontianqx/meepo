@@ -37,7 +37,7 @@ class FakeFeishuClient implements FeishuClient {
     };
   }
 
-  async sendCardToThread(): Promise<void> {}
+  async replyCard(): Promise<void> {}
   async createCard(): Promise<string> {
     return 'card_1';
   }
