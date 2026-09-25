@@ -30,14 +30,16 @@ meepo/
 
 ### Architecture References
 
-| Component / Subsystem | Role | Spec |
-|---|---|---|
-| System Overview | End-to-end architecture & topology | `specs/architecture/system-overview.md` |
-| Server Control Plane | Gateway, Dispatcher, Memory & Session Store | `specs/architecture/server-control-plane.md` |
-| Worker Data Plane | Runner lifecycle, Slot concurrency, Worktree | `specs/architecture/worker-data-plane.md` |
-| Space & Chat Mapping | Multi-chat to Space isolation model | `specs/features/space-and-chat.md` |
-| Interactive Session | Real-time Thread routing & streaming | `specs/features/interactive-session.md` |
-| Ticket Pipeline | Async task & batch run pipeline | `specs/features/ticket-pipeline.md` |
+| Component / Subsystem | Role                                               | Spec                                         |
+| --------------------- | -------------------------------------------------- | -------------------------------------------- |
+| System Overview       | End-to-end architecture & topology                 | `specs/architecture/system-overview.md`      |
+| Server Control Plane  | Gateway, Dispatcher, Memory & Session Store        | `specs/architecture/server-control-plane.md` |
+| Worker Data Plane     | Runner lifecycle, Slot concurrency, Worktree       | `specs/architecture/worker-data-plane.md`    |
+| Space & Chat Mapping  | Multi-chat to Space isolation model                | `specs/features/space-and-chat.md`           |
+| Interactive Session   | Real-time Thread routing & streaming               | `specs/features/interactive-session.md`      |
+| Ticket Pipeline       | Async task & batch run pipeline                    | `specs/features/ticket-pipeline.md`          |
+| Triggers & Scheduling | Reminder vs cron primitives, unified trigger model | `specs/features/triggers-and-scheduling.md`  |
+| Backend Layering      | Dependency & placement rules for heavy backends    | `specs/architecture/backend-layering.md`     |
 
 ## Coding Style & Guard Rails
 
@@ -52,10 +54,13 @@ meepo/
 
 ### Architecture Constraints
 
-- **Single Source of Truth (SST)**: `meepo-server` owns persistent configuration, space long-term memory, and authoritative session transcripts. `meepo-worker` is a disposable computation runner and must remain stateless across task lifetimes.
+- **Server Owns Truth; Worker Owns Live State**: `meepo-server` is the SST for persistent configuration, space long-term memory, session transcripts, and tickets. Workers own inherently local state (agent process, workspace, uncommitted changes): stateless across ticket lifetimes, but sticky for sessions.
+- **Hard Session–Worker Affinity**: A session is pinned to one worker at creation and never migrates implicitly — main sessions follow the space's `boundWorkerId`, task sessions their dispatch target. Worker offline means the session pauses; rebinding is a deliberate user action. Tickets are exempt.
 - **Slot Isolation**: A worker's slot defines its maximum concurrency limit. When `slot > 1`, tasks MUST run in isolated `git worktree` directories to prevent file collisions.
 - **Clean Worker Context**: Workers executing coding tasks must receive structured objective bundles rather than uncurated conversational chat logs.
 - **Protocol Independence**: Payloads between server and worker must conform to `@meepo/protocol` contracts and serialize cleanly to JSON/CBOR.
+- **Edge Authentication**: User identity comes from an edge SSO token via an `Authenticator` port (a local adapter serves development until SSO integration); identity is read from request context, never from request payloads. Authorization is per-space membership (one role per user per space); MEEPO keeps no account system.
+- **Layering**: `transport → domain → store` one-way; ports defined at the consumer; `domain/` never imports transport/infra frameworks; constructor injection only. Full rules: `specs/architecture/backend-layering.md`.
 
 ## Commits
 

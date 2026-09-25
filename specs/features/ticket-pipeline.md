@@ -2,12 +2,12 @@
 
 ## 1. Overview
 
-While interactive sessions are optimized for synchronous dialogue, complex coding operations (multi-file refactorings, test suite runs, automated migrations, Cron jobs) are modeled as **Tickets**.
+While interactive sessions are optimized for synchronous dialogue, complex coding operations (multi-file refactorings, test suite runs, automated migrations, scheduled jobs) are modeled as **Tickets**.
 
 ## 2. Ticket Lifecycle
 
 ```
-[Trigger: Bot intent / Webhook / Cron]
+[Trigger: Bot intent / Webhook / Reminder]
                  │
                  ▼
       [Create Ticket in Server]
@@ -42,7 +42,7 @@ interface Ticket {
   objective: string;
   contextSummary?: string;
   requiredTags: string[];
-  status: "pending" | "claimed" | "running" | "completed" | "failed";
+  status: 'pending' | 'claimed' | 'running' | 'completed' | 'failed';
   assignedWorkerId?: string;
   result?: {
     branch?: string;
@@ -55,7 +55,17 @@ interface Ticket {
 }
 ```
 
-## 4. Key Advantages
+## 4. Triggers
+
+A ticket is created by any of:
+
+- **Bot intent**: the main assistant formalizes a user request into a ticket.
+- **Webhooks**: external systems (CI, monitoring) push events that materialize as tickets.
+- **Reminders**: a task-level scheduled trigger — a self-contained objective bundle plus a fire time or cron expression — creates a fresh ticket at fire time. Reminders are space-scoped and independent of any conversation (contrast with session crons; see `specs/features/triggers-and-scheduling.md`).
+
+Tickets are exempt from session affinity: any enrolled, tag-matched worker with a free slot may claim a ticket.
+
+## 5. Key Advantages
 
 - **Clean Execution Context**: The worker receives a concise, curated `objective` rather than a sprawling 50-turn chat history.
 - **Fault Tolerance**: If a worker disconnects mid-task, the ticket resets to `pending` and can be claimed by another worker.

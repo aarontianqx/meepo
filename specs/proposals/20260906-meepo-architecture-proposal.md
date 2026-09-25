@@ -5,6 +5,8 @@
 - **Author**: Aaron Tian
 - **Title**: MEEPO (Multi-worker Execution Engine for Project-isolated Orchestration)
 
+> **Update (2026-09-25)**: The session ownership and affinity model in §2.2 ("Worker Statelessness") and §2.5 is revised by `20260925-session-model-affinity-triggers.md` — workers are sticky for sessions, and binding is space-configured. Where the two conflict, the newer ADR and the evergreen docs win.
+
 ---
 
 ## 1. Background & Context
@@ -12,6 +14,7 @@
 In modern software organizations, AI coding assistants are rapidly evolving from personal CLI companions (like Claude Code, Cursor, Pi) into team-wide collaborative agents embedded in Instant Messaging platforms (such as Feishu/Lark).
 
 However, integrating coding agents into team IM environments introduces significant engineering challenges:
+
 1. **Multi-Channel & Project Boundaries**: A single project/repository often spans multiple IM groups (e.g., an internal R&D group, a customer support group, an operations group). Context and memory must be shared across these groups, yet strictly isolated from other projects.
 2. **Execution Environment Divergence**: Some tasks require executing proprietary code on specific private developer laptops or on-premise physical servers, while others run safely in dynamic ephemeral cloud sandboxes.
 3. **Heavy Compute vs. Lightweight Gateway**: Running complete coding agent loops (with intensive file I/O, compilation, local test execution, and bash execution) inside a central IM server creates huge network/I/O bottlenecks, single points of failure, and security risks.
@@ -77,6 +80,7 @@ Space (Project Boundary, e.g. "earendil-pi")
 To satisfy both low-latency conversation and heavy background execution, MEEPO implements two operating models:
 
 #### Mode A: Interactive Streaming Session (Thread-bound)
+
 1. User `@bot` in a Feishu thread with a query.
 2. Server's **Capacity-aware Dispatcher** routes the thread to an available worker holding the project's workspace, respecting session affinity.
 3. Worker receives the turn prompt with prior context, executes tool calls locally, and streams back `message_update` and `tool_execution_*` events.
@@ -84,6 +88,7 @@ To satisfy both low-latency conversation and heavy background execution, MEEPO i
 5. In-flight messages support **Steering** (`agent.steer()`) when new user prompts arrive while tools are executing.
 
 #### Mode B: Asynchronous Ticket Pipeline (Decoupled Background Tasks)
+
 1. When a task requires substantial multi-step modifications (e.g., "Refactor module X and submit a PR") or originates from Cron/Webhooks, it is formalized as a **Ticket**.
 2. The Server or Main Assistant creates a structured Ticket (`title`, `objective`, `repo`, `tags`, `contextSummary`).
 3. Workers matching the required tags pull or are assigned tickets.
@@ -93,6 +98,7 @@ To satisfy both low-latency conversation and heavy background execution, MEEPO i
 ### 2.4 Worker Concurrency & Slot Management
 
 Each worker declares a capacity specification:
+
 - **Slot Count**: The maximum concurrent agent tasks a worker can execute simultaneously.
 - **Hardware Profile**: Reported CPU, memory, and OS architecture in regular heartbeats.
 - **Directory Isolation**:
@@ -102,6 +108,7 @@ Each worker declares a capacity specification:
 ### 2.5 Storage & Single Source of Truth (SST)
 
 Worker nodes (especially developer laptops) must be treated as transient, disposable compute targets:
+
 - **Server Owns**:
   - Space definitions, chat associations, and worker authentication tokens.
   - Space long-term memory (structured summaries, architectural rules).
@@ -117,12 +124,12 @@ Worker nodes (especially developer laptops) must be treated as transient, dispos
 
 MEEPO directly leverages production-grade subsystems from `@earendil-works/pi`:
 
-| Pi Monorepo Component | MEEPO Integration | Benefit |
-|---|---|---|
-| **`@earendil-works/pi-ai`** | Model invocation in Worker & Server | Unified API for OpenAI, Anthropic, Gemini, DeepSeek; stream parsing; tool call argument deltas; reasoning/thinking block extraction. |
-| **`@earendil-works/pi-agent-core`** | Agent Loop in `meepo-worker` | Stateful execution loops, `beforeToolCall`/`afterToolCall` lifecycle hooks, steering/follow-up message queues, and context transformers. |
-| **`coding-agent/src/core/tools/`** | Pluggable tool operations | Direct reuse of `createReadTool`, `createWriteTool`, `createEditTool`, and `createBashTool` via pluggable `Operations` interfaces (`ReadOperations`, `BashOperations`, etc.). |
-| **`coding-agent/src/core/compaction/`** | Context compaction | File operation extraction, lossy conversation summarization, and token preservation for long multi-turn sessions. |
+| Pi Monorepo Component                   | MEEPO Integration                   | Benefit                                                                                                                                                                       |
+| --------------------------------------- | ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`@earendil-works/pi-ai`**             | Model invocation in Worker & Server | Unified API for OpenAI, Anthropic, Gemini, DeepSeek; stream parsing; tool call argument deltas; reasoning/thinking block extraction.                                          |
+| **`@earendil-works/pi-agent-core`**     | Agent Loop in `meepo-worker`        | Stateful execution loops, `beforeToolCall`/`afterToolCall` lifecycle hooks, steering/follow-up message queues, and context transformers.                                      |
+| **`coding-agent/src/core/tools/`**      | Pluggable tool operations           | Direct reuse of `createReadTool`, `createWriteTool`, `createEditTool`, and `createBashTool` via pluggable `Operations` interfaces (`ReadOperations`, `BashOperations`, etc.). |
+| **`coding-agent/src/core/compaction/`** | Context compaction                  | File operation extraction, lossy conversation summarization, and token preservation for long multi-turn sessions.                                                             |
 
 ---
 
