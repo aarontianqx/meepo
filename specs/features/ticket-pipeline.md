@@ -18,8 +18,8 @@ While interactive sessions are optimized for synchronous dialogue, complex codin
         (Status: Running)
                  │
                  ▼
- [Worker Executes in Clean Worktree]
-   - Checkout branch
+ [Worker Executes in Neutral Task Directory]
+   - Clone/worktree repos on demand
    - Apply edits & run tests
    - Commit changes & push branch
    - Open Pull Request
@@ -41,8 +41,6 @@ interface Ticket {
   title: string;
   objective: string;
   contextSummary?: string;
-  /** Repo binding for this ticket; falls back to the space default repo when absent */
-  workspace?: { repoUrl: string; branch: string; commitSha?: string };
   requiredTags: string[];
   status: 'pending' | 'claimed' | 'running' | 'completed' | 'failed';
   assignedWorkerId?: string;
@@ -57,7 +55,7 @@ interface Ticket {
 }
 ```
 
-The repo binding is **ticket-scoped**: which repository a task should touch is part of the objective bundle, not a space-global assumption. Repository credentials belong to the worker's own environment (the machine owner's git/SSH configuration) — the server never handles repo auth.
+Tickets are a **generic async-task mechanism**: they may or may not involve a repository. Whether the objective touches code is expressed in the prompt itself — Meepo manages no repo bindings or worktrees for tickets (the agent handles repositories itself, per the system prompt rules). Repository credentials belong to the worker's own environment.
 
 ## 4. Triggers
 

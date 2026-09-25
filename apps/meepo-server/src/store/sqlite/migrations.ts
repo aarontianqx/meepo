@@ -151,6 +151,13 @@ export const migrations: Migration[] = [
       db.exec('ALTER TABLE tickets ADD COLUMN workspace TEXT');
     },
   },
+  {
+    version: 5,
+    name: 'drop ticket workspace binding',
+    up(db) {
+      db.exec('ALTER TABLE tickets DROP COLUMN workspace');
+    },
+  },
 ];
 
 /** Applies pending migrations in version order, tracking progress via `user_version`. */

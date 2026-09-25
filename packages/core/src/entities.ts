@@ -1,7 +1,7 @@
 /**
  * Domain entity models for Meepo
  */
-import type { ModelConfig, WorkspaceSpec } from '@meepo/protocol';
+import type { ModelConfig } from '@meepo/protocol';
 
 /** Normalized user identity, resolved from the auth layer */
 export interface UserIdentity {
@@ -77,11 +77,6 @@ export interface Ticket {
   title: string;
   objective: string;
   contextSummary?: string;
-  /**
-   * Repo binding for this ticket. When absent, the space's default
-   * repoUrl/defaultBranch is used at dispatch time.
-   */
-  workspace?: WorkspaceSpec;
   requiredTags: string[];
   status: 'pending' | 'claimed' | 'running' | 'completed' | 'failed';
   assignedWorkerId?: string;

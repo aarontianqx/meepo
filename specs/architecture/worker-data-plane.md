@@ -11,14 +11,12 @@ The `meepo-worker` is a self-hosted runner daemon executing on developer machine
 - Uses a stable `workerId` persisted across restarts — bindings and queued dispatches are restored against it on reconnect.
 - Emits periodic heartbeats including active slot utilization, CPU/memory stats, and current task IDs.
 
-### 2. Workspace & Git Worktree Manager
+### 2. Working Directories
 
-- Owns the physical state of sessions: session working directories, repo caches, worktrees, and uncommitted changes. This local state is what makes session affinity a hard constraint, and it is never migrated implicitly.
-- **Sessions start in a neutral per-session directory** (`~/.meepo/sessions/<session-id>`) with no repository pre-mounted — the agent clones or worktrees repos on demand, guided by the system prompt. This directory holds whatever the session produces.
-- **Tickets run in isolated git worktrees** (`~/.meepo/workspaces/<repo-hash>/<ticket-id>`), since they are repo-bound batch tasks by design.
-- **Multi-slot isolation (`maxSlots > 1`)**: concurrent tasks never share a working directory, preventing file collisions and git locking issues.
-- The system prompt instructs the agent to always create a `git worktree` before modifying code, so concurrent sessions never touch the same checkout.
-- Reclaims session directories and worktrees when their session closes or times out; a workspace is abandoned only through an explicit, state-losing rebind initiated by the user.
+- Owns the physical state of executions: per-task working directories and their contents. This local state is what makes session affinity a hard constraint, and it is never migrated implicitly.
+- **Meepo manages no repositories**: sessions and tickets both start in a neutral per-task directory (`~/.meepo/sessions/<session-id>`, `~/.meepo/tickets/<ticket-id>`). Whether a task involves a repo is a prompt-level concern — the agent clones or worktrees repositories itself, guided by the system prompt (always create a `git worktree` before modifying code, so concurrent executions never touch the same checkout).
+- Repository credentials belong to the worker's own environment (the machine owner's git/SSH configuration); neither plane ever handles repo auth.
+- Working directories of closed sessions are reclaimed on a retention policy; a directory is abandoned only through an explicit, state-losing rebind initiated by the user.
 
 ### 3. Agent Execution Engine
 

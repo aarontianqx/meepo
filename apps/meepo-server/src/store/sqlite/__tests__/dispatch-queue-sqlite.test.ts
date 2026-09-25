@@ -17,7 +17,6 @@ function makeItem(overrides: Partial<QueuedDispatch> = {}): QueuedDispatch {
       prompt: 'hello',
       source: { kind: 'user_message', messageId: 'msg-1' },
       delivery: 'wait',
-      workspace: null,
       model: {
         provider: 'openai-completions',
         baseUrl: 'https://api.example.com',
@@ -59,7 +58,6 @@ describe('SqliteDispatchQueueRepository', () => {
         prompt: 'run',
         source: { kind: 'cron', jobId: 'job-1', coalescedCount: 3, stale: true },
         delivery: 'urgent',
-        workspace: { repoUrl: 'https://example.com/repo.git', branch: 'main', commitSha: 'abc' },
         model: {
           provider: 'openai-completions',
           baseUrl: 'https://api.example.com',

@@ -78,13 +78,6 @@ export interface ModelConfig {
   model: string;
 }
 
-/** Workspace a turn executes in; null for no-workspace (main) sessions */
-export interface WorkspaceSpec {
-  repoUrl: string;
-  branch: string;
-  commitSha?: string;
-}
-
 /** Session dispatch: a turn inside an existing (or newly created) session context */
 export interface SessionDispatchEnvelope {
   taskId: string;
@@ -94,11 +87,6 @@ export interface SessionDispatchEnvelope {
   prompt: string;
   source: DispatchSource;
   delivery: DeliveryMode;
-  /**
-   * Explicit repo workspace. Null for chat sessions — they start in a neutral
-   * per-session directory and the agent picks up repos on demand.
-   */
-  workspace: WorkspaceSpec | null;
   /** Space memory and repo hints primed into the agent's system prompt */
   systemPromptContribution?: string;
   model: ModelConfig;
@@ -112,7 +100,8 @@ export interface TicketDispatchEnvelope {
   spaceId: string;
   objective: string;
   contextSummary?: string;
-  workspace: WorkspaceSpec;
+  /** Space memory and repo hints primed into the agent's system prompt */
+  systemPromptContribution?: string;
   model: ModelConfig;
   source: DispatchSource;
   timeoutSeconds?: number;

@@ -112,7 +112,7 @@ export class DispatchService {
       spaceId: space.id,
       objective: ticket.objective,
       contextSummary: ticket.contextSummary,
-      workspace: ticket.workspace ?? { repoUrl: space.repoUrl, branch: space.defaultBranch },
+      systemPromptContribution: composeSystemPromptContribution(space),
       model,
       source: { kind: 'system' },
     };
@@ -220,7 +220,6 @@ export class DispatchService {
       prompt: input.prompt,
       source: input.source,
       delivery: input.delivery,
-      workspace: null,
       systemPromptContribution: composeSystemPromptContribution(space),
       model,
     };
@@ -230,7 +229,7 @@ export class DispatchService {
 function composeSystemPromptContribution(space: Space): string {
   const parts: string[] = [];
   parts.push(
-    `You are chatting in space "${space.name}". Its default repository is ${space.repoUrl} (branch ${space.defaultBranch}), but nothing is cloned for you — clone or worktree it yourself only when the task actually involves code.`
+    `You are chatting in space "${space.name}". Its default repository is ${space.repoUrl} (branch ${space.defaultBranch}) — just a hint; nothing is cloned for you. If the task involves code, clone or worktree the repo yourself; if it doesn't, ignore this.`
   );
   if (space.longTermMemory.trim()) {
     parts.push(`Space long-term memory:\n${space.longTermMemory.trim()}`);

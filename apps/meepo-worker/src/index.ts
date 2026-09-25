@@ -4,12 +4,8 @@ import { SessionManager } from './agent/session-manager.js';
 import { TicketRunner } from './agent/ticket-runner.js';
 import { WorkerClient } from './client.js';
 import { loadConfig } from './config.js';
-import { WorkspaceManager } from './workspace/workspace-manager.js';
 
 const config = loadConfig();
-const workspaceManager = new WorkspaceManager(config.workspaceDir);
-const ensureWorktree = (id: string, spec: Parameters<WorkspaceManager['ensureWorktree']>[1]) =>
-  workspaceManager.ensureWorktree(id, spec);
 
 /** Upstream stream events; also drives the client's active-task bookkeeping. */
 const emit = (event: WorkerStreamEvent): void => {
@@ -35,7 +31,7 @@ const sessionManager = new SessionManager({
 const ticketRunner = new TicketRunner({
   workerId: config.workerId,
   emit,
-  ensureWorktree,
+  ticketsDir: config.ticketsDir,
 });
 
 const client = new WorkerClient(config, {

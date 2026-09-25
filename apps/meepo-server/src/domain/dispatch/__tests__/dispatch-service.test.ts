@@ -135,7 +135,7 @@ describe('DispatchService', () => {
     }
     const envelope = frame.payload as SessionDispatchEnvelope;
     expect(envelope.sessionKind).toBe('main');
-    expect(envelope.workspace).toBeNull();
+    expect(envelope.sessionKind).toBe('main');
   });
 
   it('pins a task session to its dispatch target across turns', async () => {
@@ -204,26 +204,6 @@ describe('DispatchService', () => {
     sender.connected.add('w1');
     expect(await service.dispatchPendingTickets()).toBe(1);
     expect((await tickets.getById('t1'))?.status).toBe('claimed');
-  });
-
-  it('prefers the ticket workspace binding over the space default repo', async () => {
-    await spaces.save(makeSpace('sp1'));
-    await workers.save(makeWorker('w1', ['sp1']));
-    await tickets.save({
-      ...makeTicket('t1', 'sp1'),
-      workspace: { repoUrl: 'git@example.com:other/repo.git', branch: 'dev' },
-    });
-    sender.connected.add('w1');
-
-    await service.dispatchTicket('t1');
-    const frame = sender.sent[0].frame;
-    if (frame.kind !== 'notification' || frame.event !== 'ticket.dispatch') {
-      throw new Error('expected ticket.dispatch');
-    }
-    expect(frame.payload.workspace).toEqual({
-      repoUrl: 'git@example.com:other/repo.git',
-      branch: 'dev',
-    });
   });
 
   it('rejects dispatch when no model is configured', async () => {

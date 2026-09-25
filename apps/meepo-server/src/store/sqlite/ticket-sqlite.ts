@@ -9,7 +9,6 @@ interface TicketRow {
   title: string;
   objective: string;
   context_summary: string | null;
-  workspace: string | null;
   required_tags: string;
   status: string;
   assigned_worker_id: string | null;
@@ -26,7 +25,6 @@ function rowToTicket(row: TicketRow): Ticket {
     title: row.title,
     objective: row.objective,
     contextSummary: row.context_summary ?? undefined,
-    workspace: row.workspace ? (JSON.parse(row.workspace) as Ticket['workspace']) : undefined,
     requiredTags: JSON.parse(row.required_tags) as string[],
     status: row.status as Ticket['status'],
     assignedWorkerId: row.assigned_worker_id ?? undefined,
@@ -44,9 +42,9 @@ export class SqliteTicketRepository implements TicketRepository {
     this.db
       .prepare(
         `INSERT OR REPLACE INTO tickets (
-          id, space_id, title, objective, context_summary, workspace, required_tags,
+          id, space_id, title, objective, context_summary, required_tags,
           status, assigned_worker_id, result, created_at, updated_at, completed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         ticket.id,
@@ -54,7 +52,6 @@ export class SqliteTicketRepository implements TicketRepository {
         ticket.title,
         ticket.objective,
         ticket.contextSummary ?? null,
-        ticket.workspace ? JSON.stringify(ticket.workspace) : null,
         JSON.stringify(ticket.requiredTags),
         ticket.status,
         ticket.assignedWorkerId ?? null,

@@ -1,40 +1,58 @@
-import { Agent } from '@earendil-works/pi-agent-core';
+import { mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
+
+import { Agent, type AgentOptions } from '@earendil-works/pi-agent-core';
 import { createCodingTools } from '@earendil-works/pi-coding-agent';
-import type {
-  TaskAbortPayload,
-  TicketDispatchEnvelope,
-  WorkerStreamEvent,
-  WorkspaceSpec,
-} from '@meepo/protocol';
+import type { TaskAbortPayload, TicketDispatchEnvelope, WorkerStreamEvent } from '@meepo/protocol';
 
 import { createModel, createStreamFn } from './model-factory.js';
-import { StreamForwarder } from './session-runner.js';
+import { StreamForwarder, type RunnerAgent } from './session-runner.js';
 
 export interface TicketRunnerDeps {
   workerId: string;
   emit: (event: WorkerStreamEvent) => void;
-  ensureWorktree: (id: string, spec: WorkspaceSpec) => Promise<string>;
+  /** Root for neutral per-ticket working directories (`<ticketsDir>/<ticketId>`). */
+  ticketsDir: string;
+  /** Factory seam for tests; defaults to mkdir -p under ticketsDir. */
+  ensureTicketDir?: (ticketId: string) => Promise<string>;
+  /** Factory seam for tests; defaults to the real pi Agent. */
+  createAgent?: (options: AgentOptions) => RunnerAgent;
 }
 
-const TICKET_SYSTEM_PROMPT = [
-  'You are Meepo, an autonomous coding agent executing a ticket in a fresh git worktree.',
-  'Use the read/bash/edit/write tools to accomplish the objective, then commit your work.',
-  'When finished, summarize what you changed and why.',
-].join('\n');
+/**
+ * Assemble the ticket system prompt: base identity + working rules, plus the
+ * server-injected space contribution verbatim when present.
+ */
+export function buildTicketSystemPrompt(workDir: string, contribution?: string): string {
+  const parts = [
+    `You are Meepo, a background task execution agent. Your current working directory is ${workDir}.`,
+    [
+      'Working rules:',
+      '- When the task involves code, clone the repository yourself into your working directory.',
+      '  Do not assume any repository already exists.',
+      '- Before modifying any code, always create an isolated git worktree for your changes',
+      '  to avoid conflicts with concurrent executions.',
+      '- When finished, summarize what you changed and why.',
+    ].join('\n'),
+  ];
+  if (contribution) parts.push(contribution);
+  return parts.join('\n\n');
+}
 
-function buildTicketPrompt(envelope: TicketDispatchEnvelope): string {
+/** The ticket's single user prompt: the objective plus optional context. */
+export function buildTicketPrompt(envelope: TicketDispatchEnvelope): string {
   const parts = [`# Objective\n${envelope.objective}`];
   if (envelope.contextSummary) parts.push(`# Context\n${envelope.contextSummary}`);
   return parts.join('\n\n');
 }
 
 /**
- * Executes ticket dispatches: each ticket gets a brand-new agent in its own
- * worktree and runs exactly one turn. No snapshot, no queue, no cron tools —
- * tickets are stateless across lifetimes by design.
+ * Executes ticket dispatches: each ticket gets a brand-new agent in a neutral
+ * per-ticket directory and runs exactly one turn. No snapshot, no queue, no
+ * cron tools — tickets are stateless across lifetimes by design.
  */
 export class TicketRunner {
-  private readonly active = new Map<string, Agent>();
+  private readonly active = new Map<string, RunnerAgent>();
 
   constructor(private readonly deps: TicketRunnerDeps) {}
 
@@ -47,12 +65,13 @@ export class TicketRunner {
 
     let timeoutTimer: NodeJS.Timeout | undefined;
     try {
-      const worktreePath = await this.deps.ensureWorktree(envelope.ticketId, envelope.workspace);
-      const agent = new Agent({
+      const workDir = await this.ensureTicketDir(envelope.ticketId);
+      const createAgent = this.deps.createAgent ?? ((options: AgentOptions) => new Agent(options));
+      const agent = createAgent({
         initialState: {
-          systemPrompt: TICKET_SYSTEM_PROMPT,
+          systemPrompt: buildTicketSystemPrompt(workDir, envelope.systemPromptContribution),
           model: createModel(envelope.model),
-          tools: createCodingTools(worktreePath),
+          tools: createCodingTools(workDir),
         },
         streamFn: createStreamFn(envelope.model),
         sessionId: envelope.ticketId,
@@ -85,5 +104,12 @@ export class TicketRunner {
 
   handleAbort(payload: TaskAbortPayload): void {
     this.active.get(payload.taskId)?.abort();
+  }
+
+  private async ensureTicketDir(ticketId: string): Promise<string> {
+    if (this.deps.ensureTicketDir) return this.deps.ensureTicketDir(ticketId);
+    const dir = join(this.deps.ticketsDir, ticketId);
+    await mkdir(dir, { recursive: true });
+    return dir;
   }
 }

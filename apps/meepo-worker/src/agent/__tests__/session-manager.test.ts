@@ -100,7 +100,6 @@ function envelope(partial: Partial<SessionDispatchEnvelope> = {}): SessionDispat
     prompt: 'hi',
     source: { kind: 'system' },
     delivery: 'wait',
-    workspace: null,
     model,
     ...partial,
   };
