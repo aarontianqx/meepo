@@ -195,4 +195,5 @@ async function fireDueSchedules(
     });
     await dispatch.dispatchTicket(ticket.id);
   }
+  await dispatch.dispatchPendingTickets();
 }

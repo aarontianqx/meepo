@@ -195,6 +195,17 @@ describe('DispatchService', () => {
     expect((await tickets.getById('t1'))?.status).toBe('pending');
   });
 
+  it('retries pending tickets once a worker becomes eligible', async () => {
+    await spaces.save(makeSpace('sp1'));
+    await tickets.save(makeTicket('t1', 'sp1'));
+    expect(await service.dispatchPendingTickets()).toBe(0);
+
+    await workers.save(makeWorker('w1', ['sp1']));
+    sender.connected.add('w1');
+    expect(await service.dispatchPendingTickets()).toBe(1);
+    expect((await tickets.getById('t1'))?.status).toBe('claimed');
+  });
+
   it('rejects dispatch when no model is configured', async () => {
     await spaces.save({ ...makeSpace('sp1', 'w1'), model: undefined });
     await workers.save(makeWorker('w1', ['sp1']));

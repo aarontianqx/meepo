@@ -128,6 +128,24 @@ export class DispatchService {
   }
 
   /**
+   * Retries dispatch for every pending ticket (e.g. after slots free up).
+   * Tickets without an eligible worker stay pending for the next round.
+   */
+  async dispatchPendingTickets(): Promise<number> {
+    const pending = await this.tickets.listPending();
+    let dispatched = 0;
+    for (const ticket of pending) {
+      try {
+        const outcome = await this.dispatchTicket(ticket.id);
+        if (outcome.dispatched) dispatched += 1;
+      } catch {
+        // leave for the next round
+      }
+    }
+    return dispatched;
+  }
+
+  /**
    * Delivers everything queued for a session, coalescing all queued turns
    * into a single dispatch with the merged prompt. Returns the merge count.
    */

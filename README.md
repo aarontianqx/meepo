@@ -57,12 +57,20 @@ pnpm format
 
 ```bash
 # 1. Start the control plane (HTTP API on :8780, worker channel on /ws/worker)
+#    Optional env: MEEPO_DB_PATH (default .meepo/meepo.db),
+#    MEEPO_MODEL_PROVIDER/BASE_URL/API_KEY/ID (server-held default model),
+#    MEEPO_FEISHU_APP_ID/MEEPO_FEISHU_APP_SECRET (enable the Feishu gateway),
+#    MEEPO_DEFAULT_SPACE_ID (space for private chats)
+MEEPO_MODEL_PROVIDER=openai-completions \
+MEEPO_MODEL_BASE_URL=https://your-llm-gateway/v1 \
+MEEPO_MODEL_API_KEY=sk-... \
+MEEPO_MODEL_ID=your-model \
 pnpm --filter meepo-server dev
 
 # 2. Create a space (dev auth reads the x-meepo-user-id header; the creator becomes owner)
 curl -X POST localhost:8780/api/spaces -H 'content-type: application/json' \
   -H 'x-meepo-user-id: aaron' \
-  -d '{"name": "demo", "repoUrl": "https://github.com/org/demo"}'
+  -d '{"name": "demo", "repoUrl": "git@github.com:org/demo.git"}'
 
 # 3. Issue a worker enrollment token for the space
 curl -X POST localhost:8780/api/enrollments -H 'content-type: application/json' \
@@ -71,6 +79,8 @@ curl -X POST localhost:8780/api/enrollments -H 'content-type: application/json' 
 
 # 4. Start a worker with the issued token (registers + heartbeats;
 #    the first enrolled worker to register wins the space's default binding)
+#    Optional env: MEEPO_SERVER_URL, MEEPO_WORKER_ID, MEEPO_TAGS, MEEPO_MAX_SLOTS,
+#    MEEPO_WORKSPACE_DIR, MEEPO_SESSION_TTL_MS
 MEEPO_ENROLLMENT_TOKEN=mep_... pnpm --filter meepo-worker dev
 
 # 5. Start the admin console (Vite dev server proxies /api and /ws to the server)
@@ -78,6 +88,28 @@ pnpm --filter meepo-console dev
 ```
 
 In production, `meepo-server` serves the built console SPA directly (`pnpm --filter meepo-console build`, then `MEEPO_CONSOLE_DIST=apps/meepo-console/dist pnpm --filter meepo-server start`).
+
+### Driving the Pipeline Without IM
+
+```bash
+# Create a session and inject a turn (worker must be connected)
+curl -X POST localhost:8780/api/sessions -H 'content-type: application/json' \
+  -H 'x-meepo-user-id: aaron' \
+  -d '{"spaceId": "<space-id>", "chatId": "dev", "threadId": "dev-1", "kind": "main"}'
+curl -X POST localhost:8780/api/sessions/<session-id>/turns \
+  -H 'content-type: application/json' -d '{"prompt": "hello"}'
+
+# Create and dispatch a ticket
+curl -X POST localhost:8780/api/tickets -H 'content-type: application/json' \
+  -H 'x-meepo-user-id: aaron' \
+  -d '{"spaceId": "<space-id>", "title": "audit", "objective": "..."}'
+curl -X POST localhost:8780/api/tickets/<ticket-id>/dispatch
+
+# Schedule a reminder (fires into a new ticket)
+curl -X POST localhost:8780/api/reminders -H 'content-type: application/json' \
+  -H 'x-meepo-user-id: aaron' \
+  -d '{"spaceId": "<space-id>", "objective": "nightly audit", "trigger": {"kind": "cron", "cron": "0 3 * * *"}}'
+```
 
 ## License
 
