@@ -1,12 +1,8 @@
-import { CURRENT_PROTOCOL_VERSION } from "@meepo/protocol";
+import { WorkerClient } from './client.js';
+import { loadConfig } from './config.js';
 
-export async function startWorker(): Promise<void> {
-  console.log(`Starting MEEPO Worker (Protocol: ${CURRENT_PROTOCOL_VERSION})...`);
-}
+const config = loadConfig();
+const client = new WorkerClient(config);
 
-if (import.meta.url === `file://${process.argv[1]}`) {
-  startWorker().catch((err) => {
-    console.error("Failed to start MEEPO worker:", err);
-    process.exit(1);
-  });
-}
+client.start();
+console.log(`meepo-worker ${config.workerId} connecting to ${config.serverUrl} ...`);

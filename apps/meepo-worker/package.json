@@ -14,9 +14,11 @@
   },
   "dependencies": {
     "@meepo/core": "workspace:*",
-    "@meepo/protocol": "workspace:*"
+    "@meepo/protocol": "workspace:*",
+    "ws": "^8.21.3"
   },
   "devDependencies": {
+    "@types/ws": "^8.18.1",
     "tsx": "^4.22.1",
     "typescript": "^5.9.3",
     "vitest": "^4.1.5"

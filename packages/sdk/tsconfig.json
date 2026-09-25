@@ -2,12 +2,15 @@
   "extends": "../../tsconfig.options.json",
   "compilerOptions": {
     "composite": true,
-    "rootDir": "src",
-    "outDir": "dist"
+    "outDir": "../../.moon/cache/types/packages/sdk"
   },
   "references": [
-    { "path": "../core" },
-    { "path": "../protocol" }
+    {
+      "path": "../core"
+    },
+    {
+      "path": "../protocol"
+    }
   ],
   "include": ["src/**/*"]
 }

@@ -2,13 +2,16 @@
   "extends": "../../tsconfig.options.json",
   "compilerOptions": {
     "composite": true,
-    "rootDir": "src",
-    "outDir": "dist",
-    "jsx": "react-jsx"
+    "jsx": "react-jsx",
+    "outDir": "../../.moon/cache/types/apps/meepo-console"
   },
   "references": [
-    { "path": "../../packages/core" },
-    { "path": "../../packages/protocol" }
+    {
+      "path": "../../packages/core"
+    },
+    {
+      "path": "../../packages/protocol"
+    }
   ],
   "include": ["src/**/*"]
 }

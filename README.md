@@ -53,6 +53,32 @@ pnpm check
 pnpm format
 ```
 
+### Running the Stack Locally
+
+```bash
+# 1. Start the control plane (HTTP API on :8780, worker channel on /ws/worker)
+pnpm --filter meepo-server dev
+
+# 2. Create a space (dev auth reads the x-meepo-user-id header; the creator becomes owner)
+curl -X POST localhost:8780/api/spaces -H 'content-type: application/json' \
+  -H 'x-meepo-user-id: aaron' \
+  -d '{"name": "demo", "repoUrl": "https://github.com/org/demo"}'
+
+# 3. Issue a worker enrollment token for the space
+curl -X POST localhost:8780/api/enrollments -H 'content-type: application/json' \
+  -H 'x-meepo-user-id: aaron' \
+  -d '{"spaceIds": ["<space-id>"]}'
+
+# 4. Start a worker with the issued token (registers + heartbeats;
+#    the first enrolled worker to register wins the space's default binding)
+MEEPO_ENROLLMENT_TOKEN=mep_... pnpm --filter meepo-worker dev
+
+# 5. Start the admin console (Vite dev server proxies /api and /ws to the server)
+pnpm --filter meepo-console dev
+```
+
+In production, `meepo-server` serves the built console SPA directly (`pnpm --filter meepo-console build`, then `MEEPO_CONSOLE_DIST=apps/meepo-console/dist pnpm --filter meepo-server start`).
+
 ## License
 
 MIT

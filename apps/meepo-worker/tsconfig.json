@@ -2,12 +2,15 @@
   "extends": "../../tsconfig.options.json",
   "compilerOptions": {
     "composite": true,
-    "rootDir": "src",
-    "outDir": "dist"
+    "outDir": "../../.moon/cache/types/apps/meepo-worker"
   },
   "references": [
-    { "path": "../../packages/core" },
-    { "path": "../../packages/protocol" }
+    {
+      "path": "../../packages/core"
+    },
+    {
+      "path": "../../packages/protocol"
+    }
   ],
   "include": ["src/**/*"]
 }

@@ -1,5 +1,5 @@
-export * from "@meepo/core";
-export * from "@meepo/protocol";
+export * from '@meepo/core';
+export * from '@meepo/protocol';
 
 export interface MeepoClientOptions {
   serverUrl: string;

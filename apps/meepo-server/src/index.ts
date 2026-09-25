@@ -1,12 +1,10 @@
-import { CURRENT_PROTOCOL_VERSION } from "@meepo/protocol";
+import { bootstrap } from './bootstrap.js';
 
-export async function startServer(): Promise<void> {
-  console.log(`Starting MEEPO Server (Protocol: ${CURRENT_PROTOCOL_VERSION})...`);
-}
+const { app, config } = await bootstrap();
 
-if (import.meta.url === `file://${process.argv[1]}`) {
-  startServer().catch((err) => {
-    console.error("Failed to start MEEPO server:", err);
-    process.exit(1);
-  });
+try {
+  await app.listen({ host: config.host, port: config.port });
+} catch (err) {
+  app.log.error(err);
+  process.exit(1);
 }
