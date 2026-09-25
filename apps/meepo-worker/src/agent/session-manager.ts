@@ -14,6 +14,7 @@ import {
 } from '@meepo/protocol';
 
 import { createModel, createStreamFn } from './model-factory.js';
+import { createCompactor } from './compaction.js';
 import { SessionRunner, type RunnerAgent } from './session-runner.js';
 import { buildCronTools } from './tools.js';
 
@@ -65,7 +66,12 @@ export function transcriptToAgentMessage(
 ): AgentMessage {
   switch (message.role) {
     case 'user':
-      return { role: 'user', content: message.content, timestamp: message.timestamp };
+      // Multi-party windows: attribute each utterance to its speaker.
+      return {
+        role: 'user',
+        content: message.author ? `[${message.author}] ${message.content}` : message.content,
+        timestamp: message.timestamp,
+      };
     case 'assistant': {
       const assistant: AssistantMessage = {
         role: 'assistant',
@@ -188,6 +194,7 @@ export class SessionManager {
       workerId: this.deps.workerId,
       emit: this.deps.emit,
       now: this.deps.now,
+      compactor: createCompactor(envelope.model),
     });
     this.runners.set(envelope.sessionId, runner);
     return runner;

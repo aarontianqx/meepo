@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   decideInbound,
+  GROUP_MAIN_SUB_ID,
   windowIdOf,
   type InboundContext,
   type InboundMessage,
@@ -15,6 +16,7 @@ function makeMsg(overrides?: Partial<InboundMessage>): InboundMessage {
     chatId: 'chat1',
     chatType: 'group',
     senderOpenId: 'ou_user',
+    senderName: 'Aaron',
     text: 'hello',
     mentionedOpenIds: [],
     ...overrides,
@@ -52,7 +54,7 @@ describe('decideInbound', () => {
     expect(decision).toMatchObject({ action: 'ignore', reason: 'mention targets another bot' });
   });
 
-  it('prewarms a thread for a main-stream mention', () => {
+  it('prewarms a thread for a fresh main-stream mention', () => {
     const decision = decideInbound(makeMsg({ mentionedOpenIds: [BOT] }), makeCtx());
     expect(decision).toMatchObject({
       action: 'dispatch',
@@ -62,10 +64,26 @@ describe('decideInbound', () => {
     });
   });
 
-  it('answers thread replies only in engaged threads', () => {
-    const threadMsg = makeMsg({ threadId: 'omt_1' });
-    expect(decideInbound(threadMsg, makeCtx()).action).toBe('ignore');
+  it('routes a main-stream reply mentioning the bot to the group main session', () => {
+    const decision = decideInbound(
+      makeMsg({ mentionedOpenIds: [BOT], rootId: 'om_root', parentId: 'om_parent' }),
+      makeCtx()
+    );
+    expect(decision).toMatchObject({
+      action: 'dispatch',
+      windowId: windowIdOf('chat1', GROUP_MAIN_SUB_ID),
+      sessionKind: 'main',
+      seedThreadHistory: false,
+    });
+  });
 
+  it('ignores main-stream replies without a mention', () => {
+    const decision = decideInbound(makeMsg({ rootId: 'om_root' }), makeCtx());
+    expect(decision.action).toBe('ignore');
+  });
+
+  it('answers thread replies in engaged threads without seeding history', () => {
+    const threadMsg = makeMsg({ threadId: 'omt_1' });
     const engaged = makeCtx({
       sessionExistsForWindow: (windowId) => windowId === windowIdOf('chat1', 'omt_1'),
     });
@@ -74,15 +92,24 @@ describe('decideInbound', () => {
       action: 'dispatch',
       threadRef: { kind: 'thread', threadId: 'omt_1' },
       sessionKind: 'task',
+      seedThreadHistory: false,
     });
   });
 
-  it('answers thread mentions even without an existing session', () => {
+  it('seeds history when a thread session starts from a fresh mention', () => {
     const decision = decideInbound(
       makeMsg({ threadId: 'omt_2', mentionedOpenIds: [BOT] }),
       makeCtx()
     );
-    expect(decision.action).toBe('dispatch');
+    expect(decision).toMatchObject({
+      action: 'dispatch',
+      sessionKind: 'task',
+      seedThreadHistory: true,
+    });
+  });
+
+  it('ignores unengaged thread messages without a mention', () => {
+    expect(decideInbound(makeMsg({ threadId: 'omt_3' }), makeCtx()).action).toBe('ignore');
   });
 
   it('answers every private-chat message as a main session in the default space', () => {

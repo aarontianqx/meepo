@@ -134,6 +134,7 @@ export async function bootstrap(): Promise<ServerRuntime> {
         client: feishuClient,
         sessionService,
         dispatchService,
+        transcriptService,
         spaces: spaceRepository,
         botOpenId,
         defaultSpaceId: config.feishu.defaultSpaceId,

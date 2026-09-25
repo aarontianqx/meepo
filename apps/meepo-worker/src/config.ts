@@ -1,4 +1,5 @@
-import { hostname } from 'node:os';
+import { hostname, homedir } from 'node:os';
+import { join } from 'node:path';
 
 export interface WorkerConfig {
   /** Full WebSocket URL of the server worker channel */
@@ -29,7 +30,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
       .map((tag) => tag.trim())
       .filter(Boolean),
     maxSlots: Number(env.MEEPO_MAX_SLOTS ?? 1),
-    workspaceDir: env.MEEPO_WORKSPACE_DIR ?? '/tmp/meepo-workspaces',
+    workspaceDir: env.MEEPO_WORKSPACE_DIR ?? join(homedir(), '.meepo', 'workspaces'),
     sessionTtlMs: Number(env.MEEPO_SESSION_TTL_MS ?? 3_600_000),
   };
 }

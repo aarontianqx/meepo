@@ -3,7 +3,12 @@ import type { AssistantMessage, StopReason } from '@earendil-works/pi-ai';
 import type { WorkerStreamEvent } from '@meepo/protocol';
 import { describe, expect, it } from 'vitest';
 
-import { SessionRunner, type RunnerAgent } from '../session-runner.js';
+import {
+  SessionRunner,
+  mergeQueuedTurns,
+  type RunnerAgent,
+  type SessionCompactor,
+} from '../session-runner.js';
 
 function assistantMessage(text: string, stopReason: StopReason = 'stop'): AssistantMessage {
   return {
@@ -34,6 +39,7 @@ class FakeAgent implements RunnerAgent {
   private resolvers: Array<() => void> = [];
   readonly prompts: string[] = [];
   readonly steered: AgentMessage[] = [];
+  readonly state: { messages: AgentMessage[] } = { messages: [] };
   abortCount = 0;
 
   subscribe(listener: (event: AgentEvent) => void): () => void {
@@ -67,7 +73,7 @@ class FakeAgent implements RunnerAgent {
   }
 }
 
-function setup() {
+function setup(compactor?: SessionCompactor) {
   const agent = new FakeAgent();
   const events: WorkerStreamEvent[] = [];
   const runner = new SessionRunner({
@@ -75,6 +81,7 @@ function setup() {
     sessionId: 's1',
     workerId: 'w1',
     emit: (event) => events.push(event),
+    compactor,
   });
   return { agent, events, runner };
 }
@@ -279,5 +286,126 @@ describe('SessionRunner', () => {
         isError: false,
       })
     );
+  });
+});
+
+describe('mergeQueuedTurns', () => {
+  it('returns undefined for an empty queue', () => {
+    expect(mergeQueuedTurns([])).toBeUndefined();
+  });
+
+  it('passes a single turn through unchanged', () => {
+    const turn = { taskId: 't1', prompt: 'p1', timeoutSeconds: 30 };
+    expect(mergeQueuedTurns([turn])).toBe(turn);
+  });
+
+  it('merges multiple turns, annotating each prompt and taking the last taskId', () => {
+    const merged = mergeQueuedTurns([
+      { taskId: 't1', prompt: '[Alice] first' },
+      { taskId: 't2', prompt: '[Bob] second' },
+      { taskId: 't3', prompt: 'third', timeoutSeconds: 60 },
+    ]);
+    expect(merged).toEqual({
+      taskId: 't3',
+      timeoutSeconds: 60,
+      prompt: '[1/3] [Alice] first\n\n[2/3] [Bob] second\n\n[3/3] third',
+    });
+  });
+});
+
+describe('SessionRunner queue merging', () => {
+  it('merges consecutive wait turns into one execution attributed to the last taskId', async () => {
+    const { agent, events, runner } = setup();
+
+    runner.runTurn('t1', 'p1', 'wait');
+    runner.runTurn('t2', '[Alice] p2', 'wait');
+    runner.runTurn('t3', '[Bob] p3', 'wait');
+    runner.runTurn('t4', '[Carol] p4', 'wait');
+    expect(agent.prompts).toEqual(['p1']);
+
+    agent.finishRun();
+    await flush();
+
+    // One merged turn instead of three separate ones.
+    expect(agent.prompts).toHaveLength(2);
+    expect(agent.prompts[1]).toBe('[1/3] [Alice] p2\n\n[2/3] [Bob] p3\n\n[3/3] [Carol] p4');
+    expect(events).toContainEqual(expect.objectContaining({ type: 'task_started', taskId: 't4' }));
+    expect(events.some((e) => 'taskId' in e && e.taskId === 't2')).toBe(false);
+    expect(events.some((e) => 'taskId' in e && e.taskId === 't3')).toBe(false);
+
+    agent.finishRun();
+    await flush();
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: 'task_completed', taskId: 't4' })
+    );
+    expect(agent.prompts).toHaveLength(2);
+  });
+});
+
+describe('SessionRunner compaction', () => {
+  function fakeCompactor(overrides: Partial<SessionCompactor> = {}) {
+    const calls: AgentMessage[][] = [];
+    const compactor: SessionCompactor = {
+      estimate: () => 1_000_000,
+      shouldCompact: () => true,
+      compact: (messages) => {
+        calls.push(messages);
+        return Promise.resolve([userMessage('SUMMARY')]);
+      },
+      ...overrides,
+    };
+    return { compactor, calls };
+  }
+
+  it('compacts over-threshold history before prompting', async () => {
+    const { compactor, calls } = fakeCompactor();
+    const { agent, runner } = setup(compactor);
+    agent.state.messages = [userMessage('old 1'), userMessage('old 2')];
+
+    runner.runTurn('t1', 'p1', 'wait');
+    await flush();
+
+    expect(calls).toEqual([[userMessage('old 1'), userMessage('old 2')]]);
+    expect(agent.state.messages).toEqual([userMessage('SUMMARY')]);
+    expect(agent.prompts).toEqual(['p1']);
+  });
+
+  it('falls back to keeping the most recent messages when compaction fails', async () => {
+    const { compactor } = fakeCompactor({ compact: () => Promise.resolve(undefined) });
+    const { agent, runner } = setup(compactor);
+    agent.state.messages = Array.from({ length: 25 }, (_, i) => userMessage(`m${i}`));
+
+    runner.runTurn('t1', 'p1', 'wait');
+    await flush();
+
+    expect(agent.state.messages).toHaveLength(20);
+    expect(agent.state.messages[0]).toEqual(userMessage('m5'));
+    expect(agent.prompts).toEqual(['p1']);
+  });
+
+  it('falls back to truncation when compaction throws', async () => {
+    const { compactor } = fakeCompactor({
+      compact: () => Promise.reject(new Error('llm down')),
+    });
+    const { agent, runner } = setup(compactor);
+    agent.state.messages = Array.from({ length: 25 }, (_, i) => userMessage(`m${i}`));
+
+    runner.runTurn('t1', 'p1', 'wait');
+    await flush();
+
+    expect(agent.state.messages).toHaveLength(20);
+    expect(agent.prompts).toEqual(['p1']);
+  });
+
+  it('leaves history alone below the threshold', async () => {
+    const { compactor, calls } = fakeCompactor({ shouldCompact: () => false });
+    const { agent, runner } = setup(compactor);
+    agent.state.messages = [userMessage('old')];
+
+    runner.runTurn('t1', 'p1', 'wait');
+    await flush();
+
+    expect(calls).toHaveLength(0);
+    expect(agent.state.messages).toEqual([userMessage('old')]);
   });
 });

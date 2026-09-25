@@ -117,6 +117,8 @@ export interface TranscriptMessage {
   role: 'user' | 'assistant' | 'tool';
   content: string;
   timestamp: number;
+  /** Display name (or open_id) of the speaker, for multi-party windows */
+  author?: string;
 }
 
 /** Full session snapshot served to a worker cold-starting a session */

@@ -68,6 +68,7 @@ export class TicketService {
 
   async markRunning(id: string, workerId: string): Promise<Ticket> {
     const ticket = await this.getTicket(id);
+    if (ticket.status === 'running' && ticket.assignedWorkerId === workerId) return ticket;
     if (ticket.status !== 'claimed' || ticket.assignedWorkerId !== workerId) {
       throw conflict(`Ticket ${id} is not claimed by worker ${workerId}`);
     }

@@ -6,30 +6,30 @@ inheritedBy:
 
 tasks:
   format-check:
-    command: "prettier --check ."
+    command: 'prettier --check .'
     inputs:
-      - "**/*"
+      - '**/*'
 
   format:
-    command: "prettier --write ."
+    command: 'prettier --write .'
     inputs:
-      - "**/*"
+      - '**/*'
 
   lint:
-    script: "prettier --check . && eslint --no-error-on-unmatched-pattern ."
+    script: 'prettier --check . && eslint --no-error-on-unmatched-pattern .'
     inputs:
-      - "**/*"
+      - '**/*'
 
   typecheck:
-    command: "tsc -b"
+    command: 'tsc -b'
     deps:
-      - "^:build"
+      - '^:build'
     inputs:
-      - "**/*"
+      - '**/*'
 
   test:
-    command: "vitest run --passWithNoTests"
+    command: 'vitest run --passWithNoTests'
     deps:
-      - "^:build"
+      - '^:build'
     inputs:
-      - "**/*"
+      - '**/*'

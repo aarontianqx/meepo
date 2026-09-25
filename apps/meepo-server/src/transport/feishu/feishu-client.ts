@@ -19,10 +19,20 @@ export interface FeishuMessageEvent {
     chat_type: string;
     thread_id?: string;
     root_id?: string;
+    parent_id?: string;
     message_type: string;
     content: string;
     mentions?: { key: string; name?: string; id?: { open_id?: string } }[];
   };
+}
+
+/** A message in a thread's history, reduced for transcript seeding. */
+export interface ThreadHistoryMessage {
+  messageId: string;
+  authorName: string;
+  content: string;
+  timestamp: number;
+  isBot: boolean;
 }
 
 /**
@@ -45,6 +55,7 @@ export interface FeishuClient {
     uuid: string
   ): Promise<void>;
   updateCardSettings(cardId: string, settings: string, sequence: number): Promise<void>;
+  listThreadMessages(threadId: string, limit?: number): Promise<ThreadHistoryMessage[]>;
 }
 
 /** lark.Client adapter for {@link FeishuClient}. */
@@ -112,6 +123,39 @@ export class LarkFeishuClient implements FeishuClient {
       path: { card_id: cardId },
       data: { settings, sequence },
     });
+  }
+
+  async listThreadMessages(threadId: string, limit = 50): Promise<ThreadHistoryMessage[]> {
+    const res = await this.client.im.v1.message.list({
+      params: {
+        container_id_type: 'thread',
+        container_id: threadId,
+        page_size: Math.min(limit, 50),
+        sort_type: 'ByCreateTimeAsc',
+      },
+    });
+    if (res.code) throw new Error(`im message.list failed: ${res.code} ${res.msg}`);
+    const items = res.data?.items ?? [];
+    const out: ThreadHistoryMessage[] = [];
+    for (const item of items.slice(-limit)) {
+      let content: string;
+      try {
+        const body = JSON.parse(item.body?.content ?? '{}') as { text?: string };
+        content = body.text ?? '';
+      } catch {
+        continue;
+      }
+      if (!content.trim()) continue;
+      const isBot = item.sender?.sender_type === 'app';
+      out.push({
+        messageId: item.message_id ?? '',
+        authorName: item.sender?.sender_name ?? item.sender?.id ?? 'unknown',
+        content: content.trim(),
+        timestamp: Number(item.create_time ?? 0) * 1000 || Date.now(),
+        isBot,
+      });
+    }
+    return out;
   }
 }
 

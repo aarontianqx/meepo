@@ -24,6 +24,7 @@ class FakeFeishuClient implements FeishuClient {
   readonly replies: { messageId: string; text: string; opts?: { replyInThread?: boolean } }[] = [];
   /** thread_id handed back for reply_in_thread prewarms */
   prewarmThreadId = 'omt_prewarm';
+  threadHistory: import('../feishu-client.js').ThreadHistoryMessage[] = [];
 
   async replyText(
     messageId: string,
@@ -43,6 +44,9 @@ class FakeFeishuClient implements FeishuClient {
   }
   async updateCardContent(): Promise<void> {}
   async updateCardSettings(): Promise<void> {}
+  async listThreadMessages(): Promise<import('../feishu-client.js').ThreadHistoryMessage[]> {
+    return this.threadHistory;
+  }
 }
 
 class FakeSender implements WorkerSender {
@@ -101,6 +105,7 @@ function makeMsg(overrides?: Partial<InboundMessage>): InboundMessage {
     chatId: 'oc_group',
     chatType: 'group',
     senderOpenId: 'ou_user',
+    senderName: 'ou_user',
     text: 'hello',
     mentionedOpenIds: [],
     ...overrides,
@@ -144,6 +149,7 @@ describe('FeishuGateway', () => {
       client,
       sessionService,
       dispatchService,
+      transcriptService,
       spaces,
       botOpenId: BOT,
       defaultSpaceId: 'sp_default',
@@ -193,29 +199,70 @@ describe('FeishuGateway', () => {
     expect(client.replies).toHaveLength(0);
   });
 
-  it('closes the window session on /new and starts fresh on the next message', async () => {
-    await gateway.handleInbound(makeMsg({ mentionedOpenIds: [BOT] }));
-    const first = await sessionService.findByThread('sp_group', 'oc_group', 'omt_prewarm');
-    expect(first).toBeDefined();
-
+  it('rejects /new inside threads but closes a group main session on /new', async () => {
     await gateway.handleInbound(
-      makeMsg({ messageId: 'om_new', threadId: 'omt_prewarm', text: '/new' })
+      makeMsg({ mentionedOpenIds: [BOT], rootId: 'om_root', text: 'reply with mention' })
     );
-    expect((await sessionService.getSession(first!.id)).status).toBe('closed');
-    expect(client.replies.at(-1)?.text).toContain('已关闭');
-    expect(sender.dispatches()).toHaveLength(1);
+    const mainSession = (await sessionService.listBySpace('sp_group')).find(
+      (s) => s.kind === 'main'
+    );
+    expect(mainSession).toBeDefined();
 
     await gateway.handleInbound(
-      makeMsg({
-        messageId: 'om_3',
-        threadId: 'omt_prewarm',
-        text: 'again',
-        mentionedOpenIds: [BOT],
-      })
+      makeMsg({ messageId: 'om_new_t', threadId: 'omt_x', text: '/new' })
+    );
+    expect(client.replies.at(-1)?.text).toContain('话题内不支持');
+    expect((await sessionService.getSession(mainSession!.id)).status).toBe('active');
+
+    await gateway.handleInbound(makeMsg({ messageId: 'om_new', text: '/new' }));
+    expect((await sessionService.getSession(mainSession!.id)).status).toBe('closed');
+    expect(client.replies.at(-1)?.text).toContain('已关闭');
+  });
+
+  it('routes main-stream replies mentioning the bot to the group main session', async () => {
+    await gateway.handleInbound(
+      makeMsg({ mentionedOpenIds: [BOT], rootId: 'om_root', text: 'reply here' })
     );
     const dispatches = sender.dispatches();
-    expect(dispatches).toHaveLength(2);
-    expect(dispatches[1].sessionId).not.toBe(first!.id);
+    expect(dispatches).toHaveLength(1);
+    expect(dispatches[0]).toMatchObject({ sessionKind: 'main', prompt: 'reply here' });
+  });
+
+  it('seeds thread history when a thread session starts from a fresh mention', async () => {
+    client.threadHistory = [
+      {
+        messageId: 'om_h1',
+        authorName: 'Aaron',
+        content: 'earlier discussion',
+        timestamp: 1000,
+        isBot: false,
+      },
+      {
+        messageId: 'om_h2',
+        authorName: 'ClawFox',
+        content: 'bot earlier reply',
+        timestamp: 2000,
+        isBot: true,
+      },
+    ];
+    await gateway.handleInbound(
+      makeMsg({
+        messageId: 'om_9',
+        threadId: 'omt_fresh',
+        mentionedOpenIds: [BOT],
+        text: 'join in',
+      })
+    );
+
+    const sessions = await sessionService.listBySpace('sp_group');
+    const session = sessions.find((s) => s.threadId === 'omt_fresh');
+    expect(session).toBeDefined();
+    const snapshot = await sessionService.listBySpace('sp_group');
+    expect(snapshot).toHaveLength(1);
+
+    const dispatches = sender.dispatches();
+    expect(dispatches).toHaveLength(1);
+    expect(dispatches[0].prompt).toBe('join in');
   });
 
   it('replies when /new has no active session in the window', async () => {

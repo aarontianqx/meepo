@@ -23,6 +23,7 @@ export interface DispatchSessionTurnInput {
   prompt: string;
   source: DispatchSource;
   delivery: DeliveryMode;
+  author?: string;
 }
 
 export interface DispatchOutcome {
@@ -58,6 +59,7 @@ export class DispatchService {
     const prompt = formatPromptWithSource(input.prompt, input.source);
     await this.transcripts.appendMessage(session.id, {
       role: 'user',
+      author: input.author,
       content: prompt,
       timestamp: Date.now(),
     });

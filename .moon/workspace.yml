@@ -1,10 +1,10 @@
 # yaml-language-server: $schema=./cache/schemas/workspace.json
 # https://moonrepo.dev/docs/config/workspace
-$schema: "./cache/schemas/workspace.json"
+$schema: './cache/schemas/workspace.json'
 
 projects:
-  - "apps/*"
-  - "packages/*"
+  - 'apps/*'
+  - 'packages/*'
 
 vcs:
   client: git

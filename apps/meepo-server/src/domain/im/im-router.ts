@@ -7,7 +7,10 @@ export interface InboundMessage {
   threadId?: string;
   /** The thread's top-level (root) message id, used as the reply anchor */
   rootId?: string;
+  /** Present when the message is a reply to another message */
+  parentId?: string;
   senderOpenId: string;
+  senderName: string;
   text: string;
   mentionedOpenIds: string[];
 }
@@ -21,6 +24,8 @@ export type InboundDecision =
       threadRef: { kind: 'thread'; threadId: string } | { kind: 'prewarm' };
       sessionKind: 'main' | 'task';
       spaceId: string;
+      /** Thread sessions are seeded with existing thread history on creation */
+      seedThreadHistory: boolean;
     };
 
 export interface InboundContext {
@@ -36,9 +41,18 @@ export function windowIdOf(chatId: string, subId: string): string {
   return `feishu:${chatId}:${subId}`;
 }
 
+/** Sentinel sub_id of a group's main-stream window (its main session lives here). */
+export const GROUP_MAIN_SUB_ID = '_group';
+
 /**
  * The inbound decision chain, in order: dedup -> space resolution ->
  * respond gate -> routing. Pure logic; the gateway supplies the state lookups.
+ *
+ * Session model:
+ * - Private chat: one main session per user, no threads, always answered.
+ * - Group thread: the thread's task session (only when engaged or mentioned).
+ * - Group main stream: a fresh mention spawns a new thread+task session;
+ *   a reply involving the bot continues the group's main session instead.
  */
 export function decideInbound(msg: InboundMessage, ctx: InboundContext): InboundDecision {
   if (ctx.seenMessage(msg.messageId)) {
@@ -57,9 +71,10 @@ export function decideInbound(msg: InboundMessage, ctx: InboundContext): Inbound
     return {
       action: 'dispatch',
       windowId: windowIdOf(msg.chatId, msg.senderOpenId),
-      threadRef: { kind: 'thread', threadId: msg.threadId ?? msg.messageId },
+      threadRef: { kind: 'thread', threadId: msg.senderOpenId },
       sessionKind: 'main',
       spaceId,
+      seedThreadHistory: false,
     };
   }
 
@@ -69,16 +84,33 @@ export function decideInbound(msg: InboundMessage, ctx: InboundContext): Inbound
 
   if (msg.threadId) {
     const windowId = windowIdOf(msg.chatId, msg.threadId);
-    if (mentionsBot || ctx.sessionExistsForWindow(windowId)) {
+    const engaged = ctx.sessionExistsForWindow(windowId);
+    if (mentionsBot || engaged) {
       return {
         action: 'dispatch',
         windowId,
         threadRef: { kind: 'thread', threadId: msg.threadId },
         sessionKind: 'task',
         spaceId,
+        seedThreadHistory: !engaged,
       };
     }
     return { action: 'ignore', reason: 'thread is not engaged' };
+  }
+
+  const isReply = msg.rootId !== undefined || msg.parentId !== undefined;
+  if (isReply) {
+    if (mentionsBot) {
+      return {
+        action: 'dispatch',
+        windowId: windowIdOf(msg.chatId, GROUP_MAIN_SUB_ID),
+        threadRef: { kind: 'thread', threadId: GROUP_MAIN_SUB_ID },
+        sessionKind: 'main',
+        spaceId,
+        seedThreadHistory: false,
+      };
+    }
+    return { action: 'ignore', reason: 'main-stream reply without mention' };
   }
 
   if (mentionsBot) {
@@ -88,6 +120,7 @@ export function decideInbound(msg: InboundMessage, ctx: InboundContext): Inbound
       threadRef: { kind: 'prewarm' },
       sessionKind: 'task',
       spaceId,
+      seedThreadHistory: false,
     };
   }
 

@@ -3,6 +3,8 @@ import type { AssistantMessage } from '@earendil-works/pi-ai';
 import type { DeliveryMode, WorkerStreamEvent } from '@meepo/protocol';
 
 const RESULT_SUMMARY_MAX_CHARS = 2_000;
+/** Messages kept when compaction is unavailable and history must be truncated. */
+export const FALLBACK_KEEP_RECENT_MESSAGES = 20;
 
 /**
  * Structural subset of pi's `Agent` used by {@link SessionRunner}. The real
@@ -13,6 +15,26 @@ export interface RunnerAgent {
   prompt(input: string): Promise<void>;
   steer(message: AgentMessage): void;
   abort(): void;
+  readonly state: { messages: AgentMessage[] };
+}
+
+/** Pre-turn history compaction, implemented over pi's harness/compaction helpers. */
+export interface SessionCompactor {
+  /** Estimated context tokens for the current messages. */
+  estimate(messages: AgentMessage[]): number;
+  /** Whether the estimated usage crosses the compaction threshold. */
+  shouldCompact(tokens: number): boolean;
+  /**
+   * Produce a compacted replacement for `messages` (summary + retained tail),
+   * or undefined when summarization is unavailable — the runner then falls
+   * back to keeping only the most recent messages.
+   */
+  compact(messages: AgentMessage[]): Promise<AgentMessage[] | undefined>;
+}
+
+/** Keep only the last `count` messages (crude truncation fallback). */
+export function keepRecentMessages(messages: AgentMessage[], count: number): AgentMessage[] {
+  return messages.slice(Math.max(0, messages.length - count));
 }
 
 interface TaskContext {
@@ -148,10 +170,26 @@ export class StreamForwarder {
   }
 }
 
-interface QueuedTurn {
+export interface QueuedTurn {
   taskId: string;
   prompt: string;
   timeoutSeconds?: number;
+}
+
+/**
+ * Merge queued `wait` turns into a single turn: several chat messages that
+ * arrived while the agent was busy are answered together. Each prompt keeps
+ * its `[author]` prefix (if any) and is annotated with its position; the
+ * merged turn takes the last taskId, which identifies all stream events.
+ */
+export function mergeQueuedTurns(turns: QueuedTurn[]): QueuedTurn | undefined {
+  if (turns.length === 0) return undefined;
+  if (turns.length === 1) return turns[0];
+  const last = turns[turns.length - 1];
+  const prompt = turns
+    .map((turn, index) => `[${index + 1}/${turns.length}] ${turn.prompt}`)
+    .join('\n\n');
+  return { taskId: last.taskId, prompt, timeoutSeconds: last.timeoutSeconds };
 }
 
 export interface SessionRunnerOptions {
@@ -160,14 +198,19 @@ export interface SessionRunnerOptions {
   workerId: string;
   emit: (event: WorkerStreamEvent) => void;
   now?: () => number;
+  /** Pre-turn history compaction; omit to disable (tickets, tests). */
+  compactor?: SessionCompactor;
 }
 
 /**
  * Wraps one pi Agent (one Meepo session). Turns are executed serially:
  * - `urgent` steers into the in-flight run and takes over the stream at the
  *   point the steered message enters the transcript;
- * - `wait` queues behind the current turn;
+ * - `wait` queues behind the current turn; queued waits are merged into one
+ *   turn when drained (chat bursts produce a single reply);
  * - `if_idle` is dropped while busy.
+ * Before each turn the history is compacted when it crosses the context
+ * threshold (see {@link SessionCompactor}).
  */
 export class SessionRunner {
   private readonly agent: RunnerAgent;
@@ -175,6 +218,7 @@ export class SessionRunner {
   private readonly workerId: string;
   private readonly forwarder: StreamForwarder;
   private readonly now: () => number;
+  private readonly compactor?: SessionCompactor;
   private readonly queue: QueuedTurn[] = [];
   private readonly steeredTurns: QueuedTurn[] = [];
   private current?: QueuedTurn;
@@ -191,6 +235,7 @@ export class SessionRunner {
     this.sessionId = options.sessionId;
     this.workerId = options.workerId;
     this.now = options.now ?? Date.now;
+    this.compactor = options.compactor;
     this.forwarder = new StreamForwarder(options.emit);
     this.idleSince = this.now();
     this.agent.subscribe((event) => this.onAgentEvent(event));
@@ -284,6 +329,8 @@ export class SessionRunner {
     this.forwarder.beginTask(turn.taskId, { workerId: this.workerId, sessionId: this.sessionId });
     this.armTimeout(turn);
     try {
+      // Awaited only when configured, keeping prompt() same-tick otherwise.
+      if (this.compactor) await this.maybeCompactHistory();
       await this.agent.prompt(turn.prompt);
       this.completeCurrent();
     } catch (err) {
@@ -300,9 +347,25 @@ export class SessionRunner {
       this.current = undefined;
       this.running = false;
       this.idleSince = this.now();
-      const next = this.queue.shift();
+      const next = mergeQueuedTurns(this.queue.splice(0));
       if (next) void this.startTurn(next);
     }
+  }
+
+  /** Compact the transcript before the turn when it crosses the context threshold. */
+  private async maybeCompactHistory(): Promise<void> {
+    if (!this.compactor) return;
+    const messages = this.agent.state.messages;
+    if (messages.length === 0) return;
+    if (!this.compactor.shouldCompact(this.compactor.estimate(messages))) return;
+    let compacted: AgentMessage[] | undefined;
+    try {
+      compacted = await this.compactor.compact(messages);
+    } catch {
+      compacted = undefined;
+    }
+    this.agent.state.messages =
+      compacted ?? keepRecentMessages(messages, FALLBACK_KEEP_RECENT_MESSAGES);
   }
 
   private completeCurrent(): void {

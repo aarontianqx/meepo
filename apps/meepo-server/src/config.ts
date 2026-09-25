@@ -30,7 +30,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     port: Number(env.MEEPO_PORT ?? 8780),
     heartbeatIntervalSeconds: Number(env.MEEPO_HEARTBEAT_INTERVAL_SECONDS ?? 15),
     workerOfflineAfterMs: Number(env.MEEPO_WORKER_OFFLINE_AFTER_MS ?? 45_000),
-    dbPath: env.MEEPO_DB_PATH ?? '.meepo/meepo.db',
+    dbPath: env.MEEPO_DB_PATH ?? defaultDbPath(),
     defaultModel: loadDefaultModel(env),
     consoleDistPath: env.MEEPO_CONSOLE_DIST,
     feishu: loadFeishuConfig(env),
@@ -58,4 +58,10 @@ function loadDefaultModel(env: NodeJS.ProcessEnv): ModelConfig | undefined {
     apiKey: MEEPO_MODEL_API_KEY,
     model: MEEPO_MODEL_ID,
   };
+}
+
+/** Default database location: absolute, outside any project checkout. */
+function defaultDbPath(): string {
+  const home = process.env.HOME ?? '.';
+  return `${home}/.meepo/server/meepo.db`;
 }

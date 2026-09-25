@@ -46,6 +46,10 @@ class FakeFeishuClient implements FeishuClient {
   async updateCardSettings(cardId: string, settings: string, sequence: number): Promise<void> {
     this.settingsUpdates.push({ cardId, settings, sequence });
   }
+
+  async listThreadMessages(): Promise<never[]> {
+    return [];
+  }
 }
 
 const SESSION: Session = {
