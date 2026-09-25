@@ -5,8 +5,12 @@ import WebSocket from 'ws';
 import {
   WORKER_CHANNEL_EVENTS,
   WORKER_CHANNEL_METHODS,
+  type RpcErrorBody,
   type RpcFrame,
-  type RpcNotification,
+  type SessionDispatchEnvelope,
+  type TaskAbortPayload,
+  type TaskSteerPayload,
+  type TicketDispatchEnvelope,
   type WorkerChannelDownstream,
   type WorkerHeartbeatPayload,
   type WorkerRegisterPayload,
@@ -17,23 +21,40 @@ import type { WorkerConfig } from './config.js';
 
 const WORKER_VERSION = '0.1.0';
 const MAX_RECONNECT_DELAY_MS = 30_000;
+const RPC_TIMEOUT_MS = 30_000;
 
 type Logger = Pick<Console, 'info' | 'warn' | 'error'>;
 
+/** Callbacks for server-pushed notifications, injected by the composition root. */
+export interface WorkerClientHandlers {
+  onSessionDispatch: (envelope: SessionDispatchEnvelope) => void;
+  onTicketDispatch: (envelope: TicketDispatchEnvelope) => void;
+  onTaskSteer: (payload: TaskSteerPayload) => void;
+  onTaskAbort: (payload: TaskAbortPayload) => void;
+}
+
+interface PendingRequest {
+  resolve: (result: unknown) => void;
+  reject: (error: Error) => void;
+  timer: NodeJS.Timeout;
+}
+
 /**
- * Minimal worker client: connects to the server, registers with its enrollment
- * token, then heartbeats until disconnected. Task execution arrives in Phase 3;
- * dispatch/steer/abort notifications are logged for now.
+ * Worker channel client: a single persistent WebSocket to the server carrying
+ * id-paired RPC request/response frames (register, heartbeat, session.snapshot,
+ * cron.*) and fire-and-forget notifications in both directions.
  */
 export class WorkerClient {
   private socket?: WebSocket;
   private heartbeatTimer?: NodeJS.Timeout;
   private reconnectDelayMs = 1_000;
   private requestCounter = 0;
-  private activeTaskIds: string[] = [];
+  private readonly pending = new Map<string, PendingRequest>();
+  private readonly activeTaskIds = new Set<string>();
 
   constructor(
     private readonly config: WorkerConfig,
+    private readonly handlers: WorkerClientHandlers,
     private readonly logger: Logger = console
   ) {}
 
@@ -41,12 +62,44 @@ export class WorkerClient {
     this.connect();
   }
 
+  /** Invoke an RPC method on the server; rejects on error response or timeout. */
+  rpc(method: string, params: unknown): Promise<unknown> {
+    const socket = this.socket;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      return Promise.reject(new Error(`cannot call ${method}: not connected`));
+    }
+    const id = this.nextRequestId();
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`rpc ${method} timed out after ${RPC_TIMEOUT_MS}ms`));
+      }, RPC_TIMEOUT_MS);
+      timer.unref();
+      this.pending.set(id, { resolve, reject, timer });
+      socket.send(JSON.stringify({ kind: 'request', id, method, params }));
+    });
+  }
+
+  /** Fire-and-forget upstream notification (e.g. stream events). */
+  sendNotification(event: string, payload: unknown): void {
+    this.send({ kind: 'notification', event, payload });
+  }
+
+  /** Track a task as running so heartbeats report accurate capacity. */
+  taskStarted(taskId: string): void {
+    this.activeTaskIds.add(taskId);
+  }
+
+  taskFinished(taskId: string): void {
+    this.activeTaskIds.delete(taskId);
+  }
+
   private connect(): void {
     this.socket = new WebSocket(this.config.serverUrl);
 
     this.socket.on('open', () => {
       this.reconnectDelayMs = 1_000;
-      this.register();
+      void this.register();
     });
 
     this.socket.on('message', (raw: Buffer) => {
@@ -59,6 +112,7 @@ export class WorkerClient {
 
     this.socket.on('close', () => {
       this.stopHeartbeat();
+      this.failPending(new Error('connection closed'));
       this.logger.warn(`disconnected; reconnecting in ${this.reconnectDelayMs}ms`);
       setTimeout(() => this.connect(), this.reconnectDelayMs);
       this.reconnectDelayMs = Math.min(this.reconnectDelayMs * 2, MAX_RECONNECT_DELAY_MS);
@@ -70,7 +124,7 @@ export class WorkerClient {
     });
   }
 
-  private register(): void {
+  private async register(): Promise<void> {
     const payload: WorkerRegisterPayload = {
       workerId: this.config.workerId,
       enrollmentToken: this.config.enrollmentToken,
@@ -81,49 +135,59 @@ export class WorkerClient {
       capacity: { maxSlots: this.config.maxSlots },
       version: WORKER_VERSION,
     };
-    this.send({
-      kind: 'request',
-      id: this.nextRequestId(),
-      method: WORKER_CHANNEL_METHODS.register,
-      params: payload,
-    });
+    try {
+      const result = (await this.rpc(WORKER_CHANNEL_METHODS.register, payload)) as
+        WorkerRegisterResult | undefined;
+      if (result && 'heartbeatIntervalSeconds' in result) {
+        this.logger.info(
+          `registered as ${result.workerId}; serving spaces: ${result.spaceIds.join(', ')}`
+        );
+        this.startHeartbeat(result.heartbeatIntervalSeconds);
+      }
+    } catch (err) {
+      this.logger.error(`registration failed: ${(err as Error).message}`);
+    }
   }
 
   private onFrame(frame: WorkerChannelDownstream): void {
     if (frame.kind === 'response') {
-      this.onResponse(frame);
+      this.onResponse(frame.id, frame.result, frame.error);
       return;
     }
-    this.onNotification(frame);
+    this.onNotification(frame.event, frame.payload);
   }
 
-  private onResponse(frame: WorkerChannelDownstream & { kind: 'response' }): void {
-    if (frame.error) {
-      this.logger.error(`server rejected request: [${frame.error.code}] ${frame.error.message}`);
+  private onResponse(id: string, result: unknown, error?: RpcErrorBody): void {
+    const entry = this.pending.get(id);
+    if (!entry) {
+      this.logger.warn(`response for unknown request ${id}`);
       return;
     }
-    const result = frame.result as WorkerRegisterResult | { accepted: true } | undefined;
-    if (result && 'heartbeatIntervalSeconds' in result) {
-      this.logger.info(
-        `registered as ${result.workerId}; serving spaces: ${result.spaceIds.join(', ')}`
-      );
-      this.startHeartbeat(result.heartbeatIntervalSeconds);
+    this.pending.delete(id);
+    clearTimeout(entry.timer);
+    if (error) {
+      entry.reject(new Error(`[${error.code}] ${error.message}`));
+    } else {
+      entry.resolve(result);
     }
   }
 
-  private onNotification(frame: RpcNotification): void {
-    switch (frame.event) {
-      case WORKER_CHANNEL_EVENTS.taskDispatch:
-        this.logger.info('received task dispatch (execution not yet implemented)', frame.payload);
+  private onNotification(event: string, payload: unknown): void {
+    switch (event) {
+      case WORKER_CHANNEL_EVENTS.sessionDispatch:
+        this.handlers.onSessionDispatch(payload as SessionDispatchEnvelope);
+        break;
+      case WORKER_CHANNEL_EVENTS.ticketDispatch:
+        this.handlers.onTicketDispatch(payload as TicketDispatchEnvelope);
         break;
       case WORKER_CHANNEL_EVENTS.taskSteer:
-        this.logger.info('received steer request', frame.payload);
+        this.handlers.onTaskSteer(payload as TaskSteerPayload);
         break;
       case WORKER_CHANNEL_EVENTS.taskAbort:
-        this.logger.info('received abort request', frame.payload);
+        this.handlers.onTaskAbort(payload as TaskAbortPayload);
         break;
       default:
-        this.logger.warn(`unknown server event: ${frame.event}`);
+        this.logger.warn(`unknown server event: ${event}`);
     }
   }
 
@@ -133,14 +197,11 @@ export class WorkerClient {
       const payload: WorkerHeartbeatPayload = {
         workerId: this.config.workerId,
         timestamp: Date.now(),
-        capacity: { maxSlots: this.config.maxSlots, activeSlots: this.activeTaskIds.length },
-        activeTaskIds: this.activeTaskIds,
+        capacity: { maxSlots: this.config.maxSlots, activeSlots: this.activeTaskIds.size },
+        activeTaskIds: [...this.activeTaskIds],
       };
-      this.send({
-        kind: 'request',
-        id: this.nextRequestId(),
-        method: WORKER_CHANNEL_METHODS.heartbeat,
-        params: payload,
+      this.rpc(WORKER_CHANNEL_METHODS.heartbeat, payload).catch((err: Error) => {
+        this.logger.warn(`heartbeat failed: ${err.message}`);
       });
     }, intervalSeconds * 1000);
     this.heartbeatTimer.unref();
@@ -149,6 +210,14 @@ export class WorkerClient {
   private stopHeartbeat(): void {
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     this.heartbeatTimer = undefined;
+  }
+
+  private failPending(error: Error): void {
+    for (const entry of this.pending.values()) {
+      clearTimeout(entry.timer);
+      entry.reject(error);
+    }
+    this.pending.clear();
   }
 
   private send(frame: RpcFrame): void {

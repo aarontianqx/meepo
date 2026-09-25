@@ -58,26 +58,115 @@ export interface TaskAbortPayload {
   reason?: string;
 }
 
-/** Task execution dispatch envelope (Server -> Worker) */
-export interface TaskDispatchEnvelope {
+/** Where a dispatched unit of work originates */
+export type DispatchSource =
+  | { kind: 'user_message'; messageId: string }
+  | { kind: 'cron'; jobId: string; coalescedCount: number; stale: boolean }
+  | { kind: 'reminder'; reminderId: string }
+  | { kind: 'webhook'; event: string }
+  | { kind: 'system' };
+
+/** Delivery semantics the server requests for a turn */
+export type DeliveryMode = 'urgent' | 'wait' | 'if_idle';
+
+/** Model credentials held per space by the server and injected per dispatch */
+export interface ModelConfig {
+  /** pi-ai compatible provider identifier, e.g. "openai-completions" */
+  provider: string;
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+}
+
+/** Workspace a turn executes in; null for no-workspace (main) sessions */
+export interface WorkspaceSpec {
+  repoUrl: string;
+  branch: string;
+  commitSha?: string;
+}
+
+/** Session dispatch: a turn inside an existing (or newly created) session context */
+export interface SessionDispatchEnvelope {
   taskId: string;
   sessionId: string;
   spaceId: string;
-  mode: 'interactive' | 'ticket';
+  sessionKind: 'main' | 'task';
   prompt: string;
-  systemPromptContribution?: string;
-  workspace: {
-    repoUrl: string;
-    branch: string;
-    commitSha?: string;
-  };
-  contextMessages?: unknown[];
+  source: DispatchSource;
+  delivery: DeliveryMode;
+  workspace: WorkspaceSpec | null;
+  model: ModelConfig;
   timeoutSeconds?: number;
+}
+
+/** Ticket dispatch: a fresh, isolated execution context */
+export interface TicketDispatchEnvelope {
+  taskId: string;
+  ticketId: string;
+  spaceId: string;
+  objective: string;
+  contextSummary?: string;
+  workspace: WorkspaceSpec;
+  model: ModelConfig;
+  source: DispatchSource;
+  timeoutSeconds?: number;
+}
+
+/** Simplified transcript entry used for session rehydration snapshots */
+export interface TranscriptMessage {
+  role: 'user' | 'assistant' | 'tool';
+  content: string;
+  timestamp: number;
+}
+
+/** Full session snapshot served to a worker cold-starting a session */
+export interface SessionSnapshot {
+  sessionId: string;
+  version: number;
+  messages: TranscriptMessage[];
+}
+
+/** Cron tool proxy: create a session-scoped cron job */
+export interface CronCreateParams {
+  sessionId: string;
+  /** 5-field cron expression interpreted in `timezone` */
+  cron: string;
+  prompt: string;
+  recurring: boolean;
+  timezone?: string;
+}
+
+export interface CronListParams {
+  sessionId: string;
+}
+
+export interface CronDeleteParams {
+  sessionId: string;
+  jobId: string;
+}
+
+/** Cron job as returned to the agent and console */
+export interface CronJobView {
+  id: string;
+  sessionId: string;
+  cron: string;
+  prompt: string;
+  recurring: boolean;
+  timezone: string;
+  nextFireAt: number | null;
+  createdAt: number;
+  lastFiredAt?: number;
 }
 
 /** Streaming events emitted by Worker -> Server */
 export type WorkerStreamEvent =
-  | { type: 'task_started'; taskId: string; sessionId: string; workerId: string }
+  | {
+      type: 'task_started';
+      taskId: string;
+      workerId: string;
+      sessionId?: string;
+      ticketId?: string;
+    }
   | { type: 'text_delta'; taskId: string; delta: string }
   | { type: 'thinking_delta'; taskId: string; delta: string }
   | {

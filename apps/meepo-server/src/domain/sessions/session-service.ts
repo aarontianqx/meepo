@@ -40,6 +40,16 @@ export class SessionService {
     return session;
   }
 
+  /** Returns the live session bound to a thread, if one exists. */
+  async findByThread(
+    spaceId: string,
+    chatId: string,
+    threadId: string
+  ): Promise<Session | undefined> {
+    const session = await this.sessions.getByThread(spaceId, chatId, threadId);
+    return session && session.status !== 'closed' ? session : undefined;
+  }
+
   async getSession(id: string): Promise<Session> {
     const session = await this.sessions.getById(id);
     if (!session) throw notFound(`Session not found: ${id}`);

@@ -100,11 +100,13 @@ export class TicketService {
     return ticket;
   }
 
-  /** Returns a claimed/running ticket to the pending queue (e.g. worker disconnected). */
+  /** Returns a claimed/running/failed ticket to the pending queue (e.g. worker disconnected, retry). */
   async requeueTicket(id: string): Promise<Ticket> {
     const ticket = await this.getTicket(id);
-    if (ticket.status !== 'claimed' && ticket.status !== 'running') {
-      throw conflict(`Ticket ${id} is ${ticket.status}, only claimed/running tickets can requeue`);
+    if (ticket.status !== 'claimed' && ticket.status !== 'running' && ticket.status !== 'failed') {
+      throw conflict(
+        `Ticket ${id} is ${ticket.status}, only claimed/running/failed tickets can requeue`
+      );
     }
     ticket.status = 'pending';
     ticket.assignedWorkerId = undefined;

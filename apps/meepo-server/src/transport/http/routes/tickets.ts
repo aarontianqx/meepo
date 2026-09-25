@@ -28,4 +28,8 @@ export function registerTicketRoutes(app: FastifyInstance, services: ServiceCont
   app.post<{ Params: TicketParams }>('/api/tickets/:id/requeue', async (req) =>
     services.ticketService.requeueTicket(req.params.id)
   );
+
+  app.post<{ Params: TicketParams }>('/api/tickets/:id/dispatch', async (req) =>
+    services.dispatchService.dispatchTicket(req.params.id)
+  );
 }

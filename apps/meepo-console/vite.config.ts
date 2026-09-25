@@ -6,6 +6,7 @@ export default defineConfig({
   server: {
     proxy: {
       '/api': 'http://localhost:8780',
+      '/healthz': 'http://localhost:8780',
       '/ws': { target: 'ws://localhost:8780', ws: true },
     },
   },

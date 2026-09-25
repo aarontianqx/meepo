@@ -1,16 +1,27 @@
-import type { WebSocket } from 'ws';
+import WebSocket from 'ws';
 
 import {
   RPC_ERROR_CODES,
+  SERVER_CHANNEL_EVENTS,
   WORKER_CHANNEL_METHODS,
+  type CronCreateParams,
+  type CronDeleteParams,
+  type CronListParams,
   type RpcFrame,
   type RpcRequest,
   type RpcResponse,
+  type SessionSnapshotParams,
+  type WorkerChannelDownstream,
   type WorkerHeartbeatPayload,
   type WorkerRegisterPayload,
+  type WorkerStreamEvent,
 } from '@meepo/protocol';
 
+import type { WorkerSender } from '../../domain/dispatch/worker-sender.js';
 import { DomainError } from '../../domain/errors.js';
+import type { SchedulerService } from '../../domain/schedule/scheduler-service.js';
+import type { StreamProcessor } from '../../domain/sessions/stream-processor.js';
+import type { TranscriptService } from '../../domain/sessions/transcript-service.js';
 import type { WorkerService } from '../../domain/workers/worker-service.js';
 
 type Logger = Pick<Console, 'info' | 'warn' | 'error'>;
@@ -22,15 +33,42 @@ const DOMAIN_TO_RPC_CODE: Record<DomainError['code'], string> = {
   unauthorized: RPC_ERROR_CODES.unauthorized,
 };
 
+export interface WorkerChannelDeps {
+  workerService: WorkerService;
+  schedulerService: SchedulerService;
+  transcriptService: TranscriptService;
+  streamProcessor: StreamProcessor;
+}
+
 /**
  * Handles the persistent worker WebSocket channel: registration, heartbeats,
- * and (in later phases) task dispatch and stream relay.
+ * session snapshots, cron tool proxying, and stream event ingestion. Also
+ * implements the WorkerSender port used by the dispatch pipeline.
  */
-export class WorkerChannelHandler {
+export class WorkerChannelHandler implements WorkerSender {
+  private readonly sockets = new Map<string, WebSocket>();
+  private onWorkerReady?: (workerId: string) => void;
+
   constructor(
-    private readonly workerService: WorkerService,
+    private readonly deps: WorkerChannelDeps,
     private readonly logger: Logger = console
   ) {}
+
+  /** Late-bound because the dispatch service is created after the channel. */
+  setOnWorkerReady(callback: (workerId: string) => void): void {
+    this.onWorkerReady = callback;
+  }
+
+  isConnected(workerId: string): boolean {
+    return this.sockets.get(workerId)?.readyState === WebSocket.OPEN;
+  }
+
+  sendToWorker(workerId: string, frame: WorkerChannelDownstream): void {
+    const socket = this.sockets.get(workerId);
+    if (socket?.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify(frame));
+    }
+  }
 
   handleConnection(socket: WebSocket): void {
     socket.on('message', (raw: Buffer) => {
@@ -50,32 +88,51 @@ export class WorkerChannelHandler {
       });
       return;
     }
-
     if (frame.kind === 'request') {
       await this.onRequest(socket, frame);
       return;
     }
-
-    // Notifications (e.g. stream events) are accepted but not yet relayed.
+    if (frame.kind === 'notification' && frame.event === SERVER_CHANNEL_EVENTS.stream) {
+      this.deps.streamProcessor.onEvent(frame.payload as WorkerStreamEvent);
+    }
   }
 
   private async onRequest(socket: WebSocket, frame: RpcRequest): Promise<void> {
     try {
       switch (frame.method) {
-        case WORKER_CHANNEL_METHODS.register: {
-          const result = await this.workerService.register(frame.params as WorkerRegisterPayload);
-          this.send(socket, { kind: 'response', id: frame.id, result });
-          this.logger.info(
-            `worker registered: ${result.workerId} (spaces: ${result.spaceIds.join(', ')})`
-          );
-          // Registration binds the socket to the worker for disconnect cleanup.
-          socket.once('close', () => void this.workerService.markOffline(result.workerId));
+        case WORKER_CHANNEL_METHODS.register:
+          await this.onRegister(socket, frame);
           return;
-        }
         case WORKER_CHANNEL_METHODS.heartbeat: {
           const params = frame.params as WorkerHeartbeatPayload;
-          await this.workerService.heartbeat(params.workerId, params);
+          await this.deps.workerService.heartbeat(params.workerId, params);
           this.send(socket, { kind: 'response', id: frame.id, result: { accepted: true } });
+          return;
+        }
+        case WORKER_CHANNEL_METHODS.sessionSnapshot: {
+          const params = frame.params as SessionSnapshotParams;
+          const snapshot = await this.deps.transcriptService.getSnapshot(params.sessionId);
+          this.send(socket, { kind: 'response', id: frame.id, result: snapshot });
+          return;
+        }
+        case WORKER_CHANNEL_METHODS.cronCreate: {
+          const view = await this.deps.schedulerService.createCron(
+            frame.params as CronCreateParams
+          );
+          this.send(socket, { kind: 'response', id: frame.id, result: view });
+          return;
+        }
+        case WORKER_CHANNEL_METHODS.cronList: {
+          const views = await this.deps.schedulerService.listCrons(
+            (frame.params as CronListParams).sessionId
+          );
+          this.send(socket, { kind: 'response', id: frame.id, result: views });
+          return;
+        }
+        case WORKER_CHANNEL_METHODS.cronDelete: {
+          const params = frame.params as CronDeleteParams;
+          await this.deps.schedulerService.deleteCron(params.sessionId, params.jobId);
+          this.send(socket, { kind: 'response', id: frame.id, result: { deleted: true } });
           return;
         }
         default:
@@ -91,6 +148,25 @@ export class WorkerChannelHandler {
     } catch (err) {
       this.send(socket, { kind: 'response', id: frame.id, error: toRpcError(err) });
     }
+  }
+
+  private async onRegister(socket: WebSocket, frame: RpcRequest): Promise<void> {
+    const result = await this.deps.workerService.register(frame.params as WorkerRegisterPayload);
+    const previous = this.sockets.get(result.workerId);
+    if (previous && previous !== socket) previous.close();
+    this.sockets.set(result.workerId, socket);
+    socket.once('close', () => {
+      if (this.sockets.get(result.workerId) === socket) {
+        this.sockets.delete(result.workerId);
+        void this.deps.workerService.markOffline(result.workerId);
+        this.logger.info(`worker disconnected: ${result.workerId}`);
+      }
+    });
+    this.send(socket, { kind: 'response', id: frame.id, result });
+    this.logger.info(
+      `worker registered: ${result.workerId} (spaces: ${result.spaceIds.join(', ')})`
+    );
+    this.onWorkerReady?.(result.workerId);
   }
 
   private send(socket: WebSocket, frame: RpcResponse): void {

@@ -16,6 +16,14 @@ export interface CreateSpaceInput {
   timezone?: string;
 }
 
+export interface UpdateSpaceInput {
+  description?: string;
+  repoUrl?: string;
+  defaultBranch?: string;
+  requiredTags?: string[];
+  timezone?: string;
+}
+
 const DEFAULT_TIMEZONE = 'UTC';
 
 export class SpaceService {
@@ -86,6 +94,33 @@ export class SpaceService {
     await this.memberships.requireManager(spaceId, userId);
     const space = await this.getSpace(spaceId);
     space.longTermMemory = longTermMemory;
+    space.updatedAt = Date.now();
+    await this.spaces.save(space);
+    return space;
+  }
+
+  /** Sets (or clears) the space's server-held model credentials. */
+  async updateModel(spaceId: string, model: Space['model'], userId: string): Promise<Space> {
+    await this.memberships.requireManager(spaceId, userId);
+    const space = await this.getSpace(spaceId);
+    space.model = model;
+    space.updatedAt = Date.now();
+    await this.spaces.save(space);
+    return space;
+  }
+
+  /** Partially updates editable space fields. */
+  async updateSpace(spaceId: string, patch: UpdateSpaceInput, userId: string): Promise<Space> {
+    await this.memberships.requireManager(spaceId, userId);
+    const space = await this.getSpace(spaceId);
+    if (patch.description !== undefined) space.description = patch.description;
+    if (patch.repoUrl !== undefined) {
+      if (!patch.repoUrl.trim()) throw validation('Space repoUrl must not be empty');
+      space.repoUrl = patch.repoUrl.trim();
+    }
+    if (patch.defaultBranch !== undefined) space.defaultBranch = patch.defaultBranch;
+    if (patch.requiredTags !== undefined) space.requiredTags = patch.requiredTags;
+    if (patch.timezone !== undefined) space.timezone = patch.timezone;
     space.updatedAt = Date.now();
     await this.spaces.save(space);
     return space;

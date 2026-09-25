@@ -1,6 +1,7 @@
 /**
  * Domain entity models for Meepo
  */
+import type { ModelConfig } from '@meepo/protocol';
 
 /** Normalized user identity, resolved from the auth layer */
 export interface UserIdentity {
@@ -46,6 +47,8 @@ export interface Space {
   boundWorkerId?: string;
   /** IANA timezone defaulting scheduled records (reminders, crons) */
   timezone: string;
+  /** Server-held model credentials injected into dispatches for this space */
+  model?: ModelConfig;
   boundChatIds: string[];
   requiredTags: string[];
   longTermMemory: string;
@@ -107,4 +110,41 @@ export interface Session {
   status: 'active' | 'idle' | 'closed';
   createdAt: number;
   lastActiveAt: number;
+}
+
+export type ScheduleTrigger =
+  { kind: 'delay'; delayMs: number } | { kind: 'at'; at: number } | { kind: 'cron'; cron: string };
+
+export type ReminderStatus = 'scheduled' | 'fired' | 'cancelled';
+
+/** Task-level scheduled trigger: fires into a new ticket (space-scoped) */
+export interface Reminder {
+  id: string;
+  spaceId: string;
+  objective: string;
+  contextSummary?: string;
+  requiredTags: string[];
+  trigger: ScheduleTrigger;
+  timezone: string;
+  status: ReminderStatus;
+  createdByUserId: string;
+  createdAt: number;
+  lastFiredAt?: number;
+}
+
+export type CronJobStatus = 'active' | 'deleted';
+
+/** Session-level cron: fires a wakeup turn in the same session context */
+export interface CronJob {
+  id: string;
+  sessionId: string;
+  spaceId: string;
+  /** 5-field cron expression interpreted in `timezone` */
+  cron: string;
+  prompt: string;
+  recurring: boolean;
+  timezone: string;
+  status: CronJobStatus;
+  createdAt: number;
+  lastFiredAt?: number;
 }

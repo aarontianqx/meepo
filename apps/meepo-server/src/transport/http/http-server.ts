@@ -15,6 +15,8 @@ import type { WorkerChannelHandler } from '../ws/worker-channel.js';
 import './auth.js';
 import { registerHealthRoutes } from './routes/health.js';
 import { registerMembershipRoutes } from './routes/memberships.js';
+import { registerScheduleRoutes } from './routes/schedule.js';
+import { registerSessionRoutes } from './routes/sessions.js';
 import { registerSpaceRoutes } from './routes/spaces.js';
 import { registerTicketRoutes } from './routes/tickets.js';
 import { registerWorkerRoutes } from './routes/workers.js';
@@ -59,6 +61,8 @@ export async function buildHttpServer(options: HttpServerOptions): Promise<Fasti
   registerSpaceRoutes(app, options.services);
   registerWorkerRoutes(app, options.services);
   registerTicketRoutes(app, options.services);
+  registerSessionRoutes(app, options.services);
+  registerScheduleRoutes(app, options.services);
 
   await app.register(async (scope) => {
     scope.get(WORKER_CHANNEL_PATH, { websocket: true }, (socket) => {
