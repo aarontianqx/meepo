@@ -109,6 +109,8 @@ export interface Session {
   threadId: string;
   /** Feishu root message used as the reply anchor for thread messages */
   anchorMessageId?: string;
+  /** The prewarm "processing" reply to delete once the card starts streaming */
+  prewarmMessageId?: string;
   /** Worker this session is pinned to */
   boundWorkerId?: string;
   status: 'active' | 'idle' | 'closed';

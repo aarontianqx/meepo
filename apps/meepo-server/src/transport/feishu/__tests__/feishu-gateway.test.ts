@@ -40,10 +40,11 @@ class FakeFeishuClient implements FeishuClient {
   }
 
   async replyCard(): Promise<void> {}
+  async deleteMessage(): Promise<void> {}
   async createCard(): Promise<string> {
     return 'card_1';
   }
-  async updateCardContent(): Promise<void> {}
+  async updateCard(): Promise<void> {}
   async updateCardSettings(): Promise<void> {}
   async listThreadMessages(): Promise<import('../feishu-client.js').ThreadHistoryMessage[]> {
     return this.threadHistory;

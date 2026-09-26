@@ -12,6 +12,7 @@ export interface OpenSessionInput {
   threadId: string;
   kind?: SessionKind;
   anchorMessageId?: string;
+  prewarmMessageId?: string;
 }
 
 export class SessionService {
@@ -40,6 +41,7 @@ export class SessionService {
       chatId: input.chatId,
       threadId: input.threadId,
       anchorMessageId: input.anchorMessageId,
+      prewarmMessageId: input.prewarmMessageId,
       status: 'active',
       createdAt: now,
       lastActiveAt: now,

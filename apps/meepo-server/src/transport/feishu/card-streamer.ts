@@ -9,6 +9,7 @@ const DEFAULT_FLUSH_INTERVAL_MS = 500;
 
 interface CardRun {
   cardId?: string;
+  thinking: string;
   text: string;
   sequence: number;
   dirty: boolean;
@@ -25,12 +26,14 @@ export interface CardStreamerDeps {
   onError?: (err: unknown) => void;
 }
 
+type CardState = 'streaming' | 'completed' | 'failed';
+
 /**
- * Renders worker stream events into a Feishu streaming card per session run:
- * a CardKit entity card (schema 2.0, streaming_mode) is created on
- * run_started and sent into the session's thread; text deltas are
- * accumulated and pushed as full-text element updates on a throttle; the
- * terminal event flushes and closes streaming mode. Ticket runs are skipped.
+ * Renders worker stream events into a single Feishu card per run: the card is
+ * the placeholder from the start (the prewarm reply is deleted when streaming
+ * begins), thinking deltas accumulate into a collapsible panel, and at the
+ * terminal event the card is replaced with its final content — thinking kept
+ * collapsed, button removed, streaming mode closed. Ticket runs are skipped.
  */
 export class CardStreamer {
   private readonly runs = new Map<string, CardRun>();
@@ -57,15 +60,21 @@ export class CardStreamer {
         const run = this.runs.get(event.runId);
         if (!run || run.closed) return;
         run.text += event.delta;
-        run.dirty = true;
+        this.scheduleFlush(event.runId, run);
+        return;
+      }
+      case 'thinking_delta': {
+        const run = this.runs.get(event.runId);
+        if (!run || run.closed) return;
+        run.thinking += event.delta;
         this.scheduleFlush(event.runId, run);
         return;
       }
       case 'run_completed':
-        await this.finishCard(event.runId, false);
+        await this.finishCard(event.runId, 'completed');
         return;
       case 'run_failed':
-        await this.finishCard(event.runId, true, event.error);
+        await this.finishCard(event.runId, 'failed', event.error);
         return;
       default:
         return;
@@ -74,6 +83,7 @@ export class CardStreamer {
 
   private async startCard(runId: string, sessionId: string): Promise<void> {
     const run: CardRun = {
+      thinking: '',
       text: '',
       sequence: 0,
       dirty: false,
@@ -83,10 +93,13 @@ export class CardStreamer {
     this.runs.set(runId, run);
     run.queue = run.queue.then(async () => {
       const session = await this.deps.sessions.getSession(sessionId);
+      if (session.prewarmMessageId) {
+        await this.deps.client.deleteMessage(session.prewarmMessageId).catch(() => undefined);
+      }
       if (!session.anchorMessageId) {
         throw new Error(`session ${sessionId} has no reply anchor; cannot stream card`);
       }
-      const cardId = await this.deps.client.createCard(buildStreamingCardJson(runId));
+      const cardId = await this.deps.client.createCard(buildCardJson(run, runId, 'streaming'));
       run.cardId = cardId;
       // main sessions (private chats) reply in the main flow; thread sessions
       // (group threads) reply inside their thread.
@@ -98,16 +111,21 @@ export class CardStreamer {
   }
 
   private scheduleFlush(runId: string, run: CardRun): void {
+    run.dirty = true;
     if (run.timer) return;
     run.timer = setTimeout(() => {
       run.timer = undefined;
       if (run.closed || !run.dirty) return;
       run.dirty = false;
-      this.enqueue(runId, run, () => this.pushContent(run));
+      this.enqueue(runId, run, () => this.pushCard(run, 'streaming'));
     }, this.flushIntervalMs);
   }
 
-  private async finishCard(runId: string, failed: boolean, error?: string): Promise<void> {
+  private async finishCard(
+    runId: string,
+    state: 'completed' | 'failed',
+    error?: string
+  ): Promise<void> {
     const run = this.runs.get(runId);
     if (!run) return;
     run.closed = true;
@@ -115,15 +133,11 @@ export class CardStreamer {
       clearTimeout(run.timer);
       run.timer = undefined;
     }
-    if (failed) {
+    if (state === 'failed') {
       run.text += `\n\n> ⚠️ 任务失败：${error ?? 'unknown error'}`;
-      run.dirty = true;
     }
     this.enqueue(runId, run, async () => {
-      if (run.dirty) {
-        run.dirty = false;
-        await this.pushContent(run);
-      }
+      await this.pushCard(run, state);
       if (!run.cardId) return;
       run.sequence += 1;
       await this.deps.client.updateCardSettings(
@@ -144,20 +158,45 @@ export class CardStreamer {
     });
   }
 
-  private async pushContent(run: CardRun): Promise<void> {
-    if (!run.cardId || !run.text) return;
+  private async pushCard(run: CardRun, state: CardState): Promise<void> {
+    if (!run.cardId) return;
     run.sequence += 1;
-    await this.deps.client.updateCardContent(
+    await this.deps.client.updateCard(
       run.cardId,
-      MARKDOWN_ELEMENT_ID,
-      run.text,
+      buildCardJson(run, run.cardId, state),
       run.sequence,
       `${run.cardId}_${run.sequence}`
     );
   }
 }
 
-function buildStreamingCardJson(runId: string): string {
+function buildCardJson(run: CardRun, runId: string, state: CardState): string {
+  const elements: Record<string, unknown>[] = [];
+  if (run.thinking) {
+    elements.push({
+      tag: 'collapsible_panel',
+      expanded: false,
+      header: {
+        title: {
+          tag: 'plain_text',
+          content: state === 'streaming' ? '💭 思考中' : '✅ 思考完成',
+        },
+      },
+      border: { color: 'grey' },
+      background_color: 'grey',
+      elements: [{ tag: 'markdown', content: run.thinking }],
+    });
+  }
+  elements.push({ tag: 'markdown', element_id: MARKDOWN_ELEMENT_ID, content: run.text });
+  if (state === 'streaming') {
+    elements.push({
+      tag: 'button',
+      name: 'abort_run',
+      text: { tag: 'lark_md', content: '停止' },
+      type: 'danger',
+      value: { action: 'abort_run', runId },
+    });
+  }
   return JSON.stringify({
     schema: '2.0',
     config: {
@@ -165,17 +204,6 @@ function buildStreamingCardJson(runId: string): string {
       streaming_config: { print_strategy: 'fast' },
       update_multi: true,
     },
-    body: {
-      elements: [
-        { tag: 'markdown', element_id: MARKDOWN_ELEMENT_ID, content: '' },
-        {
-          tag: 'button',
-          name: 'abort_run',
-          text: { tag: 'lark_md', content: '停止' },
-          type: 'danger',
-          value: { action: 'abort_run', runId },
-        },
-      ],
-    },
+    body: { elements },
   });
 }

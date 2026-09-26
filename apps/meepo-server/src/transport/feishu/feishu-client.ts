@@ -52,14 +52,9 @@ export interface FeishuClient {
     opts?: { replyInThread?: boolean }
   ): Promise<ReplyResult>;
   replyCard(messageId: string, cardId: string, opts?: { replyInThread?: boolean }): Promise<void>;
+  deleteMessage(messageId: string): Promise<void>;
   createCard(cardJson: string): Promise<string>;
-  updateCardContent(
-    cardId: string,
-    elementId: string,
-    content: string,
-    sequence: number,
-    uuid: string
-  ): Promise<void>;
+  updateCard(cardId: string, cardJson: string, sequence: number, uuid: string): Promise<void>;
   updateCardSettings(cardId: string, settings: string, sequence: number): Promise<void>;
   listThreadMessages(threadId: string, limit?: number): Promise<ThreadHistoryMessage[]>;
 }
@@ -101,6 +96,11 @@ export class LarkFeishuClient implements FeishuClient {
     if (res.code) throw new Error(`im message.reply (card) failed: ${res.code} ${res.msg}`);
   }
 
+  async deleteMessage(messageId: string): Promise<void> {
+    const res = await this.client.im.v1.message.delete({ path: { message_id: messageId } });
+    if (res.code) throw new Error(`im message.delete failed: ${res.code} ${res.msg}`);
+  }
+
   async createCard(cardJson: string): Promise<string> {
     const res = await this.client.cardkit.v1.card.create({
       data: { type: 'card_json', data: cardJson },
@@ -111,17 +111,17 @@ export class LarkFeishuClient implements FeishuClient {
     return res.data.card_id;
   }
 
-  async updateCardContent(
+  async updateCard(
     cardId: string,
-    elementId: string,
-    content: string,
+    cardJson: string,
     sequence: number,
     uuid: string
   ): Promise<void> {
-    await this.client.cardkit.v1.cardElement.content({
-      path: { card_id: cardId, element_id: elementId },
-      data: { content, sequence, uuid },
+    const res = await this.client.cardkit.v1.card.update({
+      path: { card_id: cardId },
+      data: { card: { type: 'card_json', data: cardJson }, sequence, uuid },
     });
+    if (res.code) throw new Error(`cardkit card.update failed: ${res.code} ${res.msg}`);
   }
 
   async updateCardSettings(cardId: string, settings: string, sequence: number): Promise<void> {

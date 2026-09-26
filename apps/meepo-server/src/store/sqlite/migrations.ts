@@ -192,6 +192,13 @@ export const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 7,
+    name: 'session prewarm message',
+    up(db) {
+      db.exec('ALTER TABLE sessions ADD COLUMN prewarm_message_id TEXT');
+    },
+  },
 ];
 
 /** Applies pending migrations in version order, tracking progress via `user_version`. */

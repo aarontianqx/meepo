@@ -146,12 +146,14 @@ export class FeishuGateway {
   ): Promise<void> {
     let threadId: string;
     let anchorMessageId: string;
+    let prewarmMessageId: string | undefined;
     if (decision.threadRef.kind === 'prewarm') {
       const reply = await this.deps.client.replyText(msg.messageId, PREWARM_TEXT, {
         replyInThread: true,
       });
       threadId = reply.threadId ?? msg.messageId;
       anchorMessageId = msg.messageId;
+      prewarmMessageId = reply.messageId || undefined;
     } else {
       threadId = decision.threadRef.threadId;
       anchorMessageId = msg.rootId ?? msg.messageId;
@@ -163,6 +165,7 @@ export class FeishuGateway {
       threadId,
       kind: decision.sessionKind,
       anchorMessageId,
+      prewarmMessageId,
     });
     this.windowSessions.set(decision.windowId, sessionId);
     this.windowSessions.set(windowIdOf(msg.chatId, threadId), sessionId);
@@ -213,6 +216,7 @@ export class FeishuGateway {
       threadId: string;
       kind: 'main' | 'thread';
       anchorMessageId: string;
+      prewarmMessageId?: string;
     }
   ): Promise<string> {
     const cached = this.windowSessions.get(windowId);
