@@ -10,6 +10,9 @@ type WorkRef = { kind: 'session'; sessionId: string } | { kind: 'ticket'; ticket
 /** Listener for renderable stream updates (Feishu card streaming); set by the IM layer. */
 export type StreamRenderHook = (event: WorkerStreamEvent, ref: WorkRef) => void;
 
+/** Notifies a session window of its ticket's terminal result; set by the IM layer. */
+export type TicketResultNotifier = (sessionId: string, text: string) => void;
+
 type Logger = Pick<Console, 'info' | 'warn' | 'error'>;
 
 type RunStartedEvent = Extract<WorkerStreamEvent, { type: 'run_started' }>;
@@ -25,6 +28,7 @@ export class StreamProcessor {
   /** Serializes async per-run work so started always lands before settle. */
   private readonly chains = new Map<string, Promise<void>>();
   private renderHook?: StreamRenderHook;
+  private ticketResultNotifier?: TicketResultNotifier;
 
   constructor(
     private readonly transcripts: TranscriptService,
@@ -35,6 +39,10 @@ export class StreamProcessor {
 
   setRenderHook(hook: StreamRenderHook): void {
     this.renderHook = hook;
+  }
+
+  setTicketResultNotifier(notifier: TicketResultNotifier): void {
+    this.ticketResultNotifier = notifier;
   }
 
   onEvent(event: WorkerStreamEvent): void {
@@ -124,11 +132,33 @@ export class StreamProcessor {
       });
       return;
     }
-    if (ok) {
-      await this.ticketService.completeTicket(ref.ticketId, { summary: content });
-    } else {
-      await this.ticketService.failTicket(ref.ticketId, finalText);
+
+    const ticket = ok
+      ? await this.ticketService.completeTicket(ref.ticketId, { summary: content })
+      : await this.ticketService.failTicket(ref.ticketId, finalText);
+
+    if (ticket.originSessionId) {
+      await this.reportToOriginSession(ticket.originSessionId, ref.ticketId, ok, content);
     }
+  }
+
+  /** Writes the ticket result back to its origin session: transcript + window notice. */
+  private async reportToOriginSession(
+    sessionId: string,
+    ticketId: string,
+    ok: boolean,
+    summary: string
+  ): Promise<void> {
+    const status = ok ? 'completed' : 'failed';
+    await this.transcripts.appendMessage(sessionId, {
+      role: 'user',
+      content: `<ticket-result ticketId="${ticketId}" status="${status}">\n${summary}\n</ticket-result>`,
+      timestamp: Date.now(),
+    });
+    this.ticketResultNotifier?.(
+      sessionId,
+      `工单 ${status === 'completed' ? '已完成 ✅' : '失败 ⚠️'}：${summary}`
+    );
   }
 }
 

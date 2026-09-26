@@ -81,6 +81,19 @@ export class FeishuGateway {
     await this.executeDispatch(msg, decision);
   }
 
+  /** Sends a plain notification to a session's window (ticket results, system notices). */
+  async notifySession(sessionId: string, text: string): Promise<void> {
+    try {
+      const session = await this.deps.sessionService.getSession(sessionId);
+      if (!session.anchorMessageId) return;
+      await this.deps.client.replyText(session.anchorMessageId, text, {
+        replyInThread: session.kind !== 'main',
+      });
+    } catch (err: unknown) {
+      this.onError(err);
+    }
+  }
+
   private async handleNewCommand(msg: InboundMessage): Promise<void> {
     const isMainWindow = msg.chatType === 'p2p' || !msg.threadId;
     if (!isMainWindow) {

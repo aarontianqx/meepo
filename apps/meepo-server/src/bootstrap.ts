@@ -143,6 +143,9 @@ export async function bootstrap(): Promise<ServerRuntime> {
         defaultSpaceId: config.feishu.defaultSpaceId,
         onError: (err) => app.log.error(err, 'feishu gateway message handling failed'),
       });
+      streamProcessor.setTicketResultNotifier((sessionId, text) => {
+        void feishuGateway.notifySession(sessionId, text);
+      });
       startFeishuWs(config.feishu, (event) => feishuGateway.handleEvent(event));
       app.log.info('feishu gateway started');
     } catch (err: unknown) {

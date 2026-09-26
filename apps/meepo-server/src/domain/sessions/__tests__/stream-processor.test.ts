@@ -116,6 +116,37 @@ describe('StreamProcessor', () => {
     expect((await runs.getById('run3'))?.status).toBe('failed');
   });
 
+  it('reports a ticket result back to its origin session', async () => {
+    const origin: Ticket = { ...makeTicket('t9', 'sp1', 'w1'), originSessionId: 'se1' };
+    await tickets.save(origin);
+    await runs.save(makeRun('run9', { kind: 'ticket', ticketId: 't9' }));
+
+    const notices: { sessionId: string; text: string }[] = [];
+    processor.setTicketResultNotifier((sessionId, text) => {
+      notices.push({ sessionId, text });
+    });
+
+    processor.onEvent({ type: 'run_started', runId: 'run9', workerId: 'w1', ticketId: 't9' });
+    processor.onEvent({ type: 'text_delta', runId: 'run9', delta: 'shipped' });
+    processor.onEvent({ type: 'run_completed', runId: 'run9' });
+
+    await vi.waitFor(async () => {
+      expect((await tickets.getById('t9'))?.status).toBe('completed');
+    });
+
+    const records = await events.listBySession('se1');
+    expect(records).toHaveLength(1);
+    expect(records[0].payload).toMatchObject({
+      role: 'user',
+      content: expect.stringContaining('<ticket-result ticketId="t9" status="completed">'),
+    });
+    expect(records[0].payload).toMatchObject({ content: expect.stringContaining('shipped') });
+
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toMatchObject({ sessionId: 'se1' });
+    expect(notices[0].text).toContain('已完成');
+  });
+
   it('settles a turn from the persisted run even without a tracked ref', async () => {
     await runs.save(makeRun('run4', { kind: 'turn', sessionId: 'se7' }));
     processor.onEvent({ type: 'run_completed', runId: 'run4', resultSummary: 'done' });
