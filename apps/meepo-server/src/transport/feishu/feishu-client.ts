@@ -57,10 +57,13 @@ export interface FeishuClient {
   updateCard(cardId: string, cardJson: string, sequence: number, uuid: string): Promise<void>;
   updateCardSettings(cardId: string, settings: string, sequence: number): Promise<void>;
   listThreadMessages(threadId: string, limit?: number): Promise<ThreadHistoryMessage[]>;
+  getChatName(chatId: string): Promise<string>;
 }
 
 /** lark.Client adapter for {@link FeishuClient}. */
 export class LarkFeishuClient implements FeishuClient {
+  private readonly chatNames = new Map<string, string>();
+
   constructor(private readonly client: lark.Client) {}
 
   async replyText(
@@ -162,6 +165,20 @@ export class LarkFeishuClient implements FeishuClient {
       });
     }
     return out;
+  }
+
+  /** Resolves a chat's display name with a small in-process cache (falls back to the id). */
+  async getChatName(chatId: string): Promise<string> {
+    const cached = this.chatNames.get(chatId);
+    if (cached) return cached;
+    try {
+      const res = await this.client.im.v1.chat.get({ path: { chat_id: chatId } });
+      const name = res.data?.name || chatId;
+      this.chatNames.set(chatId, name);
+      return name;
+    } catch {
+      return chatId;
+    }
   }
 }
 

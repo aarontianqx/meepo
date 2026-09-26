@@ -16,6 +16,8 @@ import type { SessionRepository } from '../sessions/session-repository.js';
 import type { TranscriptService } from '../sessions/transcript-service.js';
 import type { SpaceRepository } from '../spaces/space-repository.js';
 import type { TicketRepository } from '../tickets/ticket-repository.js';
+import { formatUserMessage } from '@meepo/protocol';
+
 import type { WorkerRepository } from '../workers/worker-repository.js';
 import type { DispatchQueueRepository, QueuedDispatch } from './dispatch-queue-repository.js';
 import type { WorkerSender } from './worker-sender.js';
@@ -26,6 +28,8 @@ export interface DispatchSessionTurnInput {
   source: DispatchSource;
   delivery: DeliveryMode;
   author?: string;
+  authorOpenId?: string;
+  chatLabel?: string;
   /** Snapshot excludes transcript entries at or after this timestamp */
   snapshotBefore?: number;
 }
@@ -62,12 +66,18 @@ export class DispatchService {
     const space = await this.spaces.getById(session.spaceId);
     if (!space) throw notFound(`Space not found: ${session.spaceId}`);
 
-    const prompt = formatPromptWithSource(input.prompt, input.source, input.author);
+    const prompt = formatPromptWithSource(input.prompt, input.source, {
+      author: input.author,
+      authorOpenId: input.authorOpenId,
+      chatLabel: input.chatLabel,
+    });
     const turnTimestamp = Date.now();
     await this.transcripts.appendMessage(session.id, {
       role: 'user',
       author: input.author,
-      content: prompt,
+      authorOpenId: input.authorOpenId,
+      chatLabel: input.chatLabel,
+      content: input.prompt,
       timestamp: turnTimestamp,
     });
 
@@ -311,15 +321,19 @@ function mergeQueued(queued: QueuedDispatch[]): TurnDispatchEnvelope {
 }
 
 /** Wraps schedule fires in an origin envelope so the agent knows why it woke. */
-function formatPromptWithSource(prompt: string, source: DispatchSource, author?: string): string {
+function formatPromptWithSource(
+  prompt: string,
+  source: DispatchSource,
+  speaker?: { author?: string; authorOpenId?: string; chatLabel?: string }
+): string {
   if (source.kind === 'schedule') {
     return (
       `<schedule-fire scheduleId="${source.scheduleId}" coalescedCount="${source.coalescedCount}" ` +
       `stale="${source.stale}">\n${prompt}\n</schedule-fire>`
     );
   }
-  if (source.kind === 'user_message' && author) {
-    return `[user_name: ${author}]\n${prompt}`;
+  if (source.kind === 'user_message') {
+    return formatUserMessage(prompt, speaker ?? {});
   }
   return prompt;
 }

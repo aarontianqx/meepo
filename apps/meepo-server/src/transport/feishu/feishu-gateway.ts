@@ -183,7 +183,14 @@ export class FeishuGateway {
       source: { kind: 'user_message', messageId: msg.messageId },
       delivery: 'wait',
       author: msg.senderName,
+      authorOpenId: msg.senderOpenId,
+      chatLabel: await this.chatLabelOf(msg),
     });
+  }
+
+  private async chatLabelOf(msg: InboundMessage): Promise<string> {
+    if (msg.chatType === 'p2p') return '私聊';
+    return this.deps.client.getChatName(msg.chatId);
   }
 
   /** Imports pre-existing thread messages into a new session's transcript. */

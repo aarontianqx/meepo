@@ -49,6 +49,10 @@ class FakeFeishuClient implements FeishuClient {
   async listThreadMessages(): Promise<import('../feishu-client.js').ThreadHistoryMessage[]> {
     return this.threadHistory;
   }
+
+  async getChatName(): Promise<string> {
+    return 'oc_group';
+  }
 }
 
 class FakeSender implements WorkerSender {
@@ -177,10 +181,12 @@ describe('FeishuGateway', () => {
     expect(dispatches[0]).toMatchObject({
       sessionId: session?.id,
       sessionKind: 'thread',
-      prompt: '[user_name: ou_user]\nhelp me',
       delivery: 'wait',
       source: { kind: 'user_message', messageId: 'om_1' },
     });
+    expect(dispatches[0].prompt).toContain('<message sender="ou_user" open_id="ou_user"');
+    expect(dispatches[0].prompt).toContain('chat="oc_group"');
+    expect(dispatches[0].prompt).toContain('help me');
 
     const snapshot = await sessionService.getSession(session!.id);
     expect(snapshot.status).toBe('active');
@@ -196,10 +202,8 @@ describe('FeishuGateway', () => {
 
     const dispatches = sender.dispatches();
     expect(dispatches).toHaveLength(2);
-    expect(dispatches[1]).toMatchObject({
-      sessionId: session?.id,
-      prompt: '[user_name: ou_user]\nfollow up',
-    });
+    expect(dispatches[1]).toMatchObject({ sessionId: session?.id });
+    expect(dispatches[1].prompt).toContain('follow up');
   });
 
   it('ignores thread messages of threads without an engaged session', async () => {
@@ -234,10 +238,8 @@ describe('FeishuGateway', () => {
     );
     const dispatches = sender.dispatches();
     expect(dispatches).toHaveLength(1);
-    expect(dispatches[0]).toMatchObject({
-      sessionKind: 'main',
-      prompt: '[user_name: ou_user]\nreply here',
-    });
+    expect(dispatches[0]).toMatchObject({ sessionKind: 'main' });
+    expect(dispatches[0].prompt).toContain('reply here');
   });
 
   it('seeds thread history when a thread session starts from a fresh mention', async () => {
@@ -274,7 +276,7 @@ describe('FeishuGateway', () => {
 
     const dispatches = sender.dispatches();
     expect(dispatches).toHaveLength(1);
-    expect(dispatches[0].prompt).toBe('[user_name: ou_user]\njoin in');
+    expect(dispatches[0].prompt).toContain('join in');
   });
 
   it('lets the origin user abort a run via card action, and rejects others', async () => {

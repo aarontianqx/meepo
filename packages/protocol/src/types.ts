@@ -80,6 +80,8 @@ export interface ModelConfig {
   baseUrl: string;
   apiKey: string;
   model: string;
+  /** Thinking strength for this space's runs; endpoint default when absent */
+  thinkingLevel?: 'low' | 'high' | 'max';
 }
 
 /** Turn dispatch: a turn inside an existing (or newly created) session context */
@@ -118,8 +120,12 @@ export interface TranscriptMessage {
   role: 'user' | 'assistant' | 'tool';
   content: string;
   timestamp: number;
-  /** Display name (or open_id) of the speaker, for multi-party windows */
+  /** Display name of the speaker, for multi-party windows */
   author?: string;
+  /** The speaker's stable open_id, when known */
+  authorOpenId?: string;
+  /** Channel the message came from: group name (or chat id) / "私聊" */
+  chatLabel?: string;
 }
 
 /** Full session snapshot served to a worker cold-starting a session */

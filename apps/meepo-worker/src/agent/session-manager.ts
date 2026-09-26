@@ -6,6 +6,7 @@ import type { AssistantMessage, Usage } from '@earendil-works/pi-ai';
 import { createCodingTools } from '@earendil-works/pi-coding-agent';
 import {
   WORKER_CHANNEL_METHODS,
+  formatUserMessage,
   type ModelConfig,
   type RunAbortPayload,
   type RunSteerPayload,
@@ -91,7 +92,12 @@ export function transcriptToAgentMessage(
       return {
         role: 'user',
         content: message.author
-          ? `<message sender="${escapeAttr(message.author)}" time="${formatTime(message.timestamp)}">\n${message.content}\n</message>`
+          ? formatUserMessage(message.content, {
+              author: message.author,
+              authorOpenId: message.authorOpenId,
+              chatLabel: message.chatLabel,
+              timestamp: message.timestamp,
+            })
           : message.content,
         timestamp: message.timestamp,
       };
@@ -241,18 +247,4 @@ export class SessionManager {
       transcriptToAgentMessage(message, index, envelope.model)
     );
   }
-}
-
-function escapeAttr(value: string): string {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/"/g, '&quot;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
-}
-
-function formatTime(timestamp: number): string {
-  const date = new Date(timestamp);
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return `${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }

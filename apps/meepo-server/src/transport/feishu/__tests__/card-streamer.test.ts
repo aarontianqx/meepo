@@ -48,6 +48,10 @@ class FakeFeishuClient implements FeishuClient {
   async listThreadMessages(): Promise<never[]> {
     return [];
   }
+
+  async getChatName(chatId: string): Promise<string> {
+    return chatId;
+  }
 }
 
 const SESSION: Session = {
