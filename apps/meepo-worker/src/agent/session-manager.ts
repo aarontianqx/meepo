@@ -235,6 +235,7 @@ export class SessionManager {
   private async fetchSnapshot(envelope: TurnDispatchEnvelope): Promise<AgentMessage[]> {
     const snapshot = (await this.deps.rpc(WORKER_CHANNEL_METHODS.sessionSnapshot, {
       sessionId: envelope.sessionId,
+      beforeTimestamp: envelope.snapshotBefore,
     })) as SessionSnapshot;
     return snapshot.messages.map((message, index) =>
       transcriptToAgentMessage(message, index, envelope.model)

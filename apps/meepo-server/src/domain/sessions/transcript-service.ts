@@ -20,13 +20,14 @@ export class TranscriptService {
     await this.events.append(sessionId, MESSAGE_EVENT_TYPE, message, message.timestamp);
   }
 
-  async getSnapshot(sessionId: string): Promise<SessionSnapshot> {
+  async getSnapshot(sessionId: string, beforeTimestamp?: number): Promise<SessionSnapshot> {
     const session = await this.sessions.getById(sessionId);
     if (!session) throw notFound(`Session not found: ${sessionId}`);
     const events = await this.events.listBySession(sessionId);
     const messages = events
       .filter((event) => event.type === MESSAGE_EVENT_TYPE)
-      .map((event) => event.payload as TranscriptMessage);
+      .map((event) => event.payload as TranscriptMessage)
+      .filter((message) => beforeTimestamp === undefined || message.timestamp < beforeTimestamp);
     return { sessionId, version: events.length, messages };
   }
 }

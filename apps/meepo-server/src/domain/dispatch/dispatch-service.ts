@@ -26,6 +26,8 @@ export interface DispatchSessionTurnInput {
   source: DispatchSource;
   delivery: DeliveryMode;
   author?: string;
+  /** Snapshot excludes transcript entries at or after this timestamp */
+  snapshotBefore?: number;
 }
 
 export interface DispatchOutcome {
@@ -61,17 +63,19 @@ export class DispatchService {
     if (!space) throw notFound(`Space not found: ${session.spaceId}`);
 
     const prompt = formatPromptWithSource(input.prompt, input.source, input.author);
+    const turnTimestamp = Date.now();
     await this.transcripts.appendMessage(session.id, {
       role: 'user',
       author: input.author,
       content: prompt,
-      timestamp: Date.now(),
+      timestamp: turnTimestamp,
     });
 
     const workerId = session.boundWorkerId ?? (await this.bindSessionWorker(session.id, space));
     const envelope = this.buildTurnEnvelope(session.id, session.kind, space, {
       ...input,
       prompt,
+      snapshotBefore: turnTimestamp,
     });
     const worker = await this.workers.getById(workerId);
     const online = worker && worker.status !== 'offline' && this.sender.isConnected(workerId);
@@ -279,6 +283,7 @@ export class DispatchService {
       prompt: input.prompt,
       source: input.source,
       delivery: input.delivery,
+      snapshotBefore: input.snapshotBefore,
       systemPromptContribution: composeSystemPromptContribution(space),
       model,
     };

@@ -91,6 +91,8 @@ export interface TurnDispatchEnvelope {
   prompt: string;
   source: DispatchSource;
   delivery: DeliveryMode;
+  /** Snapshot excludes transcript entries at or after this timestamp (the current turn's own message) */
+  snapshotBefore?: number;
   /** Space memory and repo hints primed into the agent's system prompt */
   systemPromptContribution?: string;
   model: ModelConfig;

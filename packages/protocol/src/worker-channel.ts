@@ -52,6 +52,8 @@ export const SERVER_CHANNEL_EVENTS = {
 
 export interface SessionSnapshotParams {
   sessionId: string;
+  /** Exclude transcript entries at or after this timestamp */
+  beforeTimestamp?: number;
 }
 
 export type WorkerChannelUpstream =

@@ -128,7 +128,10 @@ export class WorkerChannelHandler implements WorkerSender {
         }
         case WORKER_CHANNEL_METHODS.sessionSnapshot: {
           const params = frame.params as SessionSnapshotParams;
-          const snapshot = await this.deps.transcriptService.getSnapshot(params.sessionId);
+          const snapshot = await this.deps.transcriptService.getSnapshot(
+            params.sessionId,
+            params.beforeTimestamp
+          );
           this.send(socket, { kind: 'response', id: frame.id, result: snapshot });
           return;
         }
