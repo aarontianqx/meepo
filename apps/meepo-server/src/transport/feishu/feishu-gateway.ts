@@ -6,11 +6,12 @@ import {
   type InboundDecision,
   type InboundMessage,
 } from '../../domain/im/im-router.js';
+import type { RunRepository } from '../../domain/runs/run-repository.js';
 import type { SessionService } from '../../domain/sessions/session-service.js';
 import type { TranscriptService } from '../../domain/sessions/transcript-service.js';
 import type { SpaceRepository } from '../../domain/spaces/space-repository.js';
 import { DedupCache } from './dedup-cache.js';
-import type { FeishuClient, FeishuMessageEvent } from './feishu-client.js';
+import type { FeishuCardActionEvent, FeishuClient, FeishuMessageEvent } from './feishu-client.js';
 
 const MESSAGE_DEDUP_TTL_MS = 30 * 60 * 1000;
 const PREWARM_TEXT = '正在处理，请稍候…';
@@ -23,6 +24,7 @@ export interface FeishuGatewayDeps {
   dispatchService: DispatchService;
   transcriptService: TranscriptService;
   spaces: SpaceRepository;
+  runs: RunRepository;
   botOpenId: string;
   defaultSpaceId?: string;
   dedup?: DedupCache;
@@ -39,6 +41,8 @@ export class FeishuGateway {
   private readonly dedup: DedupCache;
   /** windowId -> sessionId for every window this gateway has engaged. */
   private readonly windowSessions = new Map<string, string>();
+  /** sessionId -> open_id of the user who first engaged it (card action binding). */
+  private readonly sessionOrigins = new Map<string, string>();
   private readonly onError: (err: unknown) => void;
 
   constructor(private readonly deps: FeishuGatewayDeps) {
@@ -79,6 +83,23 @@ export class FeishuGateway {
     });
     if (decision.action === 'ignore') return;
     await this.executeDispatch(msg, decision);
+  }
+
+  /** Handles `card.action.trigger`: only the session's origin user may abort its run. */
+  async handleCardAction(event: FeishuCardActionEvent): Promise<void> {
+    try {
+      const value = event.action?.value;
+      if (value?.action !== 'abort_run' || !value.runId) return;
+      const run = await this.deps.runs.getById(value.runId);
+      if (!run) return;
+      const sessionId = run.work.kind === 'turn' ? run.work.sessionId : undefined;
+      const origin = sessionId ? this.sessionOrigins.get(sessionId) : undefined;
+      const operator = event.operator?.open_id;
+      if (origin && operator !== origin) return;
+      await this.deps.dispatchService.abortRun(value.runId);
+    } catch (err: unknown) {
+      this.onError(err);
+    }
   }
 
   /** Sends a plain notification to a session's window (ticket results, system notices). */
@@ -145,6 +166,9 @@ export class FeishuGateway {
     });
     this.windowSessions.set(decision.windowId, sessionId);
     this.windowSessions.set(windowIdOf(msg.chatId, threadId), sessionId);
+    if (!this.sessionOrigins.has(sessionId)) {
+      this.sessionOrigins.set(sessionId, msg.senderOpenId);
+    }
 
     if (decision.seedThreadHistory) {
       await this.seedThreadHistory(sessionId, threadId, msg.messageId);

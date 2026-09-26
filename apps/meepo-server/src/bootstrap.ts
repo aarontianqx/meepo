@@ -139,6 +139,7 @@ export async function bootstrap(): Promise<ServerRuntime> {
         dispatchService,
         transcriptService,
         spaces: spaceRepository,
+        runs: runRepository,
         botOpenId,
         defaultSpaceId: config.feishu.defaultSpaceId,
         onError: (err) => app.log.error(err, 'feishu gateway message handling failed'),
@@ -146,7 +147,11 @@ export async function bootstrap(): Promise<ServerRuntime> {
       streamProcessor.setTicketResultNotifier((sessionId, text) => {
         void feishuGateway.notifySession(sessionId, text);
       });
-      startFeishuWs(config.feishu, (event) => feishuGateway.handleEvent(event));
+      startFeishuWs(
+        config.feishu,
+        (event) => feishuGateway.handleEvent(event),
+        (event) => feishuGateway.handleCardAction(event)
+      );
       app.log.info('feishu gateway started');
     } catch (err: unknown) {
       app.log.error(err, 'feishu gateway failed to start; continuing without it');

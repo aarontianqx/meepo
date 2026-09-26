@@ -118,6 +118,7 @@ describe('FeishuGateway', () => {
   let sender: FakeSender;
   let gateway: FeishuGateway;
   let sessionService: SessionService;
+  let runs: MemoryRunRepository;
 
   beforeEach(async () => {
     const spaces = new MemorySpaceRepository();
@@ -126,6 +127,7 @@ describe('FeishuGateway', () => {
     const workers = new MemoryWorkerRepository();
     const tickets = new MemoryTicketRepository();
     const queue = new MemoryDispatchQueueRepository();
+    runs = new MemoryRunRepository();
     await spaces.save(makeSpace('sp_group', ['oc_group']));
     await spaces.save(makeSpace('sp_default', []));
     await workers.save(makeWorker());
@@ -139,7 +141,7 @@ describe('FeishuGateway', () => {
       spaces,
       workers,
       tickets,
-      new MemoryRunRepository(),
+      runs,
       queue,
       sender,
       transcriptService,
@@ -153,6 +155,7 @@ describe('FeishuGateway', () => {
       dispatchService,
       transcriptService,
       spaces,
+      runs,
       botOpenId: BOT,
       defaultSpaceId: 'sp_default',
     });
@@ -265,6 +268,37 @@ describe('FeishuGateway', () => {
     const dispatches = sender.dispatches();
     expect(dispatches).toHaveLength(1);
     expect(dispatches[0].prompt).toBe('join in');
+  });
+
+  it('lets the origin user abort a run via card action, and rejects others', async () => {
+    await gateway.handleInbound(makeMsg({ mentionedOpenIds: [BOT], text: 'start' }));
+    const session = (await sessionService.listBySpace('sp_group'))[0];
+    await runs.save({
+      id: 'run1',
+      work: { kind: 'turn', sessionId: session.id },
+      attempt: 1,
+      workerId: 'w1',
+      status: 'running',
+      createdAt: 0,
+    });
+
+    await gateway.handleCardAction({
+      operator: { open_id: 'ou_other' },
+      action: { value: { action: 'abort_run', runId: 'run1' } },
+    });
+    expect(
+      sender.sent.filter((s) => s.frame.kind === 'notification' && s.frame.event === 'run.abort')
+    ).toHaveLength(0);
+
+    await gateway.handleCardAction({
+      operator: { open_id: 'ou_user' },
+      action: { value: { action: 'abort_run', runId: 'run1' } },
+    });
+    const aborts = sender.sent.filter(
+      (s) => s.frame.kind === 'notification' && s.frame.event === 'run.abort'
+    );
+    expect(aborts).toHaveLength(1);
+    expect(aborts[0].workerId).toBe('w1');
   });
 
   it('replies when /new has no active session in the window', async () => {

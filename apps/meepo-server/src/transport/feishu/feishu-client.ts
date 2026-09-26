@@ -35,6 +35,12 @@ export interface ThreadHistoryMessage {
   isBot: boolean;
 }
 
+/** Raw `card.action.trigger` event, reduced to the fields the handler reads. */
+export interface FeishuCardActionEvent {
+  operator?: { open_id?: string };
+  action?: { tag?: string; value?: Record<string, string> };
+}
+
 /**
  * Narrow port over the Feishu OpenAPI surface used by the gateway and the
  * card streamer. Implemented by the lark SDK adapter; faked in tests.
@@ -185,7 +191,8 @@ export async function fetchBotOpenId(client: lark.Client): Promise<string> {
 /** Starts the WS long connection; events are forwarded to `onEvent`. */
 export function startFeishuWs(
   config: FeishuConfig,
-  onEvent: (event: FeishuMessageEvent) => Promise<void>
+  onEvent: (event: FeishuMessageEvent) => Promise<void>,
+  onCardAction?: (event: FeishuCardActionEvent) => Promise<void>
 ): lark.WSClient {
   const wsClient = new lark.WSClient({
     appId: config.appId,
@@ -196,6 +203,9 @@ export function startFeishuWs(
   const eventDispatcher = new lark.EventDispatcher({}).register({
     'im.message.receive_v1': async (data: unknown) => {
       await onEvent(data as FeishuMessageEvent);
+    },
+    'card.action.trigger': async (data: unknown) => {
+      await onCardAction?.(data as FeishuCardActionEvent);
     },
   });
   wsClient.start({ eventDispatcher });

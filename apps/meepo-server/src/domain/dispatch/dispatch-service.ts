@@ -153,6 +153,22 @@ export class DispatchService {
   }
 
   /**
+   * Aborts a running Run by forwarding run.abort to its worker.
+   * Returns false when the run is unknown or already terminal.
+   */
+  async abortRun(runId: string): Promise<boolean> {
+    const run = await this.runs.getById(runId);
+    if (!run || run.status === 'completed' || run.status === 'failed') return false;
+    if (!run.workerId) return false;
+    this.sender.sendToWorker(run.workerId, {
+      kind: 'notification',
+      event: 'run.abort',
+      payload: { runId },
+    });
+    return true;
+  }
+
+  /**
    * Retries dispatch for every pending ticket (e.g. after slots free up).
    * Tickets without an eligible worker stay pending for the next round.
    */

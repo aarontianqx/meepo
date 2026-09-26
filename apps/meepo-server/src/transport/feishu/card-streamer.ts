@@ -86,7 +86,7 @@ export class CardStreamer {
       if (!session.anchorMessageId) {
         throw new Error(`session ${sessionId} has no reply anchor; cannot stream card`);
       }
-      const cardId = await this.deps.client.createCard(buildStreamingCardJson());
+      const cardId = await this.deps.client.createCard(buildStreamingCardJson(runId));
       run.cardId = cardId;
       // main sessions (private chats) reply in the main flow; thread sessions
       // (group threads) reply inside their thread.
@@ -157,7 +157,7 @@ export class CardStreamer {
   }
 }
 
-function buildStreamingCardJson(): string {
+function buildStreamingCardJson(runId: string): string {
   return JSON.stringify({
     schema: '2.0',
     config: {
@@ -165,6 +165,17 @@ function buildStreamingCardJson(): string {
       streaming_config: { print_strategy: 'fast' },
       update_multi: true,
     },
-    body: { elements: [{ tag: 'markdown', element_id: MARKDOWN_ELEMENT_ID, content: '' }] },
+    body: {
+      elements: [
+        { tag: 'markdown', element_id: MARKDOWN_ELEMENT_ID, content: '' },
+        {
+          tag: 'button',
+          name: 'abort_run',
+          text: { tag: 'lark_md', content: '停止' },
+          type: 'danger',
+          value: { action: 'abort_run', runId },
+        },
+      ],
+    },
   });
 }
