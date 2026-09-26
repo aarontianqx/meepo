@@ -60,7 +60,7 @@ export class DispatchService {
     const space = await this.spaces.getById(session.spaceId);
     if (!space) throw notFound(`Space not found: ${session.spaceId}`);
 
-    const prompt = formatPromptWithSource(input.prompt, input.source);
+    const prompt = formatPromptWithSource(input.prompt, input.source, input.author);
     await this.transcripts.appendMessage(session.id, {
       role: 'user',
       author: input.author,
@@ -231,14 +231,26 @@ export class DispatchService {
       workerId = space.boundWorkerId;
       if (!workerId) throw validation(`Space ${space.id} has no bound worker`);
     } else {
-      const eligible = await this.eligibleWorkers(space, space.requiredTags);
-      workerId = eligible[Math.floor(Math.random() * eligible.length)]?.id;
-      if (!workerId) throw validation(`No eligible worker for space ${space.id}`);
+      // Binding is placement, not capacity: any online, enrolled, tag-matched
+      // worker will do (least loaded preferred); the turn queues at the worker.
+      workerId = await this.pickSessionWorker(space);
+      if (!workerId) throw validation(`No online worker enrolled for space ${space.id}`);
     }
     session.boundWorkerId = workerId;
     session.lastActiveAt = Date.now();
     await this.sessions.save(session);
     return workerId;
+  }
+
+  private async pickSessionWorker(space: Space): Promise<string | undefined> {
+    const candidates = (await this.workers.listServingSpace(space.id)).filter(
+      (worker) =>
+        worker.status !== 'offline' &&
+        space.requiredTags.every((tag) => worker.tags.includes(tag)) &&
+        this.sender.isConnected(worker.id)
+    );
+    return candidates.sort((a, b) => a.activeSlots / a.maxSlots - b.activeSlots / b.maxSlots)[0]
+      ?.id;
   }
 
   private async eligibleWorkers(space: Space, requiredTags: string[]): Promise<WorkerNode[]> {
@@ -294,12 +306,15 @@ function mergeQueued(queued: QueuedDispatch[]): TurnDispatchEnvelope {
 }
 
 /** Wraps schedule fires in an origin envelope so the agent knows why it woke. */
-function formatPromptWithSource(prompt: string, source: DispatchSource): string {
+function formatPromptWithSource(prompt: string, source: DispatchSource, author?: string): string {
   if (source.kind === 'schedule') {
     return (
       `<schedule-fire scheduleId="${source.scheduleId}" coalescedCount="${source.coalescedCount}" ` +
       `stale="${source.stale}">\n${prompt}\n</schedule-fire>`
     );
+  }
+  if (source.kind === 'user_message' && author) {
+    return `[user_name: ${author}]\n${prompt}`;
   }
   return prompt;
 }

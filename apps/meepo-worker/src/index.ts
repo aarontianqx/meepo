@@ -1,11 +1,14 @@
 import { SERVER_CHANNEL_EVENTS, type WorkerStreamEvent } from '@meepo/protocol';
 
 import { SessionManager } from './agent/session-manager.js';
+import { SlotSemaphore } from './agent/slot-semaphore.js';
 import { TicketRunner } from './agent/ticket-runner.js';
 import { WorkerClient } from './client.js';
 import { loadConfig } from './config.js';
 
 const config = loadConfig();
+/** Worker-global bound on concurrently executing runs (session turns + tickets). */
+const slots = new SlotSemaphore(config.maxSlots);
 
 /** Upstream stream events; also drives the client's active-run bookkeeping. */
 const emit = (event: WorkerStreamEvent): void => {
@@ -26,12 +29,14 @@ const sessionManager = new SessionManager({
   emit,
   sessionsDir: config.sessionsDir,
   sessionTtlMs: config.sessionTtlMs,
+  slots,
 });
 
 const ticketRunner = new TicketRunner({
   workerId: config.workerId,
   emit,
   ticketsDir: config.ticketsDir,
+  slots,
 });
 
 const client = new WorkerClient(config, {

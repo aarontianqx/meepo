@@ -177,7 +177,7 @@ describe('FeishuGateway', () => {
     expect(dispatches[0]).toMatchObject({
       sessionId: session?.id,
       sessionKind: 'thread',
-      prompt: 'help me',
+      prompt: '[user_name: ou_user]\nhelp me',
       delivery: 'wait',
       source: { kind: 'user_message', messageId: 'om_1' },
     });
@@ -196,7 +196,10 @@ describe('FeishuGateway', () => {
 
     const dispatches = sender.dispatches();
     expect(dispatches).toHaveLength(2);
-    expect(dispatches[1]).toMatchObject({ sessionId: session?.id, prompt: 'follow up' });
+    expect(dispatches[1]).toMatchObject({
+      sessionId: session?.id,
+      prompt: '[user_name: ou_user]\nfollow up',
+    });
   });
 
   it('ignores thread messages of threads without an engaged session', async () => {
@@ -231,7 +234,10 @@ describe('FeishuGateway', () => {
     );
     const dispatches = sender.dispatches();
     expect(dispatches).toHaveLength(1);
-    expect(dispatches[0]).toMatchObject({ sessionKind: 'main', prompt: 'reply here' });
+    expect(dispatches[0]).toMatchObject({
+      sessionKind: 'main',
+      prompt: '[user_name: ou_user]\nreply here',
+    });
   });
 
   it('seeds thread history when a thread session starts from a fresh mention', async () => {
@@ -268,7 +274,7 @@ describe('FeishuGateway', () => {
 
     const dispatches = sender.dispatches();
     expect(dispatches).toHaveLength(1);
-    expect(dispatches[0].prompt).toBe('join in');
+    expect(dispatches[0].prompt).toBe('[user_name: ou_user]\njoin in');
   });
 
   it('lets the origin user abort a run via card action, and rejects others', async () => {

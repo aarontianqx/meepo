@@ -270,7 +270,10 @@ export function normalizeMessage(event: FeishuMessageEvent): InboundMessage | nu
 
   const mentionedOpenIds: string[] = [];
   for (const mention of message.mentions ?? []) {
-    if (mention.key) text = text.split(mention.key).join('');
+    if (mention.key) {
+      const readable = mention.name ? `@${mention.name}` : mention.key;
+      text = text.split(mention.key).join(readable);
+    }
     if (mention.id?.open_id) mentionedOpenIds.push(mention.id.open_id);
   }
 

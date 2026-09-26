@@ -18,6 +18,7 @@ import {
 import { createModel, createStreamFn } from './model-factory.js';
 import { createCompactor } from './compaction.js';
 import { SessionRunner, type RunnerAgent } from './session-runner.js';
+import type { SlotSemaphore } from './slot-semaphore.js';
 import { buildCronTools, buildTicketTools } from './tools.js';
 
 type RpcFn = (method: string, params: unknown) => Promise<unknown>;
@@ -29,6 +30,8 @@ export interface SessionManagerDeps {
   /** Root for neutral per-session working directories (`<sessionsDir>/<sessionId>`). */
   sessionsDir: string;
   sessionTtlMs: number;
+  /** Worker-global run concurrency limit shared with the ticket runner. */
+  slots?: SlotSemaphore;
   now?: () => number;
   /** Factory seam for tests; defaults to mkdir -p under sessionsDir. */
   ensureSessionDir?: (sessionId: string) => Promise<string>;
@@ -83,10 +86,13 @@ export function transcriptToAgentMessage(
 ): AgentMessage {
   switch (message.role) {
     case 'user':
-      // Multi-party windows: attribute each utterance to its speaker.
+      // Multi-party windows: attribute each utterance to its speaker, structured
+      // so the agent can tell senders apart.
       return {
         role: 'user',
-        content: message.author ? `[${message.author}] ${message.content}` : message.content,
+        content: message.author
+          ? `<message sender="${escapeAttr(message.author)}" time="${formatTime(message.timestamp)}">\n${message.content}\n</message>`
+          : message.content,
         timestamp: message.timestamp,
       };
     case 'assistant': {
@@ -213,6 +219,7 @@ export class SessionManager {
       emit: this.deps.emit,
       now: this.deps.now,
       compactor: createCompactor(envelope.model),
+      slots: this.deps.slots,
     });
     this.runners.set(envelope.sessionId, runner);
     return runner;
@@ -233,4 +240,18 @@ export class SessionManager {
       transcriptToAgentMessage(message, index, envelope.model)
     );
   }
+}
+
+function escapeAttr(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function formatTime(timestamp: number): string {
+  const date = new Date(timestamp);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }

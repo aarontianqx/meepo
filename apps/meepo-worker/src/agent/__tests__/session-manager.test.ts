@@ -40,7 +40,13 @@ describe('transcriptToAgentMessage', () => {
       0,
       model
     );
-    expect(message).toEqual({ role: 'user', content: '[Alice] hello', timestamp: 0 });
+    expect(message.role).toBe('user');
+    if (message.role !== 'user') throw new Error('expected user message');
+    const content = message.content as string;
+    expect(content).toContain('sender="Alice"');
+    expect(content).toContain('hello');
+    expect(content).toContain('<message');
+    expect(content).toContain('</message>');
   });
 
   it('leaves user messages without an author untouched', () => {

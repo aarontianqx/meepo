@@ -5,9 +5,10 @@ import { join } from 'node:path';
 
 import type { AgentEvent, AgentMessage, AgentOptions } from '@earendil-works/pi-agent-core';
 import type { ModelConfig, TicketDispatchEnvelope, WorkerStreamEvent } from '@meepo/protocol';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import type { RunnerAgent } from '../session-runner.js';
+import { SlotSemaphore } from '../slot-semaphore.js';
 import {
   TicketRunner,
   buildTicketPrompt,
@@ -172,5 +173,43 @@ describe('TicketRunner', () => {
 
     expect(aborted).toBe(1);
     await dispatch;
+  });
+
+  it('queues tickets behind the shared slot semaphore', async () => {
+    const slots = new SlotSemaphore(1);
+    const resolvers: Array<() => void> = [];
+    const agents: StubAgent[] = [];
+    const events: WorkerStreamEvent[] = [];
+    const runner = new TicketRunner({
+      workerId: 'w1',
+      emit: (event) => events.push(event),
+      ticketsDir,
+      slots,
+      createAgent: () => {
+        const agent = new StubAgent();
+        agent.prompt = () => new Promise<void>((resolve) => resolvers.push(resolve));
+        agents.push(agent);
+        return agent;
+      },
+    });
+
+    const first = runner.handleDispatch(envelope({ runId: 'run-1', ticketId: 'ticket-1' }));
+    await vi.waitFor(() => expect(agents).toHaveLength(1));
+
+    const second = runner.handleDispatch(envelope({ runId: 'run-2', ticketId: 'ticket-2' }));
+    // Second ticket waits for the slot: no agent, no run_started yet.
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(agents).toHaveLength(1);
+    expect(events.some((e) => e.type === 'run_started' && e.runId === 'run-2')).toBe(false);
+
+    resolvers.shift()?.();
+    await first;
+    await vi.waitFor(() => expect(agents).toHaveLength(2));
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: 'run_started', runId: 'run-2', ticketId: 'ticket-2' })
+    );
+
+    resolvers.shift()?.();
+    await second;
   });
 });

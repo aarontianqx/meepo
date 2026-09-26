@@ -2,6 +2,8 @@ import type { AgentEvent, AgentMessage } from '@earendil-works/pi-agent-core';
 import type { AssistantMessage } from '@earendil-works/pi-ai';
 import type { DeliveryMode, WorkerStreamEvent } from '@meepo/protocol';
 
+import type { SlotSemaphore } from './slot-semaphore.js';
+
 const RESULT_SUMMARY_MAX_CHARS = 2_000;
 /** Messages kept when compaction is unavailable and history must be truncated. */
 export const FALLBACK_KEEP_RECENT_MESSAGES = 20;
@@ -200,6 +202,8 @@ export interface SessionRunnerOptions {
   now?: () => number;
   /** Pre-turn history compaction; omit to disable (tickets, tests). */
   compactor?: SessionCompactor;
+  /** Worker-global run concurrency limit; omit for unbounded (tests). */
+  slots?: SlotSemaphore;
 }
 
 /**
@@ -219,6 +223,7 @@ export class SessionRunner {
   private readonly forwarder: StreamForwarder;
   private readonly now: () => number;
   private readonly compactor?: SessionCompactor;
+  private readonly slots?: SlotSemaphore;
   private readonly queue: QueuedTurn[] = [];
   private readonly steeredTurns: QueuedTurn[] = [];
   private current?: QueuedTurn;
@@ -236,6 +241,7 @@ export class SessionRunner {
     this.workerId = options.workerId;
     this.now = options.now ?? Date.now;
     this.compactor = options.compactor;
+    this.slots = options.slots;
     this.forwarder = new StreamForwarder(options.emit);
     this.idleSince = this.now();
     this.agent.subscribe((event) => this.onAgentEvent(event));
@@ -326,16 +332,27 @@ export class SessionRunner {
     this.sawInitialUserMessage = false;
     this.timedOut = false;
     this.abortedCurrent = false;
-    this.forwarder.beginRun(turn.runId, { workerId: this.workerId, sessionId: this.sessionId });
     this.armTimeout(turn);
+    // Awaited only when configured, keeping prompt() same-tick otherwise.
+    if (this.slots) await this.slots.acquire();
     try {
-      // Awaited only when configured, keeping prompt() same-tick otherwise.
-      if (this.compactor) await this.maybeCompactHistory();
-      await this.agent.prompt(turn.prompt);
-      this.completeCurrent();
+      if (this.timedOut || this.abortedCurrent) {
+        // Aborted or timed out while queued for a slot: never started.
+        this.forwarder.failPendingRun(
+          turn.runId,
+          this.timedOut ? 'turn timed out' : 'turn aborted',
+          this.timedOut ? 'timeout' : 'aborted'
+        );
+      } else {
+        this.forwarder.beginRun(turn.runId, { workerId: this.workerId, sessionId: this.sessionId });
+        if (this.compactor) await this.maybeCompactHistory();
+        await this.agent.prompt(turn.prompt);
+        this.completeCurrent();
+      }
     } catch (err) {
       this.forwarder.failRun((err as Error).message, 'internal');
     } finally {
+      this.slots?.release();
       this.clearTimeout();
       for (const skipped of this.steeredTurns.splice(0)) {
         this.forwarder.failPendingRun(

@@ -7,12 +7,15 @@ import type { RunAbortPayload, TicketDispatchEnvelope, WorkerStreamEvent } from 
 
 import { createModel, createStreamFn } from './model-factory.js';
 import { StreamForwarder, type RunnerAgent } from './session-runner.js';
+import type { SlotSemaphore } from './slot-semaphore.js';
 
 export interface TicketRunnerDeps {
   workerId: string;
   emit: (event: WorkerStreamEvent) => void;
   /** Root for neutral per-ticket working directories (`<ticketsDir>/<ticketId>`). */
   ticketsDir: string;
+  /** Worker-global run concurrency limit shared with the session manager. */
+  slots?: SlotSemaphore;
   /** Factory seam for tests; defaults to mkdir -p under ticketsDir. */
   ensureTicketDir?: (ticketId: string) => Promise<string>;
   /** Factory seam for tests; defaults to the real pi Agent. */
@@ -46,25 +49,40 @@ export function buildTicketPrompt(envelope: TicketDispatchEnvelope): string {
   return parts.join('\n\n');
 }
 
+interface ActiveRun {
+  agent?: RunnerAgent;
+  aborted: boolean;
+}
+
 /**
  * Executes ticket dispatches: each ticket gets a brand-new agent in a neutral
  * per-ticket directory and runs exactly one turn. No snapshot, no queue, no
- * cron tools — tickets are stateless across lifetimes by design.
+ * cron tools — tickets are stateless across lifetimes by design. Execution is
+ * bounded by the worker-global slot semaphore; tickets waiting for a slot can
+ * still be aborted.
  */
 export class TicketRunner {
-  private readonly active = new Map<string, RunnerAgent>();
+  private readonly active = new Map<string, ActiveRun>();
 
   constructor(private readonly deps: TicketRunnerDeps) {}
 
   async handleDispatch(envelope: TicketDispatchEnvelope): Promise<void> {
     const forwarder = new StreamForwarder(this.deps.emit);
-    forwarder.beginRun(envelope.runId, {
-      workerId: this.deps.workerId,
-      ticketId: envelope.ticketId,
-    });
+    const entry: ActiveRun = { aborted: false };
+    this.active.set(envelope.runId, entry);
 
     let timeoutTimer: NodeJS.Timeout | undefined;
+    await this.deps.slots?.acquire();
     try {
+      if (entry.aborted) {
+        // Aborted while queued for a slot: never started.
+        forwarder.failPendingRun(envelope.runId, 'aborted before execution', 'aborted');
+        return;
+      }
+      forwarder.beginRun(envelope.runId, {
+        workerId: this.deps.workerId,
+        ticketId: envelope.ticketId,
+      });
       const workDir = await this.ensureTicketDir(envelope.ticketId);
       const createAgent = this.deps.createAgent ?? ((options: AgentOptions) => new Agent(options));
       const agent = createAgent({
@@ -76,7 +94,7 @@ export class TicketRunner {
         streamFn: createStreamFn(envelope.model),
         sessionId: envelope.ticketId,
       });
-      this.active.set(envelope.runId, agent);
+      entry.agent = agent;
       agent.subscribe((event) => forwarder.handleEvent(event));
 
       let timedOut = false;
@@ -97,13 +115,17 @@ export class TicketRunner {
     } catch (err) {
       forwarder.failRun((err as Error).message, 'internal');
     } finally {
+      this.deps.slots?.release();
       if (timeoutTimer) clearTimeout(timeoutTimer);
       this.active.delete(envelope.runId);
     }
   }
 
   handleAbort(payload: RunAbortPayload): void {
-    this.active.get(payload.runId)?.abort();
+    const entry = this.active.get(payload.runId);
+    if (!entry) return;
+    entry.aborted = true;
+    entry.agent?.abort();
   }
 
   private async ensureTicketDir(ticketId: string): Promise<string> {
