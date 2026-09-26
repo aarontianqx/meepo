@@ -11,6 +11,8 @@ interface SpaceRow {
   default_branch: string;
   bound_worker_id: string | null;
   timezone: string;
+  model_id: string | null;
+  model_thinking_level: string | null;
   bound_chat_ids: string;
   required_tags: string;
   long_term_memory: string;
@@ -27,6 +29,14 @@ function rowToSpace(row: SpaceRow): Space {
     defaultBranch: row.default_branch,
     boundWorkerId: row.bound_worker_id ?? undefined,
     timezone: row.timezone,
+    model:
+      row.model_id != null
+        ? {
+            modelId: row.model_id,
+            thinkingLevel: (row.model_thinking_level ?? undefined) as
+              'low' | 'high' | 'max' | undefined,
+          }
+        : undefined,
     boundChatIds: JSON.parse(row.bound_chat_ids) as string[],
     requiredTags: JSON.parse(row.required_tags) as string[],
     longTermMemory: row.long_term_memory,
@@ -43,8 +53,9 @@ export class SqliteSpaceRepository implements SpaceRepository {
       .prepare(
         `INSERT OR REPLACE INTO spaces (
           id, name, description, repo_url, default_branch, bound_worker_id,
-          timezone, bound_chat_ids, required_tags, long_term_memory, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          timezone, model_id, model_thinking_level,
+          bound_chat_ids, required_tags, long_term_memory, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         space.id,
@@ -54,6 +65,8 @@ export class SqliteSpaceRepository implements SpaceRepository {
         space.defaultBranch,
         space.boundWorkerId ?? null,
         space.timezone,
+        space.model?.modelId ?? null,
+        space.model?.thinkingLevel ?? null,
         JSON.stringify(space.boundChatIds),
         JSON.stringify(space.requiredTags),
         space.longTermMemory,

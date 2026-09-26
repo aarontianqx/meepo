@@ -97,7 +97,7 @@ export async function bootstrap(): Promise<ServerRuntime> {
     dispatchQueue,
     workerChannel,
     transcriptService,
-    config.defaultModel
+    config.models
   );
   workerChannel.setDispatchService(dispatchService);
 

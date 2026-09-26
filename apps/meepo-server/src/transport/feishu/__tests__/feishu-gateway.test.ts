@@ -19,7 +19,7 @@ import type { FeishuClient, ReplyResult } from '../feishu-client.js';
 import { FeishuGateway } from '../feishu-gateway.js';
 
 const BOT = 'ou_bot';
-const MODEL = { provider: 'openai-completions', baseUrl: 'https://x', apiKey: 'k', model: 'm' };
+const MODEL = { modelId: 'm' };
 
 class FakeFeishuClient implements FeishuClient {
   readonly replies: { messageId: string; text: string; opts?: { replyInThread?: boolean } }[] = [];
@@ -150,7 +150,18 @@ describe('FeishuGateway', () => {
       queue,
       sender,
       transcriptService,
-      MODEL
+      {
+        entries: [
+          {
+            id: 'm',
+            provider: 'openai-completions',
+            baseUrl: 'https://x',
+            apiKey: 'k',
+            model: 'm',
+          },
+        ],
+        defaultModelId: 'm',
+      }
     );
 
     client = new FakeFeishuClient();

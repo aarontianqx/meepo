@@ -1,7 +1,6 @@
 /**
  * Domain entity models for Meepo
  */
-import type { ModelConfig } from '@meepo/protocol';
 
 /** Normalized user identity, resolved from the auth layer */
 export interface UserIdentity {
@@ -11,6 +10,12 @@ export interface UserIdentity {
 }
 
 export type SpaceRole = 'owner' | 'manager';
+
+/** A space's model selection: a registry reference plus an optional effort override */
+export interface SpaceModelRef {
+  modelId: string;
+  thinkingLevel?: 'low' | 'high' | 'max';
+}
 
 /** Space membership: the only authorization data Meepo owns */
 export interface SpaceMember {
@@ -48,7 +53,7 @@ export interface Space {
   /** IANA timezone defaulting schedule timing rules */
   timezone: string;
   /** Server-held model credentials injected into dispatches for this space */
-  model?: ModelConfig;
+  model?: SpaceModelRef;
   boundChatIds: string[];
   requiredTags: string[];
   longTermMemory: string;

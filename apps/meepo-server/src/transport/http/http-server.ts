@@ -15,6 +15,7 @@ import type { WorkerChannelHandler } from '../ws/worker-channel.js';
 import './auth.js';
 import { registerHealthRoutes } from './routes/health.js';
 import { registerMembershipRoutes } from './routes/memberships.js';
+import { registerModelRoutes } from './routes/models.js';
 import { registerScheduleRoutes } from './routes/schedule.js';
 import { registerSessionRoutes } from './routes/sessions.js';
 import { registerSpaceRoutes } from './routes/spaces.js';
@@ -60,6 +61,7 @@ export async function buildHttpServer(options: HttpServerOptions): Promise<Fasti
   registerMembershipRoutes(app, options.services);
   registerSpaceRoutes(app, options.services);
   registerWorkerRoutes(app, options.services);
+  registerModelRoutes(app, options.config.models);
   registerTicketRoutes(app, options.services);
   registerSessionRoutes(app, options.services);
   registerScheduleRoutes(app, options.services);

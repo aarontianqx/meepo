@@ -15,7 +15,14 @@ import { MemoryWorkerRepository } from '../../../store/memory/worker-memory.js';
 import { TranscriptService } from '../../sessions/transcript-service.js';
 import type { WorkerSender } from '../worker-sender.js';
 
-const MODEL = { provider: 'openai-completions', baseUrl: 'https://x', apiKey: 'k', model: 'm' };
+const MODEL_ENTRY = {
+  id: 'm',
+  provider: 'openai-completions',
+  baseUrl: 'https://x',
+  apiKey: 'k',
+  model: 'm',
+};
+const MODEL = { modelId: 'm' };
 
 class FakeSender implements WorkerSender {
   readonly connected = new Set<string>();
@@ -115,7 +122,11 @@ describe('DispatchService', () => {
       runs,
       queue,
       sender,
-      transcripts
+      transcripts,
+      {
+        entries: [MODEL_ENTRY],
+        defaultModelId: 'm',
+      }
     );
   });
 
@@ -267,7 +278,18 @@ describe('DispatchService', () => {
     await workers.save(makeWorker('w1', ['sp1']));
     await sessions.save(makeSession('se1', 'sp1', 'main'));
     sender.connected.add('w1');
-    await expect(service.dispatchSessionTurn({ sessionId: 'se1', ...turn })).rejects.toThrow(
+    const noModel = new DispatchService(
+      sessions,
+      spaces,
+      workers,
+      tickets,
+      runs,
+      queue,
+      sender,
+      new TranscriptService(new MemorySessionEventRepository(), sessions),
+      { entries: [] }
+    );
+    await expect(noModel.dispatchSessionTurn({ sessionId: 'se1', ...turn })).rejects.toThrow(
       DomainError
     );
   });

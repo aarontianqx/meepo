@@ -11,6 +11,7 @@ import {
 } from '@meepo/protocol';
 
 import { conflict, notFound, validation } from '../errors.js';
+import { resolveModel, type ModelRegistry } from '../../config.js';
 import type { RunRepository } from '../runs/run-repository.js';
 import type { SessionRepository } from '../sessions/session-repository.js';
 import type { TranscriptService } from '../sessions/transcript-service.js';
@@ -57,7 +58,7 @@ export class DispatchService {
     private readonly queue: DispatchQueueRepository,
     private readonly sender: WorkerSender,
     private readonly transcripts: TranscriptService,
-    private readonly defaultModel?: ModelConfig
+    private readonly models: ModelRegistry
   ) {}
 
   async dispatchSessionTurn(input: DispatchSessionTurnInput): Promise<DispatchOutcome> {
@@ -125,7 +126,7 @@ export class DispatchService {
     }
     const space = await this.spaces.getById(ticket.spaceId);
     if (!space) throw notFound(`Space not found: ${ticket.spaceId}`);
-    const model = space.model ?? this.defaultModel;
+    const model = this.resolveSpaceModel(space);
     if (!model) throw validation(`No model configured for space ${space.id} or server default`);
 
     const eligible = await this.eligibleWorkers(space, ticket.requiredTags);
@@ -277,13 +278,21 @@ export class DispatchService {
     );
   }
 
+  private resolveSpaceModel(space: Space): ModelConfig {
+    const modelId = space.model?.modelId ?? this.models.defaultModelId;
+    if (!modelId) throw validation(`No model configured for space ${space.id} or server default`);
+    const model = resolveModel(this.models, modelId, space.model?.thinkingLevel);
+    if (!model) throw validation(`Unknown model in registry: ${modelId}`);
+    return model;
+  }
+
   private buildTurnEnvelope(
     sessionId: string,
     sessionKind: SessionKind,
     space: Space,
     input: DispatchSessionTurnInput
   ): TurnDispatchEnvelope {
-    const model = space.model ?? this.defaultModel;
+    const model = this.resolveSpaceModel(space);
     if (!model) throw validation(`No model configured for space ${space.id} or server default`);
     return {
       runId: randomUUID(),

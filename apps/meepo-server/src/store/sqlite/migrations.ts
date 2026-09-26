@@ -199,6 +199,16 @@ export const migrations: Migration[] = [
       db.exec('ALTER TABLE sessions ADD COLUMN prewarm_message_id TEXT');
     },
   },
+  {
+    version: 8,
+    name: 'space model reference',
+    up(db) {
+      db.exec(`
+        ALTER TABLE spaces ADD COLUMN model_id TEXT;
+        ALTER TABLE spaces ADD COLUMN model_thinking_level TEXT;
+      `);
+    },
+  },
 ];
 
 /** Applies pending migrations in version order, tracking progress via `user_version`. */

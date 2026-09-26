@@ -1,4 +1,11 @@
-import type { Space, SpaceMember, Ticket, WorkerEnrollmentToken, WorkerNode } from '@meepo/core';
+import type {
+  Space,
+  SpaceMember,
+  SpaceModelRef,
+  Ticket,
+  WorkerEnrollmentToken,
+  WorkerNode,
+} from '@meepo/core';
 
 const USER_STORAGE_KEY = 'meepo.userId';
 
@@ -85,6 +92,14 @@ export interface CreateTicketInput {
   requiredTags?: string[];
 }
 
+export interface ModelRegistryEntry {
+  id: string;
+  provider: string;
+  baseUrl: string;
+  model: string;
+  isDefault: boolean;
+}
+
 export const api = {
   health: () => request<HealthStatus>('GET', '/healthz'),
 
@@ -103,6 +118,10 @@ export const api = {
     request<Space>('PUT', `/api/spaces/${encodeURIComponent(spaceId)}/memory`, { longTermMemory }),
   switchBinding: (spaceId: string, workerId: string) =>
     request<Space>('POST', `/api/spaces/${encodeURIComponent(spaceId)}/binding`, { workerId }),
+  updateSpaceModel: (spaceId: string, model: SpaceModelRef | undefined) =>
+    request<Space>('PUT', `/api/spaces/${encodeURIComponent(spaceId)}/model`, { model }),
+
+  listModels: () => request<ModelRegistryEntry[]>('GET', '/api/models'),
 
   listMembers: (spaceId: string) =>
     request<SpaceMember[]>('GET', `/api/spaces/${encodeURIComponent(spaceId)}/members`),

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 
-import type { Space, WorkerEnrollmentToken } from '@meepo/core';
+import type { Space, SpaceModelRef, WorkerEnrollmentToken } from '@meepo/core';
 
 import { api } from '../api/client';
 import { ErrorBanner, Section } from '../components/common';
@@ -27,6 +27,7 @@ export function SpaceDetailPage({ spaceId, onBack }: SpaceDetailPageProps): Reac
       {space.data ? (
         <>
           <InfoSection space={space.data} />
+          <ModelSection space={space.data} onChanged={space.refresh} />
           <MembersSection spaceId={spaceId} />
           <WorkerBindingSection space={space.data} onChanged={space.refresh} />
           <ChatsSection space={space.data} onChanged={space.refresh} />
@@ -71,6 +72,94 @@ function InfoSection({ space }: { space: Space }): React.JSX.Element {
           </>
         ) : null}
       </dl>
+    </Section>
+  );
+}
+
+const THINKING_LEVELS = ['low', 'high', 'max'] as const;
+
+function ModelSection({
+  space,
+  onChanged,
+}: {
+  space: Space;
+  onChanged: () => void;
+}): React.JSX.Element {
+  const models = usePolling(() => api.listModels(), 10_000);
+  const [modelId, setModelId] = useState(space.model?.modelId ?? '');
+  const [thinkingLevel, setThinkingLevel] = useState(space.model?.thinkingLevel ?? '');
+  const [error, setError] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  const dirty =
+    modelId !== (space.model?.modelId ?? '') ||
+    thinkingLevel !== (space.model?.thinkingLevel ?? '');
+
+  const save = async (): Promise<void> => {
+    setBusy(true);
+    setError(null);
+    setSaved(false);
+    try {
+      const model: SpaceModelRef | undefined = modelId
+        ? {
+            modelId,
+            ...(thinkingLevel
+              ? { thinkingLevel: thinkingLevel as SpaceModelRef['thinkingLevel'] }
+              : {}),
+          }
+        : undefined;
+      await api.updateSpaceModel(space.id, model);
+      setSaved(true);
+      onChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'failed to save model');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Section title='Model'>
+      <ErrorBanner error={models.error ?? error} />
+      <div className='row-inline'>
+        <select
+          value={modelId}
+          onChange={(e) => {
+            setModelId(e.target.value);
+            setSaved(false);
+          }}
+        >
+          <option value=''>Inherit server default</option>
+          {(models.data ?? []).map((entry) => (
+            <option key={entry.id} value={entry.id}>
+              {entry.id} ({entry.provider}){entry.isDefault ? ' — default' : ''}
+            </option>
+          ))}
+        </select>
+        <select
+          value={thinkingLevel}
+          onChange={(e) => {
+            setThinkingLevel(e.target.value);
+            setSaved(false);
+          }}
+          disabled={!modelId}
+        >
+          <option value=''>Thinking: default</option>
+          {THINKING_LEVELS.map((level) => (
+            <option key={level} value={level}>
+              Thinking: {level}
+            </option>
+          ))}
+        </select>
+        <button className='primary' onClick={() => void save()} disabled={busy || !dirty}>
+          Save
+        </button>
+        {saved ? <span className='muted'>Saved.</span> : null}
+      </div>
+      {modelId && !(models.data ?? []).some((entry) => entry.id === modelId) ? (
+        <p className='muted'>Current model &quot;{modelId}&quot; is not in the registry.</p>
+      ) : null}
     </Section>
   );
 }
