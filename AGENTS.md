@@ -39,6 +39,8 @@ meepo/
 | Interactive Session   | Real-time Thread routing & streaming             | `specs/features/interactive-session.md`      |
 | Ticket Pipeline       | Async task & batch run pipeline                  | `specs/features/ticket-pipeline.md`          |
 | Triggers & Scheduling | Unified Schedule/Ticket/Turn/Run execution model | `specs/features/triggers-and-scheduling.md`  |
+| Worker Protocol       | Wire contract, reliability semantics, versioning | `specs/architecture/worker-protocol.md`      |
+| Space Memory          | Entry model, retrieval, tools, API contract      | `specs/features/memory.md`                   |
 | Backend Layering      | Dependency & placement rules for heavy backends  | `specs/architecture/backend-layering.md`     |
 
 ## Coding Style & Guard Rails
@@ -57,8 +59,8 @@ meepo/
 - **Server Owns Truth; Worker Owns Live State**: `meepo-server` is the SST for persistent configuration, space long-term memory, session transcripts, and tickets. Workers own inherently local state (agent process, workspace, uncommitted changes): stateless across ticket lifetimes, but sticky for sessions.
 - **Hard Session–Worker Affinity**: A session is pinned to one worker at creation and never migrates implicitly — main sessions follow the space's `boundWorkerId`, thread sessions their dispatch target. Worker offline means the session pauses; rebinding is a deliberate user action. Tickets are exempt.
 - **Slot Isolation**: A worker's slot defines its maximum concurrency limit. Concurrent executions MUST run in isolated working directories (one per task) to prevent file collisions. The rule to create a `git worktree` before modifying code is a prompt-level convention of the optional coding preset, not a code constraint.
-- **Clean Worker Context**: Workers executing coding tasks must receive structured objective bundles rather than uncurated conversational chat logs.
-- **Protocol Independence**: Payloads between server and worker must conform to `@meepo/protocol` contracts and serialize cleanly to JSON/CBOR.
+- **Clean Worker Context**: Tickets must receive structured objective bundles rather than uncurated conversational chat logs.
+- **Protocol Independence**: Payloads between server and worker must conform to `@meepo/protocol` contracts and serialize cleanly to JSON.
 - **Edge Authentication**: User identity comes from an edge SSO token via an `Authenticator` port (a local adapter serves development until SSO integration); identity is read from request context, never from request payloads. Authorization is per-space membership (one role per user per space); MEEPO keeps no account system.
 - **Layering**: `transport → domain → store` one-way; ports defined at the consumer; `domain/` never imports transport/infra frameworks; constructor injection only. Full rules: `specs/architecture/backend-layering.md`.
 

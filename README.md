@@ -8,7 +8,7 @@ MEEPO is a project-isolated agent execution and dispatch framework tailored for 
 
 - **Space-Isolated Long-Term Memory**: Multi-chat mapping to unified project boundaries (e.g., dev chat + support chat share a single Space memory).
 - **Control/Data Plane Separation**: The central server manages Feishu webhooks, routing, and memory persistence without executing heavy local coding tools.
-- **Heterogeneous Workers**: Workers run locally on developer laptops or cloud sandboxes, executing coding tasks via isolated Git worktrees and `@earendil-works/pi-agent-core`.
+- **Heterogeneous Workers**: Workers run locally on developer laptops or cloud sandboxes, executing tasks in isolated per-task directories via `@earendil-works/pi-agent-core`.
 - **Dual Interaction Modes**:
   - **Interactive Session**: Low-latency, capacity-aware streaming session mapped to Feishu message threads.
   - **Ticket Pipeline**: Asynchronous ticket-driven background runs for PR creation, batch test execution, and Cron automation.
@@ -70,7 +70,7 @@ pnpm --filter meepo-server dev
 # 2. Create a space (dev auth reads the x-meepo-user-id header; the creator becomes owner)
 curl -X POST localhost:8780/api/spaces -H 'content-type: application/json' \
   -H 'x-meepo-user-id: aaron' \
-  -d '{"name": "demo", "repoUrl": "git@github.com:org/demo.git"}'
+  -d '{"name": "demo"}'
 
 # 3. Issue a worker enrollment token for the space
 curl -X POST localhost:8780/api/enrollments -H 'content-type: application/json' \
@@ -105,10 +105,10 @@ curl -X POST localhost:8780/api/tickets -H 'content-type: application/json' \
   -d '{"spaceId": "<space-id>", "title": "audit", "objective": "..."}'
 curl -X POST localhost:8780/api/tickets/<ticket-id>/dispatch
 
-# Schedule a reminder (fires into a new ticket)
-curl -X POST localhost:8780/api/reminders -H 'content-type: application/json' \
+# Create a schedule (fires into a new ticket)
+curl -X POST localhost:8780/api/schedules -H 'content-type: application/json' \
   -H 'x-meepo-user-id: aaron' \
-  -d '{"spaceId": "<space-id>", "objective": "nightly audit", "trigger": {"kind": "cron", "cron": "0 3 * * *"}}'
+  -d '{"spaceId": "<space-id>", "timing": {"kind": "cron", "expression": "0 3 * * *"}, "action": {"kind": "create_ticket", "objective": "nightly audit"}}'
 ```
 
 ## License

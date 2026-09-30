@@ -50,10 +50,14 @@ interface Schedule {
 - An `at` schedule fires once and becomes `done`; if the server was down at the fire time, it catches up exactly once at the next tick. Coalescing does not apply to `at`.
 - Jitter is a deterministic per-schedule offset, at most 10% of the period and at most 15 minutes.
 - `/new` cascade-deletes the session's `resume_session` schedules; `create_ticket` schedules are unaffected.
+- The default timezone is the space's configured timezone, or UTC when unset.
+- An agent-created schedule's `createdByUserId` is the author of the triggering turn.
+- An unattended turn (schedule fire, ticket receipt) that cannot resolve the create-ticket-vs-resume boundary defaults to `create_ticket`, noting its assumptions in the objective.
 - Machine turns (schedule fires, ticket receipts) may also call `CronCreate` — recursion is allowed but bounded: at most 50 active schedules per session, and the 7-day stale rule above still applies.
 
 ### Reliability Semantics
 
+- **Atomic creation**: a schedule fire and the creation of its work item commit in one transaction — a crash can neither lose the fire nor leave an unidentifiable duplicate. External side effects are never exactly-once by construction.
 - **Busy sessions**: a fire due during an active turn is held and delivered at the next idle moment — never injected mid-turn.
 - **Coalescing**: multiple missed fires collapse into one, annotated with a `coalescedCount`.
 - **Jitter**: deterministic per-schedule offset spreads recurring fires.
@@ -64,11 +68,12 @@ interface Schedule {
 A Ticket is the independent work unit. Its lifecycle:
 
 ```
-pending → claimed → running → completed | failed | cancelled
+pending → claimed → running → completed | failed | cancelled | manual_review
 ```
 
 - Self-contained by design: the objective bundle carries everything execution needs.
-- Any eligible worker may claim it (no affinity). Each dispatch attempt carries an execution lease (`workerId` + `leaseExpiresAt`); a disconnected worker's ticket becomes re-dispatchable only after the lease expires, late results from expired attempts are rejected (logged only), and side-effecting work that cannot be safely retried is held for `manual_review` instead of auto-retrying. Every retry is a new Run with an incremented `attempt`.
+- Any eligible worker may claim it (no affinity). Each dispatch attempt carries an execution lease (`workerId` + `leaseExpiresAt`), renewed by the worker's heartbeats while they carry the run in `activeRunIds` (lease = 3 heartbeat intervals — 45s at the default 15s — server clock authoritative); a disconnected worker's ticket becomes re-dispatchable only after the lease expires, and late results from expired attempts are rejected (logged only).
+- **Retry layers are distinct**: model-call retry is owned by pi core; tool calls are never retried by the harness (errors return to the model as tool results); attempt-level retry is conservative — an attempt that never started (no `run_started`) may re-dispatch automatically; an attempt that started is re-dispatched only when the ticket was declared `idempotent: true` or its persisted event stream shows only read-only tools (`read`/`grep`/`ls`/`glob`), otherwise the ticket parks in `manual_review` (Run `failed(lease_lost)`). `maxAttempts = 3` (exhaustion → `failed(max_attempts)`); pending over 24h → `failed(unclaimed)`. Human resolution actions: mark-completed, retry (new attempt, fresh directory), cancel — via console or API.
 - A ticket created from a session carries `originSessionId`, so its result can be reported back to that conversation.
 
 ## 4. Turn
@@ -89,6 +94,8 @@ interface Run {
   workerId?: string;
   leaseExpiresAt?: number;
   status: 'queued' | 'dispatched' | 'running' | 'completed' | 'failed' | 'merged' | 'dropped';
+  terminalReason?: string;
+  usage?: { inputTokens: number; outputTokens: number; costUsd?: number };
   createdAt: number;
   startedAt?: number;
   completedAt?: number;
@@ -96,6 +103,19 @@ interface Run {
 ```
 
 Stream events, heartbeat `activeRunIds`, and execution state all hang off the Run. Every run ends with exactly one terminal state: turn-level `done` maps to `completed`; `interrupted` / `cancelled` / `error` map to `failed(reason)`. Runs pre-created for messages that are later merged close as `merged`; an `if_idle` delivery dropped on a busy session leaves a `dropped` record.
+
+### Run State Transitions
+
+| From | Event | To |
+| --- | --- | --- |
+| `queued` | dispatched to a worker | `dispatched` |
+| `queued` | merged before dispatch | `merged` (`mergedIntoRunId` set) |
+| `queued` | `if_idle` drop on a busy session | `dropped` |
+| `dispatched` | `run_started` | `running` |
+| `dispatched` | lease lost before start | `failed(worker_lost)` — re-dispatchable |
+| `running` | turn completes | `completed` |
+| `running` | interrupted / cancelled / error | `failed(reason)` |
+| `running` | abort (stop button, rebind, `/new`) | `failed(interrupted)` |
 
 ## 6. Agent-Facing Tools
 

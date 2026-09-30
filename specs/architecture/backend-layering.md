@@ -1,6 +1,6 @@
 # Backend Layering Conventions
 
-These conventions govern `meepo-server` and any future heavy backend in this monorepo. They are enforceable rules, not style suggestions — the dependency rule is checked in CI.
+These conventions govern `meepo-server` and any future heavy backend in this monorepo. They are enforceable rules, not style suggestions — the dependency rule is enforced mechanically (ESLint + CI, delivered in W0).
 
 ## Layers
 
@@ -31,4 +31,4 @@ Dependency rule: `transport → domain → store`, one-way. `infra` may be used 
 
 ## Enforcement
 
-- ESLint `no-restricted-imports` encodes the dependency rule (e.g. `domain/` cannot import `transport/` or transport frameworks). Conventions that CI cannot check do not belong in this document.
+- ESLint `no-restricted-imports` encodes the dependency rule (e.g. `domain/` cannot import `transport/` or transport frameworks); the rule and a CI workflow running lint/test/build are delivered in W0. Conventions that cannot be checked mechanically do not belong in this document.
