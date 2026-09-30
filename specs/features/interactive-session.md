@@ -77,4 +77,4 @@ Incoming work for a session carries one of three delivery semantics:
 
 ## 7. Streaming to Feishu
 
-The worker emits stream events (`text_delta`, `tool_execution_*`, turn boundaries) to the server, which renders them into a live-updating CardKit card in the session's thread. Rendering mechanics — snapshot frames, throttling, thread anchoring, callback binding — are owned by the Card Streamer module (`specs/architecture/server-control-plane.md`).
+The worker emits stream events (`text_delta`, `thinking_delta`, `tool_execution_*`, turn boundaries) to the server, which renders them into a live-updating CardKit card in the session's thread. The card is structured as `[collapsible thinking panel] + [answer markdown] + [tool pills] + [stop button (streaming only)]`; the stop button is removed and streaming mode is closed at terminal state. Proactive/machine turns with no visible output produce no card at all. Rendering mechanics — snapshot frames, throttling, thread anchoring, callback binding — are owned by the Card Streamer module (`specs/architecture/server-control-plane.md`).

@@ -8,13 +8,13 @@ MEEPO's execution domain answers exactly three questions:
 Schedule ──fires──▶ Ticket | Turn ──executed as──▶ Run
 ```
 
-| Noun | Question | Definition |
-|---|---|---|
+| Noun         | Question                     | Definition                                                                                               |
+| ------------ | ---------------------------- | -------------------------------------------------------------------------------------------------------- |
 | **Schedule** | When does work get produced? | The single scheduling entity: `timing` (`at` or `cron`) + `action` (`create_ticket` or `resume_session`) |
-| **Ticket** | What work? (independent) | A self-contained objective bundle, executed in a fresh context; queueable, re-assignable, retryable |
-| **Turn** | What work? (in-session) | One continuation of an existing session, inheriting its context, pinned to its bound worker |
-| **Run** | Who ran it, to what state? | One execution attempt of a Ticket or a Turn |
-| **Session** | In which context? | The window-bound conversation container (`main` / `thread`) |
+| **Ticket**   | What work? (independent)     | A self-contained objective bundle, executed in a fresh context; queueable, re-assignable, retryable      |
+| **Turn**     | What work? (in-session)      | One continuation of an existing session, inheriting its context, pinned to its bound worker              |
+| **Run**      | Who ran it, to what state?   | One execution attempt of a Ticket or a Turn                                                              |
+| **Session**  | In which context?            | The window-bound conversation container (`main` / `thread`)                                              |
 
 Retired concepts: **Reminder** and **CronJob** as entities (both are just `Schedule` actions), `cron` as a concept (it is only a time-expression syntax), `recurring` booleans (one-shot is `at`, recurring is `cron`), **wakeup** (a Turn whose source is a schedule fire), and `taskId` (it is `runId`).
 
@@ -24,12 +24,15 @@ Retired concepts: **Reminder** and **CronJob** as entities (both are just `Sched
 interface Schedule {
   id: string;
   spaceId: string;
-  timing:
-    | { kind: 'at'; at: number }
-    | { kind: 'cron'; expression: string; timezone?: string };
+  timing: { kind: 'at'; at: number } | { kind: 'cron'; expression: string; timezone?: string };
   action:
-    | { kind: 'create_ticket'; objective: string; contextSummary?: string;
-        requiredTags?: string[]; originSessionId?: string }
+    | {
+        kind: 'create_ticket';
+        objective: string;
+        contextSummary?: string;
+        requiredTags?: string[];
+        originSessionId?: string;
+      }
     | { kind: 'resume_session'; sessionId: string; prompt: string };
   status: 'active' | 'done' | 'deleted';
   createdByUserId: string;

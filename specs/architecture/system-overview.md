@@ -20,7 +20,7 @@ MEEPO decomposes the agentic team assistant problem into an asynchronous, capaci
 |          ▼                            ▼                             ▼             |
 |  [ Card Streamer ]          [ Session Store (SST) ]       [ Ticket Queue ]        |
 |                                                                                   |
-|  [ Auth (edge JWT) ]              [ Scheduler (reminders & crons) ]               |
+|  [ Auth (edge JWT) ]              [ Scheduler (unified Schedule) ]                |
 +-----------------------------------------------------------------------------------+
                                          │
                            RPC WebSocket Stream (CBOR/JSON)
@@ -32,7 +32,7 @@ MEEPO decomposes the agentic team assistant problem into an asynchronous, capaci
 |   │   Private Physical Node   │                  │    Cloud Sandbox Node      │   |
 |   │ (MacBook / On-Prem Box)   │                  │   (Dynamic Docker / K8s)   │   |
 |   │  - Slots: 1               │                  │  - Slots: 4                │   |
-|   │  - Git Worktree: Default  │                  │  - Worktrees: Isolated     │   |
+|   │  - Neutral task dirs      │                  │  - Neutral task dirs       │   |
 |   │  - Pi Agent Core Runner   │                  │  - Pi Agent Core Runner    │   |
 |   │  - Local Tools: Read/Bash │                  │  - Local Tools: Read/Bash  │   |
 |   └───────────────────────────┘                  └────────────────────────────┘   |
@@ -75,5 +75,5 @@ Everything else is an attribute or an action, not a concept.
 
 - **Space is the tenant**: context, memory, sessions, and tickets are isolated per space. Access is governed by space membership keyed to the SSO `userId` — every member may administer the space, and exactly one member is the `owner`.
 - **Worker Enrollment Tokens** (`mep_...`) are issued by a space owner for a chosen set of spaces. At registration the worker presents only its token; the server resolves the authorized space set (`WorkerNode.spaceIds`). Workers never self-select spaces.
-- **Space Worker Binding** (`Space.boundWorkerId`): each space designates the worker that hosts its main sessions; thread sessions dispatch to a randomly chosen enrolled worker at creation, then stay pinned. See `specs/features/space-and-chat.md` for the full binding and migration semantics.
+- **Worker–Space relationship**: a worker primarily _belongs to_ the space that enrolled it (one worker per space, container-friendly). When environments are compatible, a worker may enroll into multiple spaces; binding still routes each space's work to its own worker. See `specs/features/space-and-chat.md` for the full binding and migration semantics.
 - The dispatcher only ever routes a space's work to workers enrolled for that space (tag matching applies as a secondary filter).

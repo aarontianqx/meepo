@@ -4,22 +4,22 @@ The `meepo-server` application coordinates multi-chat inbound traffic, manages s
 
 ## Core Modules
 
-### 1. Feishu Gateway
+### 1. Feishu Gateway (singleton)
 
-- Ingests events primarily via the Feishu WebSocket long connection (no public endpoint required); webhook ingestion is an alternative behind the same handler pipeline.
+- Runs as **exactly one instance** (the Feishu WebSocket long connection delivers each event to one random connection of the app, so multiple instances would split events). Other server components may scale freely.
+- Ingests events via the Feishu WebSocket long connection (no public endpoint required); webhook ingestion is the upgrade path for multi-instance deployments.
 - Deduplicates by `message_id` with a TTL cache — the long connection redelivers messages after reconnects.
-- Verifies authenticity: webhook mode verifies request signatures; the long connection is authenticated by the app credentials themselves.
-- Resolves inbound routing: `chat_id` → Space, message → window and session (see `specs/features/interactive-session.md`).
-- Binds card action callbacks to the originating user, rejecting forged or cross-user actions.
+- Resolves inbound routing: `chat_id` → Space (via the bound channel), message → window and session (see `specs/features/interactive-session.md`).
+- Binds card action callbacks to the session's origin user, rejecting forged or cross-user actions.
+- Feishu app credentials live in the **ChannelRegistry** (`{ id, type: 'feishu', appId, appSecret }`), not in server-global config; a space binds a channel via `boundChannelId`.
 
 ### 2. Space & Memory Manager
 
 - Maintains configuration for each Space:
   - Repository URL, default branch, target languages.
   - Allowed worker tags (e.g. `[macos, dev, private]`).
-  - Space Long-Term Memory: persistent business conventions, architectural rules, and curated knowledge summaries.
-- Holds the space worker binding (`boundWorkerId`) — see `specs/features/space-and-chat.md` for its default, migration, and pinning semantics.
-- Periodically accepts proposed knowledge deltas from completed tasks and merges them into the persistent space memory.
+  - Holds the space worker binding (`boundWorkerId`) — see `specs/features/space-and-chat.md` for its default, migration, and pinning semantics.
+- **Space memory is an entry set, not a blob**: entries carry `path` / `keywords` / `content`. The prompt receives only a bounded index (folder counts + top keywords); full entries are read on demand through the agent's memory tools. Both the agent and console may modify it (CRUD), with rules left to the user.
 
 ### 3. Session Store (Single Source of Truth)
 
@@ -39,8 +39,10 @@ The `meepo-server` application coordinates multi-chat inbound traffic, manages s
 ### 5. Card Streamer
 
 - Aggregates worker stream events into full-snapshot render frames (not deltas), keeping the core IM-agnostic and immune to out-of-order frames.
+- Card structure: `[collapsible thinking panel] + [answer markdown] + [tool pills] + [stop button (streaming only)]`; the stop button is removed and streaming mode is closed at terminal state.
 - Throttles CardKit patch calls (~0.5s) to adhere to Feishu rate limits while providing smooth streaming output.
 - Sends thread messages as `reply_in_thread` replies to the session's anchor (root) message; creating a message with `receive_id_type=thread_id` is rejected by the API, and `reply_in_thread` is rejected on messages already inside a thread (error 99992354).
+- **No content, no card**: proactive/machine turns without visible output stay silent — no placeholder card is created.
 
 ### 6. Scheduler
 
@@ -54,7 +56,7 @@ The `meepo-server` application coordinates multi-chat inbound traffic, manages s
 - Exposes an `Authenticator` port that extracts a normalized `Identity { userId, displayName, email }` from incoming requests.
 - An SSO adapter (local verification of the edge-injected JWT) is planned; a header-based local adapter serves development. Neither leaks into business code.
 - Business code reads identity from request context only — never from request payloads.
-- Authorization is checked against space membership: a per-space role (`owner` or `manager`) keyed by `userId`; MEEPO keeps no account system.
+- Authorization is checked against space membership: a per-space role (`owner` or `operator`) keyed by `userId`. A separate **admin** role exists only for global, non-space configuration (e.g. the model and channel registries) and grants no visibility into private spaces. MEEPO keeps no account system.
 - The worker channel does not use this layer: workers authenticate with enrollment tokens.
 
 ## Layering

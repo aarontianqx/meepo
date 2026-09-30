@@ -30,16 +30,16 @@ meepo/
 
 ### Architecture References
 
-| Component / Subsystem | Role                                               | Spec                                         |
-| --------------------- | -------------------------------------------------- | -------------------------------------------- |
-| System Overview       | End-to-end architecture & topology                 | `specs/architecture/system-overview.md`      |
-| Server Control Plane  | Gateway, Dispatcher, Memory & Session Store        | `specs/architecture/server-control-plane.md` |
-| Worker Data Plane     | Runner lifecycle, Slot concurrency, Worktree       | `specs/architecture/worker-data-plane.md`    |
-| Space & Chat Mapping  | Multi-chat to Space isolation model                | `specs/features/space-and-chat.md`           |
-| Interactive Session   | Real-time Thread routing & streaming               | `specs/features/interactive-session.md`      |
-| Ticket Pipeline       | Async task & batch run pipeline                    | `specs/features/ticket-pipeline.md`          |
+| Component / Subsystem | Role                                             | Spec                                         |
+| --------------------- | ------------------------------------------------ | -------------------------------------------- |
+| System Overview       | End-to-end architecture & topology               | `specs/architecture/system-overview.md`      |
+| Server Control Plane  | Gateway, Dispatcher, Memory & Session Store      | `specs/architecture/server-control-plane.md` |
+| Worker Data Plane     | Runner lifecycle, Slot concurrency, Worktree     | `specs/architecture/worker-data-plane.md`    |
+| Space & Chat Mapping  | Multi-chat to Space isolation model              | `specs/features/space-and-chat.md`           |
+| Interactive Session   | Real-time Thread routing & streaming             | `specs/features/interactive-session.md`      |
+| Ticket Pipeline       | Async task & batch run pipeline                  | `specs/features/ticket-pipeline.md`          |
 | Triggers & Scheduling | Unified Schedule/Ticket/Turn/Run execution model | `specs/features/triggers-and-scheduling.md`  |
-| Backend Layering      | Dependency & placement rules for heavy backends    | `specs/architecture/backend-layering.md`     |
+| Backend Layering      | Dependency & placement rules for heavy backends  | `specs/architecture/backend-layering.md`     |
 
 ## Coding Style & Guard Rails
 
