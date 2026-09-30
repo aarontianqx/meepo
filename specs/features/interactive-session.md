@@ -6,7 +6,7 @@ Interactive Sessions provide real-time, bidirectional communication between Feis
 
 ## 2. Windows and Sessions
 
-A **window** is the IM address a session is bound to: `window_id = feishu:{chat_id}:{sub_id}`. One window maps to at most one active session; the window→session mapping is persisted so it survives server restarts.
+A **window** is the IM address a session is bound to: `window_id = {channelId}:{chat_id}:{sub_id}`. One window maps to at most one active session; the window→session mapping is persisted so it survives server restarts.
 
 **Private chat** — one main session per user (`sub_id = sender open_id`), no threads anywhere: the bot always replies in the main flow. The session auto-compacts when it grows long; `/new` closes it and starts a fresh one.
 
@@ -19,7 +19,9 @@ Routing inside the group main stream: a fresh `@bot` mention (not a reply) prewa
 
 **`/new` rotates a main session** (private chat or group main flow): it closes the current session (transcript retained server-side) and opens a fresh one. It is rejected inside threads — threads auto-compact instead.
 
-A space designates one window as its **main window** — carrier-agnostic: the owner's private chat or a designated group thread. The session there is the space's **main session**, the only session flagged `no_workspace` (it orchestrates and never edits code), which is what allows it to follow a space rebind losslessly.
+A space designates one window as its **main window** — carrier-agnostic: the owner's private chat or a designated group — whose session acts as the space's orchestration entry. The main window is a routing concept only; it carries no special execution mechanism.
+
+On a user-initiated space rebind, every chat session (private, group-main, main-window) follows to the new worker: the transcript is preserved server-side, the local working directory is abandoned, and a migration notice (`system_note`) is injected so the agent knows previous local files may no longer exist. Thread sessions stay pinned to their original worker.
 
 ## 3. Inbound Decision Chain
 
@@ -35,6 +37,10 @@ When a message arrives, the server applies these gates in order:
    - Window has a live session → reuse it (deliver per §5 semantics).
    - Session creation already in flight for this window → piggyback on the same pending session; a second one is never created.
    - Otherwise → create and dispatch. Creation-time binding depends on session type: private-chat and main-window sessions bind to the space's `boundWorkerId`; thread sessions pick a randomly chosen eligible worker, then stay pinned for life.
+
+### Input Scope
+
+Inbound content is limited to: **text**; **quoted text** (a reply carries the quoted message's sender and body as a `quoted_message` block); and **images** (downloaded via the Feishu API, passed to the agent as `ImageContent`, and stored in the transcript as a file reference — no binary in the event log). File attachments and rich-text card inputs are deferred.
 
 ## 4. Turn Batching & Speaker Attribution
 
@@ -65,13 +71,13 @@ Users often send several messages before the bot answers. Consecutive queued tur
 
 - The session runs on its bound worker. The agent process may stay warm between turns; after TTL eviction or a worker restart, it cold-starts from the server-provided snapshot.
 - If the bound worker is offline, messages queue server-side and resume on reconnect — the session never silently migrates.
-- Every turn ends with exactly one terminal state: `done` / `interrupted` / `cancelled` / `error`.
+- Every turn ends with exactly one terminal state: `done` / `interrupted` / `cancelled` / `error` — mapped to run states as `done` → `completed`, the rest → `failed(reason)`.
 
 ## 6. Delivery, Steering & Interruption
 
 Incoming work for a session carries one of three delivery semantics:
 
-- **urgent** — steer into the active turn: the message is injected into the agent's follow-up queue and takes effect as soon as the running tool finishes or is cancelled.
+- **urgent** — end the active turn (its run is marked `interrupted`) and start a new turn with the incoming message; takes effect as soon as the running tool finishes or is cancelled.
 - **wait** — queue behind the active turn; consecutive queued messages may merge into a single turn.
 - **if_idle** — drop when the session is busy.
 

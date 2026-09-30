@@ -4,15 +4,16 @@
 
 - **Space**: A business space — the user-defined boundary for a piece of work or a team (a private assistant, a public group helper, or a whole team's domain). A Space owns:
   - Its **memory** (an entry set with `path`/`keywords`/`content`, indexed in the prompt and read on demand).
-  - Its **channel binding**: one bot per IM channel (a Feishu app from the ChannelRegistry; other channel types are schema-reserved).
+  - Its **channels**: one or more bot apps from the ChannelRegistry (channel types beyond Feishu are schema-reserved).
   - Its **worker placement policy** (required tags, preferred machines).
   - Its **model reference** (`modelId` from the model registry + optional thinking level).
-  - Its **linked chat groups** (bound windows on the bound channel).
-- **Chat**: An external communication channel window (e.g. a Feishu group chat `chat_id` or a private chat).
+  - Its **bound windows**: the chat windows (groups, private chats) across its channels where the bot responds.
+- **Channel**: a single bot application (`{ type, appId, appSecret }`) registered in the ChannelRegistry, bound to **exactly one** space. A space may bind multiple channels (e.g. a Feishu bot now, a Telegram bot later). Channel ≠ chat window: one channel (bot) may join many windows.
+- **Window**: a chat window under a channel — a private chat, a group, or a thread. Windows on any of the space's channels share the space's context (memory, worker environment).
 
 ## 2. Multi-Chat to Space Relationship
 
-A Space supports a **1-to-N** relationship with chat windows on its bound channel:
+A Space supports a **1-to-N** relationship with chat windows across its bound channels:
 
 ```
 [Space: payment-team]

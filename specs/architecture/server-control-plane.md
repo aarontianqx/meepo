@@ -6,26 +6,26 @@ The `meepo-server` application coordinates multi-chat inbound traffic, manages s
 
 ### 1. Feishu Gateway (singleton)
 
-- Runs as **exactly one instance** (the Feishu WebSocket long connection delivers each event to one random connection of the app, so multiple instances would split events). Other server components may scale freely.
+- Runs as **exactly one instance** (the Feishu WebSocket long connection delivers each event to one random connection of the app, so multiple instances would split events). The whole control plane is single-replica in this phase — the gateway singleton forces it; horizontal scale-out is a documented future goal (connection ownership, shared queue, concurrency control), gated on the Postgres migration.
 - Ingests events via the Feishu WebSocket long connection (no public endpoint required); webhook ingestion is the upgrade path for multi-instance deployments.
 - Deduplicates by `message_id` with a TTL cache — the long connection redelivers messages after reconnects.
-- Resolves inbound routing: `chat_id` → Space (via the bound channel), message → window and session (see `specs/features/interactive-session.md`).
+- Resolves inbound routing: `chat_id` → Space (via the channel that received the event), message → window and session (see `specs/features/interactive-session.md`).
 - Binds card action callbacks to the session's origin user, rejecting forged or cross-user actions.
-- Feishu app credentials live in the **ChannelRegistry** (`{ id, type: 'feishu', appId, appSecret }`), not in server-global config; a space binds a channel via `boundChannelId`.
+- Feishu app credentials live in the **ChannelRegistry** (`{ id, type: 'feishu', appId, appSecret }`), not in server-global config; a space may bind multiple channels (`boundChannelIds`).
 
 ### 2. Space & Memory Manager
 
 - Maintains configuration for each Space:
-  - Repository URL, default branch, target languages.
   - Allowed worker tags (e.g. `[macos, dev, private]`).
   - Holds the space worker binding (`boundWorkerId`) — see `specs/features/space-and-chat.md` for its default, migration, and pinning semantics.
-- **Space memory is an entry set, not a blob**: entries carry `path` / `keywords` / `content`. The prompt receives only a bounded index (folder counts + top keywords); full entries are read on demand through the agent's memory tools. Both the agent and console may modify it (CRUD), with rules left to the user.
+- **Space memory is an entry set, not a blob**: entries carry `path` / `description` / `keywords` / `content` / `revision`. Retrieval is FTS5 full-text over path, keywords, and content (an `embedding` column is reserved for later vector search). The prompt receives only a directory-level **Memory Map** (folder counts + top keywords), snapshotted at session creation and placed at the end of the system prompt — it may go stale; the five memory tools (`MemoryList` / `MemorySearch` / `MemoryRead` / `MemoryWrite` / `MemoryDelete`, writes guarded by `expected_revision`) always return current data. Both the agent and console may modify memory, with curation rules left to the user.
 
 ### 3. Session Store (Single Source of Truth)
 
-- Persists the authoritative session event stream: user and agent messages, tool executions, and durable state records as one ordered log per session, plus a materialized current-state projection for routing and queries.
-- Buffers incoming stream deltas per turn and persists them at turn boundaries.
-- Provides full snapshots for worker cold-starts (incremental sync is a later optimization).
+- Persists the authoritative session event stream as one ordered log per session — canonical events `{ seq, type, payload, timestamp, runId? }` (`user_message` / `assistant_text` / `tool_call` / `tool_result` / `system_note` / `prompt_snapshot`; tool pairs matched by `toolCallId`) — plus a materialized current-state projection for routing and queries.
+- Durability boundary: events are appended in transactional segments during execution, never buffered to turn boundaries; delta frames are transport, not storage. A worker cold-start resumes from the last confirmed `seq`, so a crash never loses confirmed events.
+- Hot-session consistency: server-side writes into a live session (ticket receipts, console injections) are pushed to the bound worker as `context.append` notifications, keeping warm and cold sessions on the same history.
+- Compaction summaries are rebuildable caches: the raw event log is never overwritten, and tool call/result pairs are never split.
 
 ### 4. Dispatcher & Load Balancer
 
@@ -58,6 +58,10 @@ The `meepo-server` application coordinates multi-chat inbound traffic, manages s
 - Business code reads identity from request context only — never from request payloads.
 - Authorization is checked against space membership: a per-space role (`owner` or `operator`) keyed by `userId`. A separate **admin** role exists only for global, non-space configuration (e.g. the model and channel registries) and grants no visibility into private spaces. MEEPO keeps no account system.
 - The worker channel does not use this layer: workers authenticate with enrollment tokens.
+
+### 8. Console
+
+The console is the management and observation surface (not a workspace): pages for Spaces, Workers, Tickets, Schedules, Sessions (transcripts), Models, Channels, and Memory. Transcript viewing reads a snapshot and follows increments over WebSocket, resuming by `seq` after a reconnect. A console member may inject a **mailbox message** into a session: delivered with `wait` semantics (never interrupts), recorded in the event stream as a `system_note` attributed to the console user, with the reply going to the session's own window. All space-scoped console operations require space membership; the global registries (Models, Channels) require the admin role. There is no read-only role.
 
 ## Layering
 

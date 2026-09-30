@@ -42,10 +42,10 @@ MEEPO decomposes the agentic team assistant problem into an asynchronous, capaci
 ## 2. Architectural Invariants
 
 1. **Server Never Directly Modifies Repositories**: The control plane never executes local shell commands or modifies local workspace files. All disk and execution operations are delegated to workers.
-2. **Server Owns Truth; Worker Owns Live State**: The server is the single source of truth for space configuration, long-term memory, session transcripts, and ticket state. The worker owns what is inherently local: the agent process, the git workspace, and uncommitted changes. A worker crash never loses conversational data.
+2. **Server Owns Truth; Worker Owns Live State**: The server is the single source of truth for space configuration, long-term memory, session transcripts, and ticket state. The worker owns what is inherently local: the agent process, working directories, and uncommitted changes. A worker crash never loses conversational data.
 3. **Strict Space Boundary**: Chat messages and agent actions are always fenced by the containing `Space`. A worker assigned to Space A cannot access Space B's long-term memory or session state.
 4. **Capacity-Aware Concurrency**: Workers register explicit concurrency slots. Tasks are never assigned to a worker beyond its registered slot limits.
-5. **Hard Session–Worker Affinity**: A session is bound to one worker at creation and always routes back to it while that worker remains enrolled — its workspace and uncommitted state live there. A bound worker going offline pauses the session (messages queue server-side); it never triggers silent migration. Rebinding is always a deliberate user action. Tickets are exempt: they run in fresh worktrees and may be re-queued to any eligible worker.
+5. **Hard Session–Worker Affinity**: A session is bound to one worker at creation and always routes back to it while that worker remains enrolled — its workspace and uncommitted state live there. A bound worker going offline pauses the session (messages queue server-side); it never triggers silent migration. Rebinding is always a deliberate user action. Tickets are exempt: they run in fresh per-task directories and may be re-queued to any eligible worker.
 6. **Identity at the Edge**: User authentication happens at the edge (SSO); the server verifies the signed token and extracts the user's identity (`userId`). MEEPO maintains no account system of its own — the only authorization data it owns is space membership (one role per user per space).
 
 ## 3. Multi-Tenancy & Worker Enrollment
