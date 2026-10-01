@@ -1,5 +1,12 @@
-import type { Run } from '@meepo/core';
-import type { WorkerStreamEvent } from '@meepo/protocol';
+import { isTerminalRun, type Run } from '@meepo/core';
+import type {
+  WorkerStreamEvent,
+  SequencedWorkerEvent,
+  StreamAck,
+  ReconcileParams,
+  ReconcileResult,
+} from '@meepo/protocol';
+import type { ExecutionJournal } from '../runs/execution-journal.js';
 
 import type { RunRepository } from '../runs/run-repository.js';
 import type { TicketService } from '../tickets/ticket-service.js';
@@ -27,22 +34,84 @@ export class StreamProcessor {
   private readonly buffers = new Map<string, string>();
   /** Serializes async per-run work so started always lands before settle. */
   private readonly chains = new Map<string, Promise<void>>();
-  private renderHook?: StreamRenderHook;
-  private ticketResultNotifier?: TicketResultNotifier;
 
   constructor(
     private readonly transcripts: TranscriptService,
     private readonly ticketService: TicketService,
     private readonly runs: RunRepository,
-    private readonly logger: Logger = console
+    private readonly logger: Logger = console,
+    private readonly journal?: ExecutionJournal,
+    private readonly now: () => number = Date.now,
+    private readonly renderHook?: StreamRenderHook,
+    private readonly ticketResultNotifier?: TicketResultNotifier
   ) {}
 
-  setRenderHook(hook: StreamRenderHook): void {
-    this.renderHook = hook;
+  async acceptEvent(workerId: string, event: SequencedWorkerEvent): Promise<StreamAck> {
+    if (!this.journal) throw new Error('Execution journal is required for durable ingestion');
+    const before = await this.runs.getById(event.runId);
+    const ack = this.journal.TxAppend(workerId, event, this.now());
+    if (!ack.accepted || ack.duplicate || event.clientSeq <= (before?.lastClientSeq ?? 0))
+      return ack;
+    const run = await this.runs.getById(event.runId);
+    const ref = refOfRun(run);
+    if (ref) this.refs.set(event.runId, ref);
+    this.notify(event);
+    if (run && isTerminalRun(run.status)) this.refs.delete(run.id);
+    return ack;
   }
 
-  setTicketResultNotifier(notifier: TicketResultNotifier): void {
-    this.ticketResultNotifier = notifier;
+  async reconcile(workerId: string, params: ReconcileParams): Promise<ReconcileResult> {
+    const ids = new Set([...params.activeRunIds, ...params.recentlyFinishedRunIds]);
+    const result: ReconcileResult = {
+      validRunIds: [],
+      invalidRunIds: [],
+      lastConfirmedClientSeq: {},
+    };
+    for (const run of await this.runs.list()) {
+      if (run.workerId !== workerId) continue;
+      result.lastConfirmedClientSeq[run.id] = run.lastClientSeq ?? 0;
+      if (ids.has(run.id)) {
+        const valid =
+          !isTerminalRun(run.status) && (!run.leaseExpiresAt || run.leaseExpiresAt > this.now());
+        (valid ? result.validRunIds : result.invalidRunIds).push(run.id);
+        ids.delete(run.id);
+      } else if (run.status === 'running' && run.work.kind === 'turn') {
+        if (this.journal) {
+          const interrupted = this.journal.TxInterrupt(run.id, 'worker_lost', this.now());
+          if (interrupted) this.renderInterrupted(interrupted);
+          continue;
+        }
+        run.status = 'failed';
+        run.terminalReason = 'worker_lost';
+        run.completedAt = this.now();
+        await this.runs.save(run);
+      }
+    }
+    result.invalidRunIds.push(...ids);
+    return result;
+  }
+
+  renderInterrupted(run: Run): void {
+    const ref = refOfRun(run);
+    if (ref)
+      this.renderHook?.(
+        { type: 'run_failed', runId: run.id, error: '执行已中断', code: 'interrupted' },
+        ref
+      );
+  }
+
+  async renewLeases(workerId: string, ids: string[], durationMs: number): Promise<void> {
+    if (this.journal) {
+      this.journal.TxRenew(workerId, ids, durationMs, this.now());
+      return;
+    }
+    for (const id of ids) {
+      const run = await this.runs.getById(id);
+      if (!run || run.workerId !== workerId || isTerminalRun(run.status)) continue;
+      if (run.leaseExpiresAt && run.leaseExpiresAt <= this.now()) continue;
+      run.leaseExpiresAt = this.now() + durationMs;
+      await this.runs.save(run);
+    }
   }
 
   onEvent(event: WorkerStreamEvent): void {
@@ -125,6 +194,7 @@ export class StreamProcessor {
 
     const content = buffered || finalText;
     if (ref.kind === 'session') {
+      if (this.journal) return;
       await this.transcripts.appendMessage(ref.sessionId, {
         role: 'assistant',
         content,
@@ -167,7 +237,7 @@ function refOfRun(run: Run | undefined): WorkRef | undefined {
   if (!run) return undefined;
   return run.work.kind === 'ticket'
     ? { kind: 'ticket', ticketId: run.work.ticketId }
-    : { kind: 'session', sessionId: run.work.sessionId };
+    : { kind: 'session', sessionId: run.work.turnRef.sessionId };
 }
 
 /** Falls back to the event's own hints when no Run record exists. */

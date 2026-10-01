@@ -22,6 +22,7 @@ const BOT = 'ou_bot';
 const MODEL = { modelId: 'm' };
 
 class FakeFeishuClient implements FeishuClient {
+  failNextReply = false;
   readonly replies: { messageId: string; text: string; opts?: { replyInThread?: boolean } }[] = [];
   /** thread_id handed back for reply_in_thread prewarms */
   prewarmThreadId = 'omt_prewarm';
@@ -32,6 +33,10 @@ class FakeFeishuClient implements FeishuClient {
     text: string,
     opts?: { replyInThread?: boolean }
   ): Promise<ReplyResult> {
+    if (this.failNextReply) {
+      this.failNextReply = false;
+      throw new Error('Temporary Feishu failure');
+    }
     this.replies.push({ messageId, text, opts });
     return {
       messageId: 'om_reply',
@@ -124,8 +129,10 @@ describe('FeishuGateway', () => {
   let gateway: FeishuGateway;
   let sessionService: SessionService;
   let runs: MemoryRunRepository;
+  const inbox = new Map<string, InboundMessage>();
 
   beforeEach(async () => {
+    inbox.clear();
     const spaces = new MemorySpaceRepository();
     const sessions = new MemorySessionRepository();
     const sessionEvents = new MemorySessionEventRepository();
@@ -166,6 +173,15 @@ describe('FeishuGateway', () => {
 
     client = new FakeFeishuClient();
     gateway = new FeishuGateway({
+      inbox: {
+        put: (_channel, msg) => {
+          inbox.set(msg.messageId, msg);
+        },
+        pending: () => [...inbox.values()],
+        done: (_channel, id) => {
+          inbox.delete(id);
+        },
+      },
       client,
       sessionService,
       dispatchService,
@@ -233,12 +249,14 @@ describe('FeishuGateway', () => {
     expect(mainSession).toBeDefined();
 
     await gateway.handleInbound(
-      makeMsg({ messageId: 'om_new_t', threadId: 'omt_x', text: '/new' })
+      makeMsg({ messageId: 'om_new_t', threadId: 'omt_x', text: '/new', mentionedOpenIds: [BOT] })
     );
     expect(client.replies.at(-1)?.text).toContain('话题内不支持');
     expect((await sessionService.getSession(mainSession!.id)).status).toBe('active');
 
-    await gateway.handleInbound(makeMsg({ messageId: 'om_new', text: '/new' }));
+    await gateway.handleInbound(
+      makeMsg({ messageId: 'om_new', text: '/new', mentionedOpenIds: [BOT] })
+    );
     expect((await sessionService.getSession(mainSession!.id)).status).toBe('closed');
     expect(client.replies.at(-1)?.text).toContain('已关闭');
   });
@@ -295,7 +313,8 @@ describe('FeishuGateway', () => {
     const session = (await sessionService.listBySpace('sp_group'))[0];
     await runs.save({
       id: 'run1',
-      work: { kind: 'turn', sessionId: session.id },
+      initiatorIds: ['ou_user'],
+      work: { kind: 'turn', turnRef: { sessionId: session.id, sourceId: 'legacy' } },
       attempt: 1,
       workerId: 'w1',
       status: 'running',
@@ -322,7 +341,7 @@ describe('FeishuGateway', () => {
   });
 
   it('replies when /new has no active session in the window', async () => {
-    await gateway.handleInbound(makeMsg({ text: '/new' }));
+    await gateway.handleInbound(makeMsg({ text: '/new', mentionedOpenIds: [BOT] }));
     expect(client.replies.at(-1)?.text).toContain('没有进行中的会话');
     expect(sender.dispatches()).toHaveLength(0);
   });
@@ -350,5 +369,17 @@ describe('FeishuGateway', () => {
   it('ignores group main-stream messages that do not mention the bot', async () => {
     await gateway.handleInbound(makeMsg());
     expect(sender.dispatches()).toHaveLength(0);
+  });
+  it('retries a persisted inbound after a transient prewarm failure', async () => {
+    client.failNextReply = true;
+    const message = makeMsg({ mentionedOpenIds: [BOT] });
+    await expect(gateway.handleInbound(message)).rejects.toThrow('Temporary Feishu failure');
+    expect(inbox.size).toBe(1);
+    await gateway.recover();
+    expect(inbox.size).toBe(0);
+    expect(sender.dispatches()).toHaveLength(1);
+    await gateway.handleInbound(message);
+    expect(sender.dispatches()).toHaveLength(1);
+    expect(client.replies).toHaveLength(1);
   });
 });

@@ -5,7 +5,9 @@ import type {
   WorkerRegisterResult,
 } from '@meepo/protocol';
 
-import { notFound } from '../errors.js';
+import { CURRENT_PROTOCOL_VERSION } from '@meepo/protocol';
+
+import { notFound, validation } from '../errors.js';
 import type { EnrollmentService } from '../enrollments/enrollment-service.js';
 import type { SpaceService } from '../spaces/space-service.js';
 import type { WorkerRepository } from './worker-repository.js';
@@ -16,6 +18,7 @@ export interface WorkerServiceConfig {
 }
 
 export class WorkerService {
+  private readonly credentials = new Map<string, string>();
   constructor(
     private readonly workers: WorkerRepository,
     private readonly enrollmentService: EnrollmentService,
@@ -29,7 +32,13 @@ export class WorkerService {
    * enrolled worker to register for a space wins its default binding.
    */
   async register(payload: WorkerRegisterPayload): Promise<WorkerRegisterResult> {
-    const enrollment = await this.enrollmentService.resolveEnrollment(payload.enrollmentToken);
+    if (payload.protocolVersion !== CURRENT_PROTOCOL_VERSION)
+      throw validation(`Protocol version mismatch: expected ${CURRENT_PROTOCOL_VERSION}`);
+    const enrollment = await this.enrollmentService.resolveEnrollment(
+      payload.enrollmentToken,
+      payload.workerId
+    );
+    this.credentials.set(payload.workerId, payload.enrollmentToken);
     const worker: WorkerNode = {
       id: payload.workerId,
       spaceIds: [...enrollment.spaceIds],
@@ -52,9 +61,24 @@ export class WorkerService {
     };
   }
 
+  get leaseDurationMs(): number {
+    return this.config.heartbeatIntervalSeconds * 3_000;
+  }
+
+  async assertAuthorized(workerId: string): Promise<void> {
+    const credential = this.credentials.get(workerId);
+    if (!credential) throw validation('Worker is not registered');
+    await this.enrollmentService.resolveEnrollment(credential, workerId);
+  }
+
   async heartbeat(workerId: string, payload: WorkerHeartbeatPayload): Promise<void> {
+    const credential = this.credentials.get(workerId);
+    const enrollment = credential
+      ? await this.enrollmentService.resolveEnrollment(credential, workerId)
+      : undefined;
     const worker = await this.workers.getById(workerId);
     if (!worker) throw notFound(`Worker not registered: ${workerId}`);
+    if (enrollment) worker.spaceIds = [...enrollment.spaceIds];
     worker.maxSlots = Math.max(1, payload.capacity.maxSlots);
     worker.activeSlots = Math.max(0, payload.capacity.activeSlots);
     worker.lastHeartbeatAt = Date.now();

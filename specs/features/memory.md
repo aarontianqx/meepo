@@ -22,8 +22,6 @@ interface MemoryEntry {
   updatedBy:
     | { kind: 'agent'; sessionId: string; authorId?: string } // authorId = open_id of the triggering user, absent for machine turns
     | { kind: 'console'; userId: string };
-  /** Reserved for later vector search; unused in v2 */
-  embedding?: number[];
 }
 ```
 
@@ -35,44 +33,44 @@ Limits: at most **500 entries per space**; `content` ≤ 64 KB; `description` �
 
 ## 2. Memory Map (Prompt Injection)
 
-The system prompt carries a **directory-level map** — never entry content — rendered at session creation and appended at the **end** of the system prompt with a staleness disclaimer:
+The system prompt carries a **directory-level map** — never entry content — rendered at cold execution startup and appended at the **end** of the system prompt with a staleness disclaimer:
 
 > This map is a snapshot from session start and may be incomplete. Memory tools always return current data — search first; do not answer from this map alone.
 
 Format: one line per top-level directory — `dir/ (count): keyword1, keyword2, …` (up to 5 representative keywords). Budget: ≤ 50 directories and ≤ 1000 chars total; overflow collapses to `… and N more directories`.
 
-Refresh points: new session, cold start (TTL eviction), `/new`. Never refreshed mid-turn. The rendered map is recorded with each `prompt_snapshot` event.
+Refresh points: first session execution, worker restart, cold start after TTL eviction, and a new session after `/new`. Warm sessions keep their map. The rendered map is recorded with each `prompt_snapshot` event. `memoryMapVersion` currently records generation time (`Date.now()`), not a content revision and not a reliable content-change detector.
 
 ## 3. Retrieval
 
-`MemorySearch` is a **trigram substring match** over `path` / `description` / `keywords` / `content`, ranked, with bounded snippets — explicitly **not** semantic search.
+`MemorySearch` is a **trigram substring match** over `path` / `description` / `keywords` / `content`, ranked by pinned status, matched-field weights (path 8, description 4, keywords 2, content 1), then path, with bounded snippets — explicitly **not** semantic search.
 
 - SQLite: FTS5 with `tokenize='trigram'`; queries shorter than 3 characters fall back to `LIKE '%q%'`.
-- Postgres (W9): `pg_trgm` implements the same `MemorySearchPort`; user-visible behavior is unchanged.
+- The current implementation uses the `MemoryRepository.search` port. PostgreSQL/`pg_trgm` and vector retrieval are future work; no embedding field or column is implemented.
 - Chinese acceptance case: an entry containing "支付接口重试规则" must be found by the query "重试".
 
 ## 4. Agent Tools
 
 Five tools, available in sessions and tickets alike:
 
-| Tool | Input | Output | Notes |
-| --- | --- | --- | --- |
-| `MemoryList` | `prefix?`, `limit=100` | Directory metadata rows (path, description, keywords, revision, updatedAt) — no content | |
-| `MemorySearch` | `query` (1–200 chars), `prefix?`, `limit=20` | Matched entries: metadata + `matched_fields` + ≤ 3 snippets (≤ 200 chars each) | Never returns full content |
-| `MemoryRead` | `path`, `offset?`/`limit?` or `tail?` (mutually exclusive, limit ≤ 32 KB) | Full or windowed content + revision | |
-| `MemoryWrite` | `path`, `description`, `content`, `keywords?`, `pinned?`, `expected_revision` | Updated entry metadata | Upsert. `expected_revision=0` = create-only. Omit `keywords` to preserve, `[]` to clear |
-| `MemoryDelete` | `path`, `expected_revision` | Deletion result | Tombstone |
+| Tool           | Input                                                                         | Output                                                                                  | Notes                                                                                   |
+| -------------- | ----------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| `MemoryList`   | `prefix?`, `limit=100`                                                        | Directory metadata rows (path, description, keywords, revision, updatedAt) — no content |                                                                                         |
+| `MemorySearch` | `query` (1–200 chars), `prefix?`, `limit=20`                                  | Matched entries: metadata + `matched_fields` + ≤ 3 snippets (≤ 200 chars each)          | Never returns full content                                                              |
+| `MemoryRead`   | `path`, `offset?`/`limit?` or `tail?` (mutually exclusive, limit ≤ 32 KB)     | Full or windowed content + revision                                                     |                                                                                         |
+| `MemoryWrite`  | `path`, `description`, `content`, `keywords?`, `pinned?`, `expected_revision` | Updated entry metadata                                                                  | Upsert. `expected_revision=0` = create-only. Omit `keywords` to preserve, `[]` to clear |
+| `MemoryDelete` | `path`, `expected_revision`                                                   | Deletion result                                                                         | Tombstone                                                                               |
 
 Error codes: `not_found`, `invalid_path`, `invalid_prefix`, `revision_conflict` (carries the current revision), `content_too_large`, `too_many_entries`.
 
 ## 5. Server API
 
-Same semantics over HTTP, used by the console and by the worker's tool proxy:
+The console uses HTTP; agent tools use authenticated `memory.call` WebSocket RPC with the same domain service (see [worker protocol](../architecture/worker-protocol.md)):
 
 - `GET /api/memory?spaceId&prefix&limit`
 - `GET /api/memory/search?spaceId&q&prefix&limit`
 - `GET /api/memory/{path}?spaceId&offset&limit&tail`
-- `PUT /api/memory/{path}`
-- `DELETE /api/memory/{path}?expected_revision`
+- `PUT /api/memory/{path}?spaceId` with the write fields in the JSON body
+- `DELETE /api/memory/{path}?spaceId&expected_revision`
 
-Authorization: console access requires space membership; the worker proxy authenticates with the worker token and may only touch spaces the worker serves. Console writes record `updatedBy: { kind: 'console', userId }`.
+Authorization: console access requires space membership; the worker proxy authenticates with the worker token and may only touch spaces the worker serves. Console writes record `updatedBy: { kind: 'console', userId }`. Agent writes derive `authorId` from the current run's first persisted initiator (first author for a merged turn), never from tool arguments; machine turns omit it. Worker tool calls require a running, unexpired execution lease matching the resource. For ticket tools, the existing `updatedBy.sessionId` field carries `ticket:<ticketId>` as its execution scope. Reads use UTF-8 byte offsets and return `offset`, `nextOffset` and `totalBytes`, keeping character boundaries intact.

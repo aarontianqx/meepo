@@ -1,17 +1,27 @@
-import { randomUUID } from 'node:crypto';
+import type { ExecutionJournal } from '../runs/execution-journal.js';
+import { randomInt, randomUUID } from 'node:crypto';
 
-import type { Run, SessionKind, Space, WorkerNode } from '@meepo/core';
+import {
+  isTerminalRun,
+  type Run,
+  type SessionKind,
+  type Space,
+  type WorkerNode,
+} from '@meepo/core';
 import {
   WORKER_CHANNEL_EVENTS,
   type DeliveryMode,
+  type ImageReference,
+  type MediaCredentials,
   type DispatchSource,
   type ModelConfig,
   type TicketDispatchEnvelope,
   type TurnDispatchEnvelope,
 } from '@meepo/protocol';
 
+import type { DispatchCommitter } from './dispatch-committer.js';
 import { conflict, notFound, validation } from '../errors.js';
-import { resolveModel, type ModelRegistry } from '../../config.js';
+import { resolveModel, type ModelRegistry } from '../models/model-registry.js';
 import type { RunRepository } from '../runs/run-repository.js';
 import type { SessionRepository } from '../sessions/session-repository.js';
 import type { TranscriptService } from '../sessions/transcript-service.js';
@@ -25,6 +35,10 @@ import type { WorkerSender } from './worker-sender.js';
 
 export interface DispatchSessionTurnInput {
   sessionId: string;
+  images?: ImageReference[];
+  ingress?: { channelId: string; messageId: string };
+  sourceId?: string;
+  eventType?: string;
   prompt: string;
   source: DispatchSource;
   delivery: DeliveryMode;
@@ -58,12 +72,23 @@ export class DispatchService {
     private readonly queue: DispatchQueueRepository,
     private readonly sender: WorkerSender,
     private readonly transcripts: TranscriptService,
-    private readonly models: ModelRegistry
+    private readonly models: ModelRegistry,
+    private readonly committer?: DispatchCommitter,
+    private readonly now: () => number = Date.now,
+    private readonly leaseDurationMs = 45_000,
+    private readonly onInterrupted?: (run: Run) => void,
+    private readonly mediaCredentials?: (channelId: string) => MediaCredentials,
+    private readonly journal?: ExecutionJournal
   ) {}
+
+  async hasProcessedMessage(channelId: string, messageId: string): Promise<boolean> {
+    return this.committer?.hasProcessedMessage(channelId, messageId) ?? false;
+  }
 
   async dispatchSessionTurn(input: DispatchSessionTurnInput): Promise<DispatchOutcome> {
     const session = await this.sessions.getById(input.sessionId);
     if (!session) throw notFound(`Session not found: ${input.sessionId}`);
+    if (session.status === 'closed') throw conflict('Session is closed');
     const space = await this.spaces.getById(session.spaceId);
     if (!space) throw notFound(`Space not found: ${session.spaceId}`);
 
@@ -72,15 +97,16 @@ export class DispatchService {
       authorOpenId: input.authorOpenId,
       chatLabel: input.chatLabel,
     });
-    const turnTimestamp = Date.now();
-    await this.transcripts.appendMessage(session.id, {
+    const turnTimestamp = this.now();
+    const message = {
       role: 'user',
+      images: input.images,
       author: input.author,
       authorOpenId: input.authorOpenId,
       chatLabel: input.chatLabel,
       content: input.prompt,
       timestamp: turnTimestamp,
-    });
+    } as const;
 
     const workerId = session.boundWorkerId ?? (await this.bindSessionWorker(session.id, space));
     const envelope = this.buildTurnEnvelope(session.id, session.kind, space, {
@@ -91,15 +117,47 @@ export class DispatchService {
     const worker = await this.workers.getById(workerId);
     const online = worker && worker.status !== 'offline' && this.sender.isConnected(workerId);
 
-    await this.runs.save({
+    const sourceId =
+      input.sourceId ??
+      (input.source.kind === 'user_message' ? input.source.messageId : randomUUID());
+    envelope.turnRef = { sessionId: session.id, sourceId };
+    envelope.currentTime = turnTimestamp;
+    envelope.images = input.images;
+    const run: Run = {
       id: envelope.runId,
-      work: { kind: 'turn', sessionId: session.id },
+      work: { kind: 'turn', turnRef: envelope.turnRef },
       attempt: 1,
       workerId,
       status: online ? 'dispatched' : 'queued',
-      createdAt: Date.now(),
-    });
+      leaseExpiresAt: online ? this.now() + this.leaseDurationMs : undefined,
+      createdAt: this.now(),
+      initiatorIds: input.authorOpenId ? [input.authorOpenId] : [],
+      mergedSourceIds: [sourceId],
+    };
+    const { model: _model, ...storedEnvelope } = envelope;
+    const queued: QueuedDispatch = {
+      id: run.id,
+      sessionId: session.id,
+      envelope: storedEnvelope,
+      queuedAt: this.now(),
+    };
+    if (this.committer) {
+      const committed = this.committer.TxEnqueueTurn(
+        run,
+        queued,
+        message,
+        input.ingress,
+        input.eventType
+      );
+      if (committed.duplicate) return { dispatched: false, queued: false, workerId };
+      envelope.snapshotBeforeSeq = committed.seq;
+    } else {
+      await this.transcripts.appendMessage(session.id, message);
+      await this.runs.save(run);
+      await this.queue.enqueue(queued);
+    }
 
+    if (session.channelId) envelope.mediaCredentials = this.mediaCredentials?.(session.channelId);
     if (online) {
       this.sender.sendToWorker(workerId, {
         kind: 'notification',
@@ -109,12 +167,6 @@ export class DispatchService {
       return { dispatched: true, queued: false, workerId };
     }
 
-    await this.queue.enqueue({
-      id: randomUUID(),
-      sessionId: session.id,
-      envelope,
-      queuedAt: Date.now(),
-    });
     return { dispatched: false, queued: true, workerId };
   }
 
@@ -130,51 +182,77 @@ export class DispatchService {
     if (!model) throw validation(`No model configured for space ${space.id} or server default`);
 
     const eligible = await this.eligibleWorkers(space, ticket.requiredTags);
-    const worker = eligible.sort(
-      (a, b) => a.activeSlots / a.maxSlots - b.activeSlots / b.maxSlots
-    )[0];
-    if (!worker) return { dispatched: false, queued: false };
+    eligible.sort((a, b) => a.activeSlots / a.maxSlots - b.activeSlots / b.maxSlots);
+    for (const worker of eligible) {
+      const run: Run = {
+        id: randomUUID(),
+        work: { kind: 'ticket', ticketId: ticket.id },
+        leaseExpiresAt: this.now() + this.leaseDurationMs,
+        attempt: (await this.runs.latestAttempt(ticket.id)) + 1,
+        workerId: worker.id,
+        status: 'dispatched',
+        createdAt: Date.now(),
+      };
+      const envelope: TicketDispatchEnvelope = {
+        runId: run.id,
+        ticketId: ticket.id,
+        attempt: run.attempt,
+        currentTime: this.now(),
+        spaceId: space.id,
+        objective: ticket.objective,
+        contextSummary: ticket.contextSummary,
+        systemPromptContribution: composeSystemPromptContribution(space),
+        model,
+        source: { kind: 'system' },
+      };
+      if (this.committer) {
+        if (!this.committer.TxClaimTicket(ticket, run, worker.maxSlots)) continue;
+      } else {
+        await this.runs.save(run);
+        ticket.status = 'claimed';
+        ticket.attempt = run.attempt;
+        ticket.assignedWorkerId = worker.id;
+        ticket.updatedAt = this.now();
+        await this.tickets.save(ticket);
+      }
+      this.sender.sendToWorker(worker.id, {
+        kind: 'notification',
+        event: WORKER_CHANNEL_EVENTS.ticketDispatch,
+        payload: envelope,
+      });
 
-    const run: Run = {
-      id: randomUUID(),
-      work: { kind: 'ticket', ticketId: ticket.id },
-      attempt: (await this.runs.latestAttempt(ticket.id)) + 1,
-      workerId: worker.id,
-      status: 'dispatched',
-      createdAt: Date.now(),
-    };
-    const envelope: TicketDispatchEnvelope = {
-      runId: run.id,
-      ticketId: ticket.id,
-      spaceId: space.id,
-      objective: ticket.objective,
-      contextSummary: ticket.contextSummary,
-      systemPromptContribution: composeSystemPromptContribution(space),
-      model,
-      source: { kind: 'system' },
-    };
-    await this.runs.save(run);
-    this.sender.sendToWorker(worker.id, {
-      kind: 'notification',
-      event: WORKER_CHANNEL_EVENTS.ticketDispatch,
-      payload: envelope,
-    });
-
-    ticket.status = 'claimed';
-    ticket.assignedWorkerId = worker.id;
-    ticket.updatedAt = Date.now();
-    await this.tickets.save(ticket);
-    return { dispatched: true, queued: false, workerId: worker.id };
+      return { dispatched: true, queued: false, workerId: worker.id };
+    }
+    return { dispatched: false, queued: false };
   }
 
-  /**
-   * Aborts a running Run by forwarding run.abort to its worker.
-   * Returns false when the run is unknown or already terminal.
-   */
+  /** SQLite cancellation already fenced these runs; still abort their live worker executions. */
+  async stopTicketExecutions(ticketId: string): Promise<void> {
+    for (const run of await this.runs.listByTicket(ticketId)) {
+      if (run.workerId && run.terminalReason === 'cancelled')
+        this.sender.sendToWorker(run.workerId, {
+          kind: 'notification',
+          event: 'run.abort',
+          payload: { runId: run.id },
+        });
+    }
+  }
+
+  /** Interrupts a nonterminal run and forwards run.abort; returns false if already terminal. */
   async abortRun(runId: string): Promise<boolean> {
-    const run = await this.runs.getById(runId);
-    if (!run || run.status === 'completed' || run.status === 'failed') return false;
-    if (!run.workerId) return false;
+    const run = this.journal
+      ? this.journal.TxInterrupt(runId, 'interrupted', this.now())
+      : await this.runs.getById(runId);
+    if (!run || (!this.journal && isTerminalRun(run.status))) return false;
+    if (!this.journal) {
+      run.status = 'failed';
+      run.terminalReason = 'interrupted';
+      run.completedAt = this.now();
+      await this.runs.save(run);
+      await this.queue.delete(run.id);
+    }
+    this.onInterrupted?.(run);
+    if (!run.workerId) return true;
     this.sender.sendToWorker(run.workerId, {
       kind: 'notification',
       event: 'run.abort',
@@ -205,35 +283,113 @@ export class DispatchService {
    * Delivers everything queued for a session, coalescing all queued turns
    * into a single dispatch with the merged prompt. Returns the merge count.
    */
-  async flushSessionQueue(sessionId: string, workerId: string): Promise<number> {
-    const queued = await this.queue.listBySession(sessionId);
-    if (queued.length === 0) return 0;
-    const merged = mergeQueued(queued);
-    this.sender.sendToWorker(workerId, {
-      kind: 'notification',
-      event: WORKER_CHANNEL_EVENTS.turnDispatch,
-      payload: merged,
-    });
-    await this.queue.deleteBySession(sessionId);
-    for (const item of queued) {
+  async flushSessionQueue(sessionId: string, workerId: string, recover = true): Promise<number> {
+    const queued: QueuedDispatch[] = [];
+    for (const item of await this.queue.listBySession(sessionId)) {
       const run = await this.runs.getById(item.envelope.runId);
-      if (run && run.status === 'queued') {
-        run.status = 'dispatched';
-        run.workerId = workerId;
-        await this.runs.save(run);
+      if (!run || isTerminalRun(run.status)) {
+        await this.queue.delete(item.id);
+        continue;
+      }
+      if (run.status === 'queued') queued.push(item);
+      else if (recover && run.status === 'dispatched' && run.workerId === workerId) {
+        const space = await this.spaces.getById(item.envelope.spaceId);
+        const session = await this.sessions.getById(sessionId);
+        if (space && session?.status !== 'closed')
+          this.sender.sendToWorker(workerId, {
+            kind: 'notification',
+            event: WORKER_CHANNEL_EVENTS.turnDispatch,
+            payload: {
+              ...item.envelope,
+              model: this.resolveSpaceModel(space),
+              mediaCredentials: session?.channelId
+                ? this.mediaCredentials?.(session.channelId)
+                : undefined,
+            },
+          });
       }
     }
+    if (queued.length === 0) return 0;
+    const first = queued[0];
+    const space = await this.spaces.getById(first.envelope.spaceId);
+    if (!space) return 0;
+    const merged = { ...mergeQueued(queued), model: this.resolveSpaceModel(space) };
+    const { model: _model, ...storedMerged } = merged;
+    let primary: Run | undefined;
+    if (this.committer) {
+      if (
+        !this.committer.TxMergeQueue(
+          queued,
+          storedMerged,
+          workerId,
+          this.now() + this.leaseDurationMs,
+          this.now()
+        )
+      )
+        return 0;
+      primary = await this.runs.getById(first.id);
+    } else {
+      await this.queue.enqueue({ ...first, envelope: storedMerged });
+      const authors = new Set<string>();
+      for (const item of queued) {
+        const run = await this.runs.getById(item.envelope.runId);
+        if (!run || isTerminalRun(run.status)) {
+          await this.queue.delete(item.id);
+          continue;
+        }
+        for (const id of run.initiatorIds ?? []) authors.add(id);
+        run.status = item === first ? 'dispatched' : 'merged';
+        run.leaseExpiresAt = this.now() + this.leaseDurationMs;
+        run.workerId = workerId;
+        if (item !== first) {
+          run.mergedIntoRunId = first.envelope.runId;
+          run.completedAt = this.now();
+        }
+        await this.runs.save(run);
+        if (item !== first) await this.queue.delete(item.id);
+      }
+      primary = await this.runs.getById(first.envelope.runId);
+      if (primary) {
+        primary.initiatorIds = [...authors];
+        primary.mergedSourceIds = merged.mergedSourceIds;
+        await this.runs.save(primary);
+      }
+    }
+    const session = await this.sessions.getById(sessionId);
+    if (primary && !isTerminalRun(primary.status))
+      this.sender.sendToWorker(workerId, {
+        kind: 'notification',
+        event: WORKER_CHANNEL_EVENTS.turnDispatch,
+        payload: {
+          ...merged,
+          mediaCredentials: session?.channelId
+            ? this.mediaCredentials?.(session.channelId)
+            : undefined,
+        },
+      });
     return queued.length;
   }
 
+  async flushConnectedQueues(): Promise<void> {
+    for (const worker of await this.workers.list()) {
+      if (worker.status !== 'offline' && this.sender.isConnected(worker.id))
+        await this.flushWorkerQueues(worker.id, false);
+    }
+  }
+
   /** Delivers queues for every session pinned to a (re)connected worker. */
-  async flushWorkerQueues(workerId: string): Promise<number> {
+  async flushWorkerQueues(workerId: string, recover = true): Promise<number> {
     const sessionIds = await this.queue.listSessionIds();
     let flushed = 0;
     for (const sessionId of sessionIds) {
       const session = await this.sessions.getById(sessionId);
       if (session?.boundWorkerId !== workerId) continue;
-      flushed += await this.flushSessionQueue(sessionId, workerId);
+      try {
+        flushed += await this.flushSessionQueue(sessionId, workerId, recover);
+      } catch (error) {
+        // A missing model or stale binding in one space must not block all workers.
+        console.error(`Queue delivery failed for session ${sessionId}`, error);
+      }
     }
     return flushed;
   }
@@ -247,13 +403,14 @@ export class DispatchService {
       if (!workerId) throw validation(`Space ${space.id} has no bound worker`);
     } else {
       // Binding is placement, not capacity: any online, enrolled, tag-matched
-      // worker will do (least loaded preferred); the turn queues at the worker.
+      // worker is eligible; the turn queues at the worker.
       workerId = await this.pickSessionWorker(space);
       if (!workerId) throw validation(`No online worker enrolled for space ${space.id}`);
     }
+    const expected = { ...session };
     session.boundWorkerId = workerId;
     session.lastActiveAt = Date.now();
-    await this.sessions.save(session);
+    await this.sessions.save(session, expected);
     return workerId;
   }
 
@@ -264,8 +421,7 @@ export class DispatchService {
         space.requiredTags.every((tag) => worker.tags.includes(tag)) &&
         this.sender.isConnected(worker.id)
     );
-    return candidates.sort((a, b) => a.activeSlots / a.maxSlots - b.activeSlots / b.maxSlots)[0]
-      ?.id;
+    return candidates.length ? candidates[randomInt(candidates.length)].id : undefined;
   }
 
   private async eligibleWorkers(space: Space, requiredTags: string[]): Promise<WorkerNode[]> {
@@ -273,7 +429,7 @@ export class DispatchService {
       (worker) =>
         worker.status !== 'offline' &&
         worker.activeSlots < worker.maxSlots &&
-        requiredTags.every((tag) => worker.tags.includes(tag)) &&
+        [...space.requiredTags, ...requiredTags].every((tag) => worker.tags.includes(tag)) &&
         this.sender.isConnected(worker.id)
     );
   }
@@ -310,23 +466,24 @@ export class DispatchService {
 }
 
 function composeSystemPromptContribution(space: Space): string {
-  const parts: string[] = [];
-  parts.push(
-    `You are chatting in space "${space.name}". Its default repository is ${space.repoUrl} (branch ${space.defaultBranch}) — just a hint; nothing is cloned for you. If the task involves code, clone or worktree the repo yourself; if it doesn't, ignore this.`
-  );
-  if (space.longTermMemory.trim()) {
-    parts.push(`Space long-term memory:\n${space.longTermMemory.trim()}`);
-  }
-  return parts.join('\n\n');
+  return `You are Meepo, a general-purpose assistant in space ${JSON.stringify(space.name)}. ${space.description ?? ''}`;
 }
 
-function mergeQueued(queued: QueuedDispatch[]): TurnDispatchEnvelope {
-  const latest = queued[queued.length - 1].envelope;
+function mergeQueued(queued: QueuedDispatch[]): Omit<TurnDispatchEnvelope, 'model'> {
+  const latest = queued[0].envelope;
   if (queued.length === 1) return latest;
   const mergedPrompt = queued
     .map((item, index) => `[queued message ${index + 1}]\n${item.envelope.prompt}`)
     .join('\n\n');
-  return { ...latest, prompt: mergedPrompt, delivery: 'wait' };
+  return {
+    ...latest,
+    prompt: mergedPrompt,
+    images: queued.flatMap((q) => q.envelope.images ?? []),
+    delivery: 'wait',
+    mergedSourceIds: queued.flatMap(
+      (q) => q.envelope.mergedSourceIds ?? [q.envelope.turnRef?.sourceId ?? q.id]
+    ),
+  };
 }
 
 /** Wraps schedule fires in an origin envelope so the agent knows why it woke. */

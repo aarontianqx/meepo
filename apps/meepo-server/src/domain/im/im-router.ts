@@ -1,5 +1,7 @@
+import type { ImageReference } from '@meepo/protocol';
 /** IM-agnostic inbound message, normalized by the provider transport. */
 export interface InboundMessage {
+  images?: ImageReference[];
   messageId: string;
   chatId: string;
   chatType: 'p2p' | 'group';
@@ -29,6 +31,7 @@ export type InboundDecision =
     };
 
 export interface InboundContext {
+  channelId?: string;
   botOpenId: string;
   spaceIdForChat(chatId: string): string | undefined;
   /** Fallback space for private chats */
@@ -37,8 +40,8 @@ export interface InboundContext {
   seenMessage(messageId: string): boolean;
 }
 
-export function windowIdOf(chatId: string, subId: string): string {
-  return `feishu:${chatId}:${subId}`;
+export function windowIdOf(chatId: string, subId: string, channelId = 'feishu'): string {
+  return `${channelId}:${chatId}:${subId}`;
 }
 
 /** Sentinel sub_id of a group's main-stream window (its main session lives here). */
@@ -70,7 +73,7 @@ export function decideInbound(msg: InboundMessage, ctx: InboundContext): Inbound
   if (msg.chatType === 'p2p') {
     return {
       action: 'dispatch',
-      windowId: windowIdOf(msg.chatId, msg.senderOpenId),
+      windowId: windowIdOf(msg.chatId, msg.senderOpenId, ctx.channelId),
       threadRef: { kind: 'thread', threadId: msg.senderOpenId },
       sessionKind: 'main',
       spaceId,
@@ -83,7 +86,7 @@ export function decideInbound(msg: InboundMessage, ctx: InboundContext): Inbound
   }
 
   if (msg.threadId) {
-    const windowId = windowIdOf(msg.chatId, msg.threadId);
+    const windowId = windowIdOf(msg.chatId, msg.threadId, ctx.channelId);
     const engaged = ctx.sessionExistsForWindow(windowId);
     if (mentionsBot || engaged) {
       return {
@@ -103,7 +106,7 @@ export function decideInbound(msg: InboundMessage, ctx: InboundContext): Inbound
     if (mentionsBot) {
       return {
         action: 'dispatch',
-        windowId: windowIdOf(msg.chatId, GROUP_MAIN_SUB_ID),
+        windowId: windowIdOf(msg.chatId, GROUP_MAIN_SUB_ID, ctx.channelId),
         threadRef: { kind: 'thread', threadId: GROUP_MAIN_SUB_ID },
         sessionKind: 'main',
         spaceId,
@@ -116,7 +119,7 @@ export function decideInbound(msg: InboundMessage, ctx: InboundContext): Inbound
   if (mentionsBot) {
     return {
       action: 'dispatch',
-      windowId: windowIdOf(msg.chatId, msg.messageId),
+      windowId: windowIdOf(msg.chatId, msg.messageId, ctx.channelId),
       threadRef: { kind: 'prewarm' },
       sessionKind: 'thread',
       spaceId,

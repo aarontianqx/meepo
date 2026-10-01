@@ -5,18 +5,29 @@ inheritedBy:
   languages: ['javascript', 'typescript']
 
 tasks:
+  build:
+    command: 'pnpm run build'
+    deps:
+      - '^:build'
+    inputs:
+      - 'src/**/*'
+      - 'tsconfig.json'
+      - 'package.json'
+    outputs:
+      - 'dist'
+
   format-check:
-    command: 'prettier --check .'
+    command: 'prettier --check . --ignore-path $workspaceRoot/.prettierignore'
     inputs:
       - '**/*'
 
   format:
-    command: 'prettier --write .'
+    command: 'prettier --write . --ignore-path $workspaceRoot/.prettierignore'
     inputs:
       - '**/*'
 
   lint:
-    script: 'prettier --check . && eslint --no-error-on-unmatched-pattern .'
+    script: 'prettier --check . --ignore-path $workspaceRoot/.prettierignore && eslint --no-error-on-unmatched-pattern .'
     inputs:
       - '**/*'
 

@@ -125,12 +125,11 @@ function CreateSpaceForm({ onCreated }: { onCreated: (space: Space) => void }): 
             <input value={name} onChange={(e) => setName(e.target.value)} required />
           </label>
           <label>
-            <span>Repo URL *</span>
+            <span>Repo URL (optional)</span>
             <input
               value={repoUrl}
               onChange={(e) => setRepoUrl(e.target.value)}
               placeholder='git@github.com:org/repo.git'
-              required
             />
           </label>
           <label>

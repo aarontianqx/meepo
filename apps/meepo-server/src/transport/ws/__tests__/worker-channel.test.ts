@@ -16,7 +16,10 @@ import { MemorySessionEventRepository } from '../../../store/memory/session-even
 import { MemorySessionRepository } from '../../../store/memory/session-memory.js';
 import { MemorySpaceRepository } from '../../../store/memory/space-memory.js';
 import { MemoryTicketRepository } from '../../../store/memory/ticket-memory.js';
-import { WorkerChannelHandler } from '../worker-channel.js';
+import { MemoryService } from '../../../domain/memory/memory-service.js';
+import { SqliteMemoryRepository } from '../../../store/sqlite/memory-sqlite.js';
+import { openDatabase } from '../../../store/sqlite/database.js';
+import { WorkerChannelHandler, type WorkerChannelDeps } from '../worker-channel.js';
 
 const NOW = Date.UTC(2026, 8, 25, 12, 0, 0);
 
@@ -71,6 +74,7 @@ function makeSession(id: string, spaceId: string): Session {
     id,
     spaceId,
     kind: 'thread',
+    boundWorkerId: 'w1',
     chatId: 'chat',
     threadId: 'thread',
     status: 'active',
@@ -80,6 +84,7 @@ function makeSession(id: string, spaceId: string): Session {
 }
 
 describe('WorkerChannelHandler scheduling tools', () => {
+  let deps: WorkerChannelDeps;
   let socket: FakeSocket;
   let handler: WorkerChannelHandler;
   let tickets: MemoryTicketRepository;
@@ -105,19 +110,89 @@ describe('WorkerChannelHandler scheduling tools', () => {
       new MemoryRunRepository()
     );
 
-    handler = new WorkerChannelHandler({
-      workerService: {} as WorkerService,
+    dispatchTicket = vi.fn().mockResolvedValue({ dispatched: true, queued: false });
+    deps = {
+      dispatchService: { dispatchTicket } as unknown as DispatchService,
+      workerService: {
+        register: async () => ({ workerId: 'w1', spaceIds: ['sp1'], heartbeatIntervalSeconds: 15 }),
+        getWorker: async () => ({ id: 'w1', spaceIds: ['sp1'] }),
+      } as unknown as WorkerService,
       schedulerService,
       sessionService,
       ticketService,
       transcriptService,
       streamProcessor,
-    });
-    dispatchTicket = vi.fn().mockResolvedValue({ dispatched: true, queued: false });
-    handler.setDispatchService({ dispatchTicket } as unknown as DispatchService);
+    };
+    handler = new WorkerChannelHandler(deps);
 
     socket = new FakeSocket();
     handler.handleConnection(socket as never);
+    socket.receive({ kind: 'request', id: 'register', method: 'worker.register', params: {} });
+    await socket.nextResponse();
+  });
+
+  it('attributes schedules and memory to the persisted initiator, with agent fallback', async () => {
+    const db = openDatabase(':memory:');
+    try {
+      const runs = new MemoryRunRepository();
+      deps.runRepository = runs;
+      deps.memoryService = new MemoryService(new SqliteMemoryRepository(db));
+      for (const initiatorIds of [['user-1', 'user-2'], []]) {
+        await runs.save({
+          id: 'r1',
+          work: { kind: 'turn', turnRef: { sessionId: 'se1', sourceId: 'm' } },
+          attempt: 1,
+          status: 'running',
+          workerId: 'w1',
+          createdAt: Date.now(),
+          leaseExpiresAt: Date.now() + 60000,
+          initiatorIds,
+        });
+        socket.receive({
+          kind: 'request',
+          id: 'schedule',
+          method: 'cron.create',
+          params: {
+            sessionId: 'se1',
+            runId: 'r1',
+            prompt: 'attribution',
+            timing: { kind: 'at', at: Date.now() + 60000 },
+            createdByUserId: 'forged',
+          },
+        });
+        const response = await socket.nextResponse();
+        expect(response.error).toBeUndefined();
+        const saved = await schedules.getById((response.result as ScheduleView).id);
+        expect(saved?.createdByUserId).toBe(initiatorIds[0] ?? 'agent');
+        const path = initiatorIds.length ? 'user' : 'machine';
+        socket.receive({
+          kind: 'request',
+          id: 'memory',
+          method: 'memory.call',
+          params: {
+            sessionId: 'se1',
+            runId: 'r1',
+            operation: 'write',
+            input: {
+              path,
+              description: 'attribution',
+              content: 'value',
+              expected_revision: 0,
+              authorId: 'forged',
+            },
+          },
+        });
+        const memory = await socket.nextResponse();
+        expect(memory.error).toBeUndefined();
+        expect(deps.memoryService.read('sp1', path).updatedBy).toEqual({
+          kind: 'agent',
+          sessionId: 'se1',
+          authorId: initiatorIds[0],
+        });
+      }
+    } finally {
+      db.close();
+    }
   });
 
   describe('ticket.create', () => {

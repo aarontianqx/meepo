@@ -1,6 +1,7 @@
 import type { Run } from '@meepo/core';
 
 export interface RunRepository {
+  list(): Promise<Run[]>;
   save(run: Run): Promise<void>;
   getById(id: string): Promise<Run | undefined>;
   listByTicket(ticketId: string): Promise<Run[]>;

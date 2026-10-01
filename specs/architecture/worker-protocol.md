@@ -1,35 +1,54 @@
 # Worker Protocol
 
-The wire contract between `meepo-server` and `meepo-worker`: one persistent outbound WebSocket per worker, JSON frames. This document defines the reliability semantics; the exhaustive field-level RPC inventory lives in `packages/protocol/` and is completed in W0.
+Protocol version **2** uses one outbound WebSocket per worker at `/ws/worker`. Shared TypeScript contracts live in `packages/protocol`. Frames are JSON: request `{kind:"request",id,method,params}`, response `{kind:"response",id,result? ,error?}`, notification `{kind:"notification",event,payload}`. Errors contain `code` and `message`.
 
-## 1. Connection Lifecycle
+## Connection and ownership
 
-- **`register`**: `{ workerId, token, protocolVersion, tags, maxSlots }`. The server validates the token (SHA-256 match), **binds the token to the presented `workerId` on first use** (later mismatches are rejected), and rejects a `protocolVersion` mismatch with an explicit error — this is a guard, not negotiation.
-- **`workerId`**: generated at first boot, persisted in the worker's data directory, stable across restarts.
-- **Heartbeats**: every 15s (interval advertised by the server at registration), carrying `activeRunIds`, slot utilization, and CPU/memory stats. Each heartbeat **renews the execution lease** of the runs it carries in `activeRunIds` (lease = 3 intervals, 45s at the default, server clock authoritative).
-- **Connection loss**: the worker starts no new runs and suspends active ones past the lease window (no new model/tool calls; processes stay alive).
-- **Reconnect**: the worker sends `run.reconcile { activeRunIds, recentlyFinishedRunIds }`. The server fails runs it has no record of (`failed(worker_lost)`), replies which of the worker's active runs are still valid — **invalidated runs must be killed locally** — and flushes queued dispatches.
+Registration rejects protocol mismatches. The server hashes the enrollment token, binds it to the worker ID on first use and rejects both a token used with another ID and another token claiming an existing ID. The worker ID persists in its data directory. Token authorization is rechecked on RPC calls; membership of a worker's served spaces derives exclusively from its enrollment.
 
-## 2. Channels (server → worker)
+The worker performs registration, reconciliation, buffered-event replay and `worker.ready`. The ready handler requests a queue flush, but the current server also dispatches through its periodic sweep based on connection/online status; it does not yet enforce a global pre-ready dispatch barrier. Worker execution checks wait for local reconciliation readiness and event ACKs before model/tool progression. Consolidating the server-side readiness gate remains pending. A replaced connection cannot impersonate the current connection. Heartbeats list all owned active/queued runs; only those listed renew their lease, for three heartbeat intervals (45 seconds by default, measured by the server). Expired or terminal runs cannot renew.
 
-| Envelope | Carries | Notes |
-| --- | --- | --- |
-| `turn.dispatch` | Executable work for a session: user turns, schedule fires, console injections, ticket receipts | Delivery semantics: `urgent` / `wait` / `if_idle` |
-| `ticket.dispatch` | A ticket attempt: objective bundle, injected credentials (model, channel), `MEEPO_IDEMPOTENCY_KEY` | Credentials resolve from server-side references at delivery |
-| `context.append` | History-only writes that need no response (e.g. the post-rebind migration `system_note`) | Applied between turns, never mid-turn |
-| `abort` | Cancel a run: stop button, rebind, `/new`, `urgent` | Running tool child processes are cancelled |
-| `session.closed` | The session was closed (`/new`, space rebind of thread sessions) | Worker reclaims the session's local resources |
+On disconnection, the worker waits before its next model/tool call and buffers stream events. An already executing tool may finish locally. After the lease window it aborts local work; on reconnect it also aborts every invalidated run. Unknown-outcome tools remain unknown in reconstructed history, with a matching synthetic error result; they are never automatically repeated as part of recovery.
 
-## 3. Events (worker → server)
+## Worker → server RPC inventory
 
-- Every event carries **`(runId, clientSeq)`** — a per-run monotonic sequence starting at 1.
-- The server **dedups on `(runId, clientSeq)`** and ACKs only after persistence. The worker buffers unacknowledged events; on reconnect the server hands back `lastConfirmedClientSeq` and the worker replays the buffer — every event lands exactly once.
-- Terminal events (`run_completed` / `run_failed`) are retried until ACKed.
-- Event types: `run_started`, `text_delta`, `thinking_delta`, `tool_execution_start` / `_update` / `_end`, `assistant_text`, `tool_call`, `tool_result`, `run_completed`, `run_failed`, `usage`.
+| Method             | Parameters                                                                                                           | Result / checks                                                                             |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| `worker.register`  | `protocolVersion`, `workerId`, `enrollmentToken`, `hostname`, `os`, `arch`, `tags[]`, `capacity.maxSlots`, `version` | `{workerId,spaceIds[],heartbeatIntervalSeconds}`                                            |
+| `worker.heartbeat` | `workerId`, `timestamp`, `capacity:{maxSlots,activeSlots,cpuUsage?,memoryUsage?}`, `activeRunIds[]`                  | `{accepted:true}`; renews only listed valid runs                                            |
+| `run.reconcile`    | `activeRunIds[]`, `recentlyFinishedRunIds[]`                                                                         | `{validRunIds[],invalidRunIds[],lastConfirmedClientSeq:{[runId]:seq}}`                      |
+| `worker.ready`     | `{}`                                                                                                                 | `{accepted:true}`; queued delivery follows reconciliation                                   |
+| `stream.append`    | Worker event plus `runId`, `clientSeq`                                                                               | `{accepted,lastConfirmedClientSeq,duplicate?,reason?}` after commit                         |
+| `session.snapshot` | `sessionId`, `beforeSeq?`, legacy `beforeTimestamp?`                                                                 | `{sessionId,version,messages[],events[]}`; requires worker affinity and space scope         |
+| `prompt.prepare`   | `sessionId` or `ticketId`                                                                                            | `{base,memoryMap,memoryMapVersion}`; session identity/preset stays frozen                   |
+| `prompt.record`    | `sessionId`, `snapshot`                                                                                              | `{recorded:true}`; persists the worker-rendered snapshot                                    |
+| `memory.call`      | `runId`, `sessionId` or `ticketId`, `operation`, `input`                                                             | Memory contract result; operations `list/search/read/write/delete/map`                      |
+| `cron.create`      | `runId`, `sessionId`, `prompt`, `timing`                                                                             | `ScheduleView`; creates a resume-session schedule                                           |
+| `cron.list`        | `sessionId`                                                                                                          | Active `ScheduleView[]` for that session                                                    |
+| `cron.delete`      | `runId`, `sessionId`, `scheduleId`                                                                                   | `{deleted:true}`; schedule must belong to the session                                       |
+| `ticket.create`    | `runId`, `sessionId`, `objective`, `contextSummary?`, `requiredTags?`, `timing?`                                     | `{kind:"ticket",ticket:{id,objective,status}}` or `{kind:"schedule",schedule:ScheduleView}` |
 
-## 4. Reliability Invariants
+Memory calls and schedule/ticket mutations require an unexpired running `runId` owned by the caller and matching the session/ticket. Resource identifiers never grant access by themselves. Timing is `{kind:"at",at:<epoch-ms>}` or `{kind:"cron",expression,timezone?}`. The old unacknowledged upstream `stream` notification is rejected; event persistence uses `stream.append`.
 
-1. At most one worker owns a ticket attempt at any time (lease + reconcile fencing).
-2. Late results from expired attempts are rejected (logged only).
-3. A dispatch is durable once its `run_started` event is persisted; everything before that point is re-dispatchable.
-4. `protocolVersion` is a single integer, bumped on every breaking change; the server rejects mismatches at `register`.
+## Server → worker notifications
+
+| Event             | Payload                                                                                                                                                                                                                             | Semantics                                                                                                                  |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `turn.dispatch`   | `runId`, `sessionId`, `spaceId`, `sessionKind`, `turnRef:{sessionId,sourceId}`, `prompt`, `source`, `delivery`, `model`, `currentTime`, `snapshotBeforeSeq?`, `mergedSourceIds?`, `images?`, `mediaCredentials?`, `timeoutSeconds?` | Executable input; delivery is `urgent/wait/if_idle`. Stored queue envelopes exclude credentials; they resolve at delivery. |
+| `ticket.dispatch` | `runId`, `ticketId`, `attempt`, `spaceId`, `objective`, `contextSummary?`, `source`, `model`, `currentTime`, `timeoutSeconds?`                                                                                                      | Fresh attempt and directory; tools receive `MEEPO_IDEMPOTENCY_KEY=<ticketId>-<attempt>`.                                   |
+| `context.append`  | `sessionId`, `events[]`                                                                                                                                                                                                             | History-only notes, applied between turns. Executable input never uses this channel.                                       |
+| `run.abort`       | `runId`, `reason?`                                                                                                                                                                                                                  | Abort active tool/model or remove queued execution.                                                                        |
+| `session.closed`  | `sessionId`                                                                                                                                                                                                                         | Close/rebind detaches local resources; main-session rebind preserves transcript and does not detach thread sessions.       |
+| `run.steer`       | `runId`, `message`                                                                                                                                                                                                                  | Legacy explicit steering hook; reserved urgent delivery uses abort plus a new run instead.                                 |
+
+`model` carries `{provider,baseUrl,apiKey,model,thinkingLevel?,imageInput?}`. Image references carry `{messageId,fileKey,mimeType?,sizeBytes?}`; channel credentials are transient dispatch data. Source discriminates `user_message`, `schedule`, `webhook` or `system`.
+
+## Events and durability
+
+Each event has a strictly increasing per-run `clientSeq`, starting at 1. Event types are `run_started`, `text_delta`, `thinking_delta`, `tool_execution_start/update/end`, `assistant_text`, `run_completed`, `run_failed`, `run_merged`, `run_dropped`. Completion can include model usage and a result summary; failure includes error/code; merge references the surviving run.
+
+The journal maps tool start/end to canonical `tool_call/tool_result` with preserved `toolCallId`. Deltas are acknowledged but not persisted in the canonical event stream. Session events add their own monotonically increasing `seq`; ticket execution detail remains in the run stream and only a receipt reaches the origin session. Usage is persisted on the run.
+
+An ACK confirms the atomic commit of event, transcript and run/ticket projection. Duplicate `(runId,clientSeq)` returns the existing ACK, including lost terminal ACKs. Gaps, expired leases, wrong worker ownership and new events on terminal runs are rejected. A worker flushes tool-call ACKs before executing tools, and tool-result ACKs before progressing to another model/tool call. Unacknowledged buffered events replay on reconnect.
+
+Before a committed `run_started`, delivery may replay under the same run ID. Afterwards a worker process restart does not blindly repeat that turn: the server marks a missing running turn `worker_lost`; ticket lease recovery applies its explicit safe-retry/manual-review policy. Exactly-once event recording does not claim exactly-once external side effects; uncertain side effects require manual review or explicitly idempotent work.

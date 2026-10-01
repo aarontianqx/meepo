@@ -10,7 +10,7 @@ import {
   type TurnDispatchEnvelope,
   type TranscriptMessage,
 } from '@meepo/protocol';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import {
   SessionManager,
@@ -112,17 +112,17 @@ function envelope(partial: Partial<TurnDispatchEnvelope> = {}): TurnDispatchEnve
 }
 
 describe('buildSessionSystemPrompt', () => {
-  it('contains the working directory, worktree rule, contribution, and cron note', () => {
+  it('contains the working directory without mandatory worktree rules, contribution, and cron note', () => {
     const prompt = buildSessionSystemPrompt('/tmp/sess-1', 'Space memory: prefers pnpm.');
     expect(prompt).toContain('/tmp/sess-1');
-    expect(prompt).toContain('git worktree');
+    expect(prompt).not.toContain('git worktree');
     expect(prompt).toContain('Space memory: prefers pnpm.');
     expect(prompt).toContain('CronCreate');
   });
 
   it('omits the contribution when absent', () => {
     const prompt = buildSessionSystemPrompt('/tmp/sess-1');
-    expect(prompt).toContain('git worktree');
+    expect(prompt).not.toContain('git worktree');
     expect(prompt).not.toContain('Space memory');
   });
 });
@@ -160,6 +160,68 @@ describe('SessionManager runner creation', () => {
     return { manager, captured };
   }
 
+  it('cancels a dispatch while the cold-start snapshot is still loading', async () => {
+    let release!: (value: unknown) => void;
+    const snapshot = new Promise((resolve) => {
+      release = resolve;
+    });
+    const prompt = vi.fn(async () => {});
+    const { manager } = setup({
+      rpc: () => snapshot,
+      createAgent: () => ({
+        subscribe: () => () => {},
+        prompt,
+        steer: () => {},
+        abort: () => {},
+        state: { messages: [] },
+      }),
+    });
+    const pending = manager.handleDispatch(envelope({ sessionId: 'cancel-start' }));
+    await new Promise((resolve) => setImmediate(resolve));
+    manager.handleAbort({ runId: 'run-1' });
+    release({ messages: [] });
+    await expect(pending).rejects.toThrow('cancelled during startup');
+    expect(prompt).not.toHaveBeenCalled();
+    await manager.shutdown();
+  });
+
+  it('does not replace a closing runner until its actual prompt settles', async () => {
+    vi.useFakeTimers();
+    try {
+      let finish!: () => void;
+      const release = vi.fn();
+      const { manager, captured } = setup({
+        ensureSessionDir: async () => '/tmp/close-test',
+        acquireTools: () => ({ tools: [], release }),
+        createAgent: (options) => {
+          captured.push(options);
+          return {
+            subscribe: () => () => {},
+            prompt: () =>
+              new Promise<void>((resolve) => {
+                finish = resolve;
+              }),
+            steer: () => {},
+            abort: () => {},
+            state: { messages: [] },
+          };
+        },
+      });
+      await manager.handleDispatch(envelope({ sessionId: 'close-test' }));
+      const closing = manager.closeSession('close-test');
+      await vi.advanceTimersByTimeAsync(6000);
+      expect(release).not.toHaveBeenCalled();
+      expect(manager.runnerForSession('close-test')).toBeDefined();
+      finish();
+      await vi.advanceTimersByTimeAsync(25);
+      await closing;
+      expect(release).toHaveBeenCalledOnce();
+      expect(manager.runnerForSession('close-test')).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('creates a neutral per-session directory and equips coding + cron + ticket tools', async () => {
     const { manager, captured } = setup();
 
@@ -170,7 +232,7 @@ describe('SessionManager runner creation', () => {
     expect(captured).toHaveLength(1);
     const initial = captured[0].initialState;
     expect(initial?.systemPrompt).toContain(workDir);
-    expect(initial?.systemPrompt).toContain('git worktree');
+    expect(initial?.systemPrompt).not.toContain('git worktree');
     const toolNames = (initial?.tools ?? []).map((tool) => tool.name);
     expect(toolNames).toEqual(expect.arrayContaining(['read', 'bash', 'edit', 'write']));
     expect(toolNames).toEqual(expect.arrayContaining(['CronCreate', 'CronList', 'CronDelete']));

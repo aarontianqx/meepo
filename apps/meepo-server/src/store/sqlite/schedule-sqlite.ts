@@ -1,3 +1,4 @@
+import { validation } from '../../domain/errors.js';
 import type { Schedule, ScheduleAction, ScheduleTiming } from '@meepo/core';
 import type { Database } from 'better-sqlite3';
 
@@ -31,22 +32,32 @@ export class SqliteScheduleRepository implements ScheduleRepository {
   constructor(private readonly db: Database) {}
 
   async save(schedule: Schedule): Promise<void> {
-    this.db
-      .prepare(
-        `INSERT OR REPLACE INTO schedules (
+    this.db.transaction(() => {
+      if (schedule.status === 'active' && schedule.action.kind === 'resume_session') {
+        const count = this.db
+          .prepare(
+            "SELECT COUNT(*) AS n FROM schedules WHERE id<>? AND status='active' AND json_extract(action,'$.kind')='resume_session' AND json_extract(action,'$.sessionId')=?"
+          )
+          .get(schedule.id, schedule.action.sessionId) as { n: number };
+        if (count.n >= 50) throw validation('Session already has 50 active schedules');
+      }
+      this.db
+        .prepare(
+          `INSERT OR REPLACE INTO schedules (
           id, space_id, timing, action, status, created_by_user_id, created_at, last_fired_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-      )
-      .run(
-        schedule.id,
-        schedule.spaceId,
-        JSON.stringify(schedule.timing),
-        JSON.stringify(schedule.action),
-        schedule.status,
-        schedule.createdByUserId,
-        schedule.createdAt,
-        schedule.lastFiredAt ?? null
-      );
+        )
+        .run(
+          schedule.id,
+          schedule.spaceId,
+          JSON.stringify(schedule.timing),
+          JSON.stringify(schedule.action),
+          schedule.status,
+          schedule.createdByUserId,
+          schedule.createdAt,
+          schedule.lastFiredAt ?? null
+        );
+    })();
   }
 
   async getById(id: string): Promise<Schedule | undefined> {

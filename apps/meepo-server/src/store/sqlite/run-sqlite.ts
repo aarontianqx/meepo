@@ -3,7 +3,7 @@ import type { Database } from 'better-sqlite3';
 
 import type { RunRepository } from '../../domain/runs/run-repository.js';
 
-interface RunRow {
+export interface RunRow {
   id: string;
   work: string;
   attempt: number;
@@ -12,11 +12,25 @@ interface RunRow {
   created_at: number;
   started_at: number | null;
   completed_at: number | null;
+  lease_expires_at: number | null;
+  terminal_reason: string | null;
+  last_client_seq: number;
+  usage: string | null;
+  initiator_ids: string;
+  merged_source_ids: string;
+  merged_into_run_id: string | null;
 }
 
-function rowToRun(row: RunRow): Run {
+export function rowToRun(row: RunRow): Run {
   return {
     id: row.id,
+    leaseExpiresAt: row.lease_expires_at ?? undefined,
+    terminalReason: row.terminal_reason ?? undefined,
+    lastClientSeq: row.last_client_seq,
+    usage: row.usage ? (JSON.parse(row.usage) as Run['usage']) : undefined,
+    initiatorIds: JSON.parse(row.initiator_ids) as string[],
+    mergedSourceIds: JSON.parse(row.merged_source_ids) as string[],
+    mergedIntoRunId: row.merged_into_run_id ?? undefined,
     work: JSON.parse(row.work) as Run['work'],
     attempt: row.attempt,
     workerId: row.worker_id ?? undefined,
@@ -33,9 +47,15 @@ export class SqliteRunRepository implements RunRepository {
   async save(run: Run): Promise<void> {
     this.db
       .prepare(
-        `INSERT OR REPLACE INTO runs (
-          id, work, attempt, worker_id, status, created_at, started_at, completed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO runs (
+          id, work, attempt, worker_id, status, created_at, started_at, completed_at, lease_expires_at, terminal_reason, last_client_seq, usage, initiator_ids, merged_source_ids, merged_into_run_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET work=excluded.work, attempt=excluded.attempt, worker_id=excluded.worker_id,
+          status=excluded.status, started_at=excluded.started_at, completed_at=excluded.completed_at,
+          lease_expires_at=excluded.lease_expires_at, terminal_reason=excluded.terminal_reason,
+          last_client_seq=MAX(runs.last_client_seq, excluded.last_client_seq), usage=COALESCE(excluded.usage, runs.usage),
+          initiator_ids=excluded.initiator_ids, merged_source_ids=excluded.merged_source_ids, merged_into_run_id=excluded.merged_into_run_id
+          WHERE runs.status NOT IN ('completed','failed','merged','dropped') OR excluded.status=runs.status`
       )
       .run(
         run.id,
@@ -45,8 +65,21 @@ export class SqliteRunRepository implements RunRepository {
         run.status,
         run.createdAt,
         run.startedAt ?? null,
-        run.completedAt ?? null
+        run.completedAt ?? null,
+        run.leaseExpiresAt ?? null,
+        run.terminalReason ?? null,
+        run.lastClientSeq ?? 0,
+        run.usage ? JSON.stringify(run.usage) : null,
+        JSON.stringify(run.initiatorIds ?? []),
+        JSON.stringify(run.mergedSourceIds ?? []),
+        run.mergedIntoRunId ?? null
       );
+  }
+
+  async list(): Promise<Run[]> {
+    return (this.db.prepare('SELECT * FROM runs ORDER BY created_at').all() as RunRow[]).map(
+      rowToRun
+    );
   }
 
   async getById(id: string): Promise<Run | undefined> {

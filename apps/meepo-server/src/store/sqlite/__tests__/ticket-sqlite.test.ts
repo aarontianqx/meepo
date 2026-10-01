@@ -1,3 +1,5 @@
+import SqliteDatabase from 'better-sqlite3';
+import { migrations, runMigrations } from '../migrations.js';
 import type { Ticket } from '@meepo/core';
 import type { Database } from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -13,6 +15,7 @@ function makeTicket(overrides: Partial<Ticket> = {}): Ticket {
     objective: 'Reproduce and fix',
     requiredTags: [],
     status: 'pending',
+    pendingSince: 1000,
     createdAt: 1000,
     updatedAt: 1000,
     ...overrides,
@@ -30,6 +33,26 @@ describe('SqliteTicketRepository', () => {
 
   afterEach(() => {
     db.close();
+  });
+
+  it('migrates the pending interval from the last transition, not original creation', async () => {
+    db.close();
+    db = new SqliteDatabase(':memory:');
+    runMigrations(
+      db,
+      migrations.filter((m) => m.version <= 16)
+    );
+    db.prepare(
+      `INSERT INTO tickets (id, space_id, title, objective, required_tags, status, created_at, updated_at)
+      VALUES ('legacy', 'space-1', 'retry', 'test', '[]', 'pending', 100, 90000000)`
+    ).run();
+    runMigrations(db);
+    expect(await new SqliteTicketRepository(db).getById('legacy')).toMatchObject({
+      createdAt: 100,
+      updatedAt: 90000000,
+      pendingSince: 90000000,
+    });
+    expect(db.pragma('user_version', { simple: true })).toBe(17);
   });
 
   it('saves and retrieves a ticket by id', async () => {

@@ -3,7 +3,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Run, Ticket } from '@meepo/core';
 import type { WorkerStreamEvent } from '@meepo/protocol';
 
-import { StreamProcessor } from '../stream-processor.js';
+import {
+  StreamProcessor,
+  type StreamRenderHook,
+  type TicketResultNotifier,
+} from '../stream-processor.js';
 import { TicketService } from '../../tickets/ticket-service.js';
 import { TranscriptService } from '../transcript-service.js';
 import { MemoryRunRepository } from '../../../store/memory/run-memory.js';
@@ -35,6 +39,7 @@ function makeTicket(id: string, spaceId: string, workerId: string): Ticket {
     objective: 'do it',
     requiredTags: [],
     status: 'running',
+    pendingSince: 0,
     assignedWorkerId: workerId,
     createdAt: 0,
     updatedAt: 0,
@@ -56,6 +61,8 @@ describe('StreamProcessor', () => {
   let processor: StreamProcessor;
   let tickets: MemoryTicketRepository;
   let runs: MemoryRunRepository;
+  let render: StreamRenderHook | undefined;
+  let notify: TicketResultNotifier | undefined;
 
   beforeEach(async () => {
     events = new MemorySessionEventRepository();
@@ -65,11 +72,24 @@ describe('StreamProcessor', () => {
     runs = new MemoryRunRepository();
     await spaces.save(makeSpace('sp1'));
     const transcripts = new TranscriptService(events, sessions);
-    processor = new StreamProcessor(transcripts, new TicketService(tickets, spaces), runs);
+    render = undefined;
+    notify = undefined;
+    processor = new StreamProcessor(
+      transcripts,
+      new TicketService(tickets, spaces),
+      runs,
+      console,
+      undefined,
+      Date.now,
+      (e, r) => render?.(e, r),
+      (id, text) => notify?.(id, text)
+    );
   });
 
   it('advances the run to running on run_started and appends the transcript on completion', async () => {
-    await runs.save(makeRun('run1', { kind: 'turn', sessionId: 'se1' }));
+    await runs.save(
+      makeRun('run1', { kind: 'turn', turnRef: { sessionId: 'se1', sourceId: 'legacy' } })
+    );
     const send = (event: WorkerStreamEvent) => processor.onEvent(event);
     send({ type: 'run_started', runId: 'run1', workerId: 'w1', sessionId: 'se1' });
     send({ type: 'text_delta', runId: 'run1', delta: 'Hello ' });
@@ -122,9 +142,9 @@ describe('StreamProcessor', () => {
     await runs.save(makeRun('run9', { kind: 'ticket', ticketId: 't9' }));
 
     const notices: { sessionId: string; text: string }[] = [];
-    processor.setTicketResultNotifier((sessionId, text) => {
+    notify = (sessionId, text) => {
       notices.push({ sessionId, text });
-    });
+    };
 
     processor.onEvent({ type: 'run_started', runId: 'run9', workerId: 'w1', ticketId: 't9' });
     processor.onEvent({ type: 'text_delta', runId: 'run9', delta: 'shipped' });
@@ -148,7 +168,9 @@ describe('StreamProcessor', () => {
   });
 
   it('settles a turn from the persisted run even without a tracked ref', async () => {
-    await runs.save(makeRun('run4', { kind: 'turn', sessionId: 'se7' }));
+    await runs.save(
+      makeRun('run4', { kind: 'turn', turnRef: { sessionId: 'se7', sourceId: 'legacy' } })
+    );
     processor.onEvent({ type: 'run_completed', runId: 'run4', resultSummary: 'done' });
 
     await vi.waitFor(async () => {
@@ -161,9 +183,9 @@ describe('StreamProcessor', () => {
 
   it('notifies the render hook with the resolved work ref', async () => {
     const seen: string[] = [];
-    processor.setRenderHook((event, ref) => {
+    render = (event, ref) => {
       seen.push(`${event.type}:${ref.kind}`);
-    });
+    };
     processor.onEvent({ type: 'run_started', runId: 'run5', workerId: 'w1', sessionId: 'se9' });
     processor.onEvent({ type: 'text_delta', runId: 'run5', delta: 'x' });
     await vi.waitFor(() => {

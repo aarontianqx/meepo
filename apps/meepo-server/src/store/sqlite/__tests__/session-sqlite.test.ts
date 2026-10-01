@@ -12,6 +12,7 @@ function makeSession(overrides: Partial<Session> = {}): Session {
     kind: 'main',
     chatId: 'chat-1',
     threadId: 'thread-1',
+    windowId: 'feishu:chat-1:thread-1',
     status: 'active',
     createdAt: 1000,
     lastActiveAt: 1000,
@@ -58,6 +59,21 @@ describe('SqliteSessionRepository', () => {
     const found = await repo.getById('session-1');
     expect(found?.status).toBe('closed');
     expect(await repo.listBySpace('space-1')).toHaveLength(1);
+  });
+
+  it('rejects stale writes after rebind or close instead of restoring obsolete session state', async () => {
+    const original = makeSession({ boundWorkerId: 'worker-1' });
+    await repo.save(original);
+    await repo.save({ ...original, boundWorkerId: 'worker-2' });
+    await expect(
+      repo.save({ ...original, anchorMessageId: 'late-anchor' }, original)
+    ).rejects.toThrow('Session changed');
+    expect((await repo.getById(original.id))?.boundWorkerId).toBe('worker-2');
+    await repo.save({ ...original, status: 'closed', boundWorkerId: undefined });
+    await expect(repo.save({ ...original, lastActiveAt: 2000 }, original)).rejects.toThrow(
+      'Session changed'
+    );
+    expect((await repo.getById(original.id))?.status).toBe('closed');
   });
 
   it('lists sessions by space', async () => {

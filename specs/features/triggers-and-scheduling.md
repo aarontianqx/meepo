@@ -16,8 +16,6 @@ Schedule ──fires──▶ Ticket | Turn ──executed as──▶ Run
 | **Run**      | Who ran it, to what state?   | One execution attempt of a Ticket or a Turn                                                              |
 | **Session**  | In which context?            | The window-bound conversation container (`main` / `thread`)                                              |
 
-Retired concepts: **Reminder** and **CronJob** as entities (both are just `Schedule` actions), `cron` as a concept (it is only a time-expression syntax), `recurring` booleans (one-shot is `at`, recurring is `cron`), **wakeup** (a Turn whose source is a schedule fire), and `taskId` (it is `runId`).
-
 ## 2. Schedule
 
 ```typescript
@@ -46,14 +44,14 @@ interface Schedule {
 
 ### Boundary Rules
 
-- Timezones are taken from each record's `timezone` (DST handled by the cron library); schedules are stored in UTC.
+- `at` is an epoch-millisecond instant; `cron` uses a strictly five-field expression and `timing.timezone`, with DST handled by Croner. Stored timestamps are UTC.
 - An `at` schedule fires once and becomes `done`; if the server was down at the fire time, it catches up exactly once at the next tick. Coalescing does not apply to `at`.
 - Jitter is a deterministic per-schedule offset, at most 10% of the period and at most 15 minutes.
 - `/new` cascade-deletes the session's `resume_session` schedules; `create_ticket` schedules are unaffected.
 - The default timezone is the space's configured timezone, or UTC when unset.
-- An agent-created schedule's `createdByUserId` is the author of the triggering turn.
-- An unattended turn (schedule fire, ticket receipt) that cannot resolve the create-ticket-vs-resume boundary defaults to `create_ticket`, noting its assumptions in the objective.
-- Machine turns (schedule fires, ticket receipts) may also call `CronCreate` — recursion is allowed but bounded: at most 50 active schedules per session, and the 7-day stale rule above still applies.
+- Agent-created schedules derive `createdByUserId` from the first persisted run initiator; machine turns use `agent`. Console-created schedules use authenticated request identity.
+- Intended prompt policy: interactive ambiguity should be clarified with the user; unattended ambiguity should default to a self-contained ticket with stated assumptions. Current tool descriptions explain context continuity, but do not yet explicitly encode the unattended fallback; this remains a prompt-policy gap, not a server-enforced rule.
+- Machine turns (schedule fires, ticket receipts) may also call `CronCreate` — recursion is allowed but bounded: at most 50 active resume schedules per session, and the 7-day stale rule above still applies. Renewal is explicit creation of a new schedule after the final stale fire; there is no implicit TTL extension.
 
 ### Reliability Semantics
 
@@ -65,20 +63,13 @@ interface Schedule {
 
 ## 3. Ticket
 
-A Ticket is the independent work unit. Its lifecycle:
+A Ticket is a self-contained objective, dispatched to any enrolled, tag-matched worker with capacity. Each execution attempt has its own run and directory. Model-call retry, tool outcomes and ticket-attempt retry are separate layers: the harness does not blindly retry failed tools; ticket retry follows persisted evidence and explicit idempotency.
 
-```
-pending → claimed → running → completed | failed | cancelled | manual_review
-```
-
-- Self-contained by design: the objective bundle carries everything execution needs.
-- Any eligible worker may claim it (no affinity). Each dispatch attempt carries an execution lease (`workerId` + `leaseExpiresAt`), renewed by the worker's heartbeats while they carry the run in `activeRunIds` (lease = 3 heartbeat intervals — 45s at the default 15s — server clock authoritative); a disconnected worker's ticket becomes re-dispatchable only after the lease expires, and late results from expired attempts are rejected (logged only).
-- **Retry layers are distinct**: model-call retry is owned by pi core; tool calls are never retried by the harness (errors return to the model as tool results); attempt-level retry is conservative — an attempt that never started (no `run_started`) may re-dispatch automatically; an attempt that started is re-dispatched only when the ticket was declared `idempotent: true` or its persisted event stream shows only read-only tools (`read`/`grep`/`ls`/`glob`), otherwise the ticket parks in `manual_review` (Run `failed(lease_lost)`). `maxAttempts = 3` (exhaustion → `failed(max_attempts)`); pending over 24h → `failed(unclaimed)`. Human resolution actions: mark-completed, retry (new attempt, fresh directory), cancel — via console or API.
-- A ticket created from a session carries `originSessionId`, so its result can be reported back to that conversation.
+The complete [ticket state machine](ticket-pipeline.md) owns cancellation, manual_review resolution, the three-attempt limit, `pendingSince` timeout and origin receipts. Lease renewal and event rejection are defined in the [worker protocol](../architecture/worker-protocol.md).
 
 ## 4. Turn
 
-A Turn is one continuation of a session. User messages, schedule fires (`resume_session`), webhooks, and proactive agent triggers all materialize as Turns, distinguished only by their `source` and delivery semantics (`urgent` / `wait` / `if_idle`). A Turn always routes to the session's bound worker and runs in the session's context.
+A Turn is one continuation of a session. User messages, console injections, ticket receipts and schedule fires (`resume_session`) materialize as Turns. These producers all use `wait`; `urgent` and `if_idle` are reserved protocol modes. The current webhook endpoint creates tickets, not session turns. A Turn always routes to the session's bound worker and runs in the session's context.
 
 ## 5. Run
 
@@ -106,16 +97,17 @@ Stream events, heartbeat `activeRunIds`, and execution state all hang off the Ru
 
 ### Run State Transitions
 
-| From | Event | To |
-| --- | --- | --- |
-| `queued` | dispatched to a worker | `dispatched` |
-| `queued` | merged before dispatch | `merged` (`mergedIntoRunId` set) |
-| `queued` | `if_idle` drop on a busy session | `dropped` |
-| `dispatched` | `run_started` | `running` |
-| `dispatched` | lease lost before start | `failed(worker_lost)` — re-dispatchable |
-| `running` | turn completes | `completed` |
-| `running` | interrupted / cancelled / error | `failed(reason)` |
-| `running` | abort (stop button, rebind, `/new`) | `failed(interrupted)` |
+| From                                | Event                                              | To                                                                                              |
+| ----------------------------------- | -------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `queued`                            | dispatched to a worker                             | `dispatched`                                                                                    |
+| `queued`                            | merged before dispatch                             | `merged` (`mergedIntoRunId` set)                                                                |
+| `queued`                            | `if_idle` drop on a busy session                   | `dropped`                                                                                       |
+| `dispatched`                        | `run_started`                                      | `running`                                                                                       |
+| `dispatched`                        | lease lost before start                            | `failed(worker_lost)`; ticket retry may create a new run within its attempt limit               |
+| `running`                           | turn completes                                     | `completed`                                                                                     |
+| `running`                           | interrupted / cancelled / error                    | `failed(reason)`                                                                                |
+| `queued` / `dispatched` / `running` | applicable interrupt (Stop, close, rebind, `/new`) | `failed(interrupted)`; rebind migrates queued/dispatched main inputs instead of cancelling them |
+| `queued` / `dispatched` / `running` | eligible ticket cancellation                       | `failed(cancelled)`; ticket becomes cancelled                                                   |
 
 ## 6. Agent-Facing Tools
 

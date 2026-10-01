@@ -9,6 +9,17 @@ export class MemoryMembershipRepository implements MembershipRepository {
     return `${spaceId}${userId}`;
   }
 
+  async remove(spaceId: string, userId: string): Promise<void> {
+    this.rows.delete(MemoryMembershipRepository.key(spaceId, userId));
+  }
+  async transfer(spaceId: string, from: string, to: string): Promise<boolean> {
+    const a = this.rows.get(MemoryMembershipRepository.key(spaceId, from)),
+      b = this.rows.get(MemoryMembershipRepository.key(spaceId, to));
+    if (a?.role !== 'owner' || !b) return false;
+    a.role = 'operator';
+    b.role = 'owner';
+    return true;
+  }
   async save(member: SpaceMember): Promise<void> {
     this.rows.set(MemoryMembershipRepository.key(member.spaceId, member.userId), {
       ...member,

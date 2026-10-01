@@ -2,7 +2,9 @@
   "extends": "../../tsconfig.options.json",
   "compilerOptions": {
     "composite": true,
-    "outDir": "../../.moon/cache/types/apps/meepo-server"
+    "outDir": "dist",
+    "rootDir": "src",
+    "tsBuildInfoFile": "dist/.tsbuildinfo"
   },
   "references": [
     {

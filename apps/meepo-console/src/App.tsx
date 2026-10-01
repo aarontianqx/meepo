@@ -1,3 +1,6 @@
+import { MemoryPage } from './pages/MemoryPage';
+import { SessionsPage, SchedulesPage } from './pages/ObservationPages';
+import { ModelsPage, ChannelsPage } from './pages/RegistryPages';
 import { useState } from 'react';
 
 import { api, getUserId, setUserId } from './api/client';
@@ -11,12 +14,17 @@ type Route =
   | { page: 'spaces' }
   | { page: 'space'; spaceId: string }
   | { page: 'workers' }
-  | { page: 'tickets' };
+  | { page: 'tickets' | 'sessions' | 'schedules' | 'memory' | 'models' | 'channels' };
 
 const NAV_ITEMS: Array<{ page: Route['page']; label: string }> = [
   { page: 'spaces', label: 'Spaces' },
   { page: 'workers', label: 'Workers' },
   { page: 'tickets', label: 'Tickets' },
+  { page: 'sessions', label: 'Sessions' },
+  { page: 'schedules', label: 'Schedules' },
+  { page: 'memory', label: 'Memory' },
+  { page: 'models', label: 'Models' },
+  { page: 'channels', label: 'Channels' },
 ];
 
 export function App(): React.JSX.Element {
@@ -73,6 +81,11 @@ export function App(): React.JSX.Element {
           ) : null}
           {route.page === 'workers' ? <WorkersPage /> : null}
           {route.page === 'tickets' ? <TicketsPage /> : null}
+          {route.page === 'sessions' && <SessionsPage />}
+          {route.page === 'schedules' && <SchedulesPage />}
+          {route.page === 'memory' && <MemoryPage />}
+          {route.page === 'models' && <ModelsPage />}
+          {route.page === 'channels' && <ChannelsPage />}
         </main>
       </div>
     </div>

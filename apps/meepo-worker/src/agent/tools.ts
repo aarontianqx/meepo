@@ -112,3 +112,70 @@ export function buildTicketTools(rpc: RpcFn, sessionId: string): AnyAgentTool[] 
   };
   return [ticketCreate] as AnyAgentTool[];
 }
+
+/** Identical memory tools for interactive sessions and independent tickets. */
+export function buildMemoryTools(
+  rpc: RpcFn,
+  scope: { sessionId: string } | { ticketId: string }
+): AnyAgentTool[] {
+  const path = Type.String({ description: 'Memory path, for example project/payment-retries' });
+  const prefix = Type.Optional(Type.String());
+  const limit = Type.Optional(Type.Number());
+  const definitions = [
+    {
+      name: 'MemoryList',
+      operation: 'list',
+      description: 'List current memory metadata, without entry content.',
+      schema: Type.Object({ prefix, limit }),
+    },
+    {
+      name: 'MemorySearch',
+      operation: 'search',
+      description:
+        'Search current space memory by literal substring, including Chinese. Returns metadata and bounded snippets.',
+      schema: Type.Object({ query: Type.String(), prefix, limit }),
+    },
+    {
+      name: 'MemoryRead',
+      operation: 'read',
+      description:
+        'Read current memory and revision. Optional UTF-8 byte offset/limit or tail; maximum 32 KB.',
+      schema: Type.Object({
+        path,
+        offset: Type.Optional(Type.Number()),
+        limit,
+        tail: Type.Optional(Type.Number()),
+      }),
+    },
+    {
+      name: 'MemoryWrite',
+      operation: 'write',
+      description:
+        'Write curated, durable knowledge. Read first, pass expected_revision to prevent overwriting concurrent edits; 0 creates. Do not store secrets or transient chat.',
+      schema: Type.Object({
+        path,
+        description: Type.String(),
+        content: Type.String(),
+        keywords: Type.Optional(Type.Array(Type.String())),
+        pinned: Type.Optional(Type.Boolean()),
+        expected_revision: Type.Number(),
+      }),
+    },
+    {
+      name: 'MemoryDelete',
+      operation: 'delete',
+      description: 'Delete obsolete memory using its current revision.',
+      schema: Type.Object({ path, expected_revision: Type.Number() }),
+    },
+  ];
+  return definitions.map((d) => ({
+    name: d.name,
+    label: d.name,
+    description: d.description,
+    parameters: d.schema,
+    execute: async (_id: string, input: unknown) =>
+      toTextResult(
+        await rpc(WORKER_CHANNEL_METHODS.memory, { ...scope, operation: d.operation, input })
+      ),
+  }));
+}

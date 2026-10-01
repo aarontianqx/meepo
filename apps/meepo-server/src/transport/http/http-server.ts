@@ -1,3 +1,7 @@
+import { registerObservationRoutes } from './routes/observation.js';
+import { registerAuthorization } from './authorization.js';
+import { registerMemoryRoutes } from './routes/memory.js';
+import { MemoryError } from '../../domain/memory/memory-service.js';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
@@ -13,6 +17,7 @@ import type { Authenticator } from '../../domain/identity/authenticator.js';
 import type { ServiceContainer } from '../../service-container.js';
 import type { WorkerChannelHandler } from '../ws/worker-channel.js';
 import './auth.js';
+import { registerChannelRoutes } from './routes/channels.js';
 import { registerHealthRoutes } from './routes/health.js';
 import { registerMembershipRoutes } from './routes/memberships.js';
 import { registerModelRoutes } from './routes/models.js';
@@ -41,10 +46,18 @@ export async function buildHttpServer(options: HttpServerOptions): Promise<Fasti
 
   app.setErrorHandler((err, _req, reply) => {
     if (err instanceof DomainError) {
-      return reply
-        .status(DOMAIN_ERROR_STATUS[err.code])
-        .send({ error: { code: err.code, message: err.message } });
+      return reply.status(DOMAIN_ERROR_STATUS[err.code]).send({
+        error: {
+          code: err instanceof MemoryError ? err.memoryCode : err.code,
+          message: err.message,
+          ...(err instanceof MemoryError ? { currentRevision: err.currentRevision } : {}),
+        },
+      });
     }
+    if ((err as { statusCode?: number }).statusCode === 400)
+      return reply
+        .status(400)
+        .send({ error: { code: 'validation', message: 'Invalid request body' } });
     app.log.error(err);
     return reply
       .status(500)
@@ -57,11 +70,31 @@ export async function buildHttpServer(options: HttpServerOptions): Promise<Fasti
     req.identity = await options.authenticator.authenticate(req.headers);
   });
 
+  app.addHook('preValidation', async (req) => {
+    if (
+      req.url.startsWith('/api/') &&
+      ['POST', 'PUT', 'PATCH'].includes(req.method) &&
+      (req.body === null ||
+        (req.body !== undefined && (typeof req.body !== 'object' || Array.isArray(req.body))))
+    )
+      throw new DomainError('validation', 'JSON object body required');
+    if (
+      req.url.startsWith('/api/') &&
+      ['POST', 'PUT', 'PATCH'].includes(req.method) &&
+      req.body === undefined
+    )
+      req.body = {};
+  });
+  registerAuthorization(app, options.services, options.config.adminUserIds ?? []);
   registerHealthRoutes(app);
+  if (options.services.runRepository) registerObservationRoutes(app, options.services);
+  if (options.services.memoryService) registerMemoryRoutes(app, options.services);
+  if (options.services.channelService)
+    registerChannelRoutes(app, options.services.channelService, options.config.adminUserIds ?? []);
   registerMembershipRoutes(app, options.services);
   registerSpaceRoutes(app, options.services);
   registerWorkerRoutes(app, options.services);
-  registerModelRoutes(app, options.config.models);
+  registerModelRoutes(app, options.config.models, options.services.modelService);
   registerTicketRoutes(app, options.services);
   registerSessionRoutes(app, options.services);
   registerScheduleRoutes(app, options.services);

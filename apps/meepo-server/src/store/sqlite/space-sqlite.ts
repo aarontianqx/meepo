@@ -4,6 +4,7 @@ import type { Database } from 'better-sqlite3';
 import type { SpaceRepository } from '../../domain/spaces/space-repository.js';
 
 interface SpaceRow {
+  prompt_preset: Space['promptPreset'];
   id: string;
   name: string;
   description: string | null;
@@ -23,6 +24,7 @@ interface SpaceRow {
 function rowToSpace(row: SpaceRow): Space {
   return {
     id: row.id,
+    promptPreset: row.prompt_preset ?? undefined,
     name: row.name,
     description: row.description ?? undefined,
     repoUrl: row.repo_url,
@@ -54,8 +56,8 @@ export class SqliteSpaceRepository implements SpaceRepository {
         `INSERT OR REPLACE INTO spaces (
           id, name, description, repo_url, default_branch, bound_worker_id,
           timezone, model_id, model_thinking_level,
-          bound_chat_ids, required_tags, long_term_memory, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          bound_chat_ids, required_tags, long_term_memory, created_at, updated_at, prompt_preset
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         space.id,
@@ -71,7 +73,8 @@ export class SqliteSpaceRepository implements SpaceRepository {
         JSON.stringify(space.requiredTags),
         space.longTermMemory,
         space.createdAt,
-        space.updatedAt
+        space.updatedAt,
+        space.promptPreset ?? null
       );
   }
 

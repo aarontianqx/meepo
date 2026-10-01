@@ -25,6 +25,10 @@ function rowToDispatch(row: DispatchQueueRow): QueuedDispatch {
 export class SqliteDispatchQueueRepository implements DispatchQueueRepository {
   constructor(private readonly db: Database) {}
 
+  async delete(id: string): Promise<void> {
+    this.db.prepare('DELETE FROM dispatch_queue WHERE id = ?').run(id);
+  }
+
   async enqueue(item: QueuedDispatch): Promise<void> {
     this.db
       .prepare(

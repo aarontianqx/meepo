@@ -7,8 +7,8 @@
  * - Run: one execution attempt of a Ticket or Turn.
  */
 
-export type ProtocolVersion = 'v1';
-export const CURRENT_PROTOCOL_VERSION: ProtocolVersion = 'v1';
+export type ProtocolVersion = number;
+export const CURRENT_PROTOCOL_VERSION: ProtocolVersion = 2;
 
 /** Heartbeat payload emitted by worker to server */
 export interface WorkerHeartbeatPayload {
@@ -25,6 +25,7 @@ export interface WorkerHeartbeatPayload {
 
 /** Registration payload sent upon initial connection */
 export interface WorkerRegisterPayload {
+  protocolVersion: ProtocolVersion;
   /** Stable worker identifier, generated and persisted by the worker itself */
   workerId: string;
   /**
@@ -75,6 +76,7 @@ export type DeliveryMode = 'urgent' | 'wait' | 'if_idle';
 
 /** Model credentials held per space by the server and injected per dispatch */
 export interface ModelConfig {
+  imageInput?: boolean;
   /** pi-ai compatible provider identifier, e.g. "openai-completions" */
   provider: string;
   baseUrl: string;
@@ -85,10 +87,27 @@ export interface ModelConfig {
 }
 
 /** Turn dispatch: a turn inside an existing (or newly created) session context */
+export interface ImageReference {
+  messageId: string;
+  fileKey: string;
+  mimeType?: string;
+  sizeBytes?: number;
+}
+export interface MediaCredentials {
+  appId: string;
+  appSecret: string;
+}
+
 export interface TurnDispatchEnvelope {
+  images?: ImageReference[];
+  mediaCredentials?: MediaCredentials;
   runId: string;
   sessionId: string;
   spaceId: string;
+  turnRef?: { sessionId: string; sourceId: string };
+  mergedSourceIds?: string[];
+  currentTime?: number;
+  snapshotBeforeSeq?: number;
   sessionKind: 'main' | 'thread';
   prompt: string;
   source: DispatchSource;
@@ -103,6 +122,8 @@ export interface TurnDispatchEnvelope {
 
 /** Ticket dispatch: a fresh, isolated execution context */
 export interface TicketDispatchEnvelope {
+  attempt?: number;
+  currentTime?: number;
   runId: string;
   ticketId: string;
   spaceId: string;
@@ -117,6 +138,8 @@ export interface TicketDispatchEnvelope {
 
 /** Simplified transcript entry used for session rehydration snapshots */
 export interface TranscriptMessage {
+  externalMessageId?: string;
+  images?: ImageReference[];
   role: 'user' | 'assistant' | 'tool';
   content: string;
   timestamp: number;
@@ -133,6 +156,8 @@ export interface SessionSnapshot {
   sessionId: string;
   version: number;
   messages: TranscriptMessage[];
+  events?: CanonicalEvent[];
+  promptSnapshot?: string;
 }
 
 /** Timing rule for a schedule: one-shot (`at`) or recurring (`cron`) */
@@ -141,6 +166,8 @@ export type Timing =
 
 /** Agent tool: schedule a wakeup for the calling session (resume_session action) */
 export interface CronCreateParams {
+  /** Required by the v2 server for lease-fenced agent mutations. */
+  runId?: string;
   sessionId: string;
   prompt: string;
   timing: Timing;
@@ -148,6 +175,8 @@ export interface CronCreateParams {
 
 /** Agent tool: create an independent ticket (create_ticket action or direct) */
 export interface TicketCreateParams {
+  /** Required by the v2 server for lease-fenced agent mutations. */
+  runId?: string;
   sessionId: string;
   objective: string;
   contextSummary?: string;
@@ -161,6 +190,8 @@ export interface CronListParams {
 }
 
 export interface CronDeleteParams {
+  /** Required by the v2 server for lease-fenced agent mutations. */
+  runId?: string;
   sessionId: string;
   scheduleId: string;
 }
@@ -184,6 +215,9 @@ export type TicketCreateResult =
 
 /** Streaming events emitted by Worker -> Server */
 export type WorkerStreamEvent =
+  | { type: 'assistant_text'; runId: string; content: string }
+  | { type: 'run_merged'; runId: string; mergedIntoRunId: string }
+  | { type: 'run_dropped'; runId: string }
   | {
       type: 'run_started';
       runId: string;
@@ -215,3 +249,34 @@ export type WorkerStreamEvent =
       usage?: { inputTokens: number; outputTokens: number };
     }
   | { type: 'run_failed'; runId: string; error: string; code?: string };
+
+/** Durable stream records; deltas are transport-only. */
+export interface CanonicalEvent {
+  seq: number;
+  type: string;
+  payload: unknown;
+  timestamp: number;
+  runId?: string;
+  clientSeq?: number;
+}
+
+export type SequencedWorkerEvent = WorkerStreamEvent & { clientSeq: number };
+export interface StreamAck {
+  duplicate?: boolean;
+  accepted: boolean;
+  lastConfirmedClientSeq: number;
+  reason?: string;
+}
+export interface ReconcileParams {
+  activeRunIds: string[];
+  recentlyFinishedRunIds: string[];
+}
+export interface ReconcileResult {
+  validRunIds: string[];
+  invalidRunIds: string[];
+  lastConfirmedClientSeq: Record<string, number>;
+}
+export interface ContextAppendPayload {
+  sessionId: string;
+  events: CanonicalEvent[];
+}

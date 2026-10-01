@@ -7,6 +7,9 @@
  */
 import type { RpcNotification, RpcRequest, RpcResponse } from './rpc.js';
 import type {
+  SequencedWorkerEvent,
+  ReconcileParams,
+  ContextAppendPayload,
   CronCreateParams,
   CronDeleteParams,
   CronListParams,
@@ -28,7 +31,13 @@ export const WORKER_CHANNEL_PATH = '/ws/worker';
 
 /** RPC methods the worker invokes on the server. */
 export const WORKER_CHANNEL_METHODS = {
+  promptPrepare: 'prompt.prepare',
+  promptRecord: 'prompt.record',
+  memory: 'memory.call',
+  ready: 'worker.ready',
   register: 'worker.register',
+  streamAppend: 'stream.append',
+  reconcile: 'run.reconcile',
   heartbeat: 'worker.heartbeat',
   sessionSnapshot: 'session.snapshot',
   cronCreate: 'cron.create',
@@ -39,6 +48,8 @@ export const WORKER_CHANNEL_METHODS = {
 
 /** Notifications the server pushes to the worker. */
 export const WORKER_CHANNEL_EVENTS = {
+  contextAppend: 'context.append',
+  sessionClosed: 'session.closed',
   turnDispatch: 'turn.dispatch',
   ticketDispatch: 'ticket.dispatch',
   runSteer: 'run.steer',
@@ -54,9 +65,28 @@ export interface SessionSnapshotParams {
   sessionId: string;
   /** Exclude transcript entries at or after this timestamp */
   beforeTimestamp?: number;
+  beforeSeq?: number;
 }
 
 export type WorkerChannelUpstream =
+  | RpcRequest<typeof WORKER_CHANNEL_METHODS.streamAppend, SequencedWorkerEvent>
+  | RpcRequest<typeof WORKER_CHANNEL_METHODS.reconcile, ReconcileParams>
+  | RpcRequest<typeof WORKER_CHANNEL_METHODS.ready, Record<string, never>>
+  | RpcRequest<
+      typeof WORKER_CHANNEL_METHODS.memory,
+      {
+        sessionId?: string;
+        ticketId?: string;
+        runId: string;
+        operation: 'list' | 'search' | 'read' | 'write' | 'delete' | 'map';
+        input: Record<string, unknown>;
+      }
+    >
+  | RpcRequest<
+      typeof WORKER_CHANNEL_METHODS.promptPrepare,
+      { sessionId?: string; ticketId?: string }
+    >
+  | RpcRequest<typeof WORKER_CHANNEL_METHODS.promptRecord, { sessionId: string; snapshot: unknown }>
   | RpcRequest<typeof WORKER_CHANNEL_METHODS.register, WorkerRegisterPayload>
   | RpcRequest<typeof WORKER_CHANNEL_METHODS.heartbeat, WorkerHeartbeatPayload>
   | RpcRequest<typeof WORKER_CHANNEL_METHODS.sessionSnapshot, SessionSnapshotParams>
@@ -67,6 +97,9 @@ export type WorkerChannelUpstream =
   | RpcNotification<typeof SERVER_CHANNEL_EVENTS.stream, WorkerStreamEvent>;
 
 export type WorkerChannelDownstream =
+  | RpcResponse<unknown>
+  | RpcNotification<'context.append', ContextAppendPayload>
+  | RpcNotification<'session.closed', { sessionId: string }>
   | RpcResponse<WorkerRegisterResult>
   | RpcResponse<{ accepted: true }>
   | RpcResponse<SessionSnapshot>

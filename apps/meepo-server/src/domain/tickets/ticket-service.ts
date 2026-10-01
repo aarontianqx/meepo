@@ -2,11 +2,12 @@ import { randomUUID } from 'node:crypto';
 
 import type { Ticket } from '@meepo/core';
 
-import { conflict, notFound, validation } from '../errors.js';
+import { DomainError, conflict, notFound, validation } from '../errors.js';
 import type { SpaceRepository } from '../spaces/space-repository.js';
 import type { TicketRepository } from './ticket-repository.js';
 
 export interface CreateTicketInput {
+  idempotent?: boolean;
   spaceId: string;
   title: string;
   objective: string;
@@ -32,8 +33,17 @@ export class TicketService {
   async createTicket(input: CreateTicketInput): Promise<Ticket> {
     const space = await this.spaces.getById(input.spaceId);
     if (!space) throw validation(`Unknown space: ${input.spaceId}`);
-    if (!input.title.trim()) throw validation('Ticket title must not be empty');
-    if (!input.objective.trim()) throw validation('Ticket objective must not be empty');
+    if (typeof input.title !== 'string' || !input.title.trim())
+      throw validation('Ticket title must not be empty');
+    if (typeof input.objective !== 'string' || !input.objective.trim())
+      throw validation('Ticket objective must not be empty');
+    if (
+      input.requiredTags &&
+      (!Array.isArray(input.requiredTags) || input.requiredTags.some((t) => typeof t !== 'string'))
+    )
+      throw validation('requiredTags must be strings');
+    if (input.idempotent !== undefined && typeof input.idempotent !== 'boolean')
+      throw validation('idempotent must be boolean');
     const now = Date.now();
     const ticket: Ticket = {
       id: randomUUID(),
@@ -44,6 +54,9 @@ export class TicketService {
       requiredTags: input.requiredTags ?? space.requiredTags,
       originSessionId: input.originSessionId,
       status: 'pending',
+      pendingSince: now,
+      attempt: 0,
+      idempotent: input.idempotent ?? false,
       createdAt: now,
       updatedAt: now,
     };
@@ -83,11 +96,12 @@ export class TicketService {
     if (ticket.status !== 'running') {
       throw conflict(`Ticket ${id} is ${ticket.status}, only running tickets can complete`);
     }
+    const expected = { status: ticket.status, attempt: ticket.attempt ?? 0 };
     ticket.status = 'completed';
     ticket.result = result;
     ticket.updatedAt = Date.now();
     ticket.completedAt = Date.now();
-    await this.tickets.save(ticket);
+    await this.tickets.save(ticket, expected);
     return ticket;
   }
 
@@ -96,26 +110,63 @@ export class TicketService {
     if (ticket.status !== 'running' && ticket.status !== 'claimed') {
       throw conflict(`Ticket ${id} is ${ticket.status}, only claimed/running tickets can fail`);
     }
+    const expected = { status: ticket.status, attempt: ticket.attempt ?? 0 };
     ticket.status = 'failed';
     ticket.result = { summary: error };
     ticket.updatedAt = Date.now();
     ticket.completedAt = Date.now();
-    await this.tickets.save(ticket);
+    await this.tickets.save(ticket, expected);
     return ticket;
   }
 
-  /** Returns a claimed/running/failed ticket to the pending queue (e.g. worker disconnected, retry). */
+  /** Retries a manual_review ticket with a fresh pending interval, within the attempt limit. */
   async requeueTicket(id: string): Promise<Ticket> {
     const ticket = await this.getTicket(id);
-    if (ticket.status !== 'claimed' && ticket.status !== 'running' && ticket.status !== 'failed') {
-      throw conflict(
-        `Ticket ${id} is ${ticket.status}, only claimed/running/failed tickets can requeue`
-      );
-    }
+    if (ticket.status !== 'manual_review')
+      throw conflict('Only manual_review tickets may be retried');
+    if ((ticket.attempt ?? 0) >= 3) throw conflict('Maximum attempts exhausted');
+    const expected = { status: ticket.status, attempt: ticket.attempt ?? 0 };
     ticket.status = 'pending';
     ticket.assignedWorkerId = undefined;
     ticket.updatedAt = Date.now();
-    await this.tickets.save(ticket);
+    ticket.pendingSince = ticket.updatedAt;
+    await this.tickets.save(ticket, expected);
+    return ticket;
+  }
+
+  async cancelTicket(id: string): Promise<Ticket> {
+    const ticket = await this.getTicket(id);
+    // Retrying a cancel also lets the route resend abort if the earlier response was lost.
+    if (ticket.status === 'cancelled') return ticket;
+    if (!['pending', 'claimed', 'running', 'manual_review'].includes(ticket.status))
+      throw conflict('Ticket cannot be cancelled in this state');
+    const expected = { status: ticket.status, attempt: ticket.attempt ?? 0 };
+    ticket.status = 'cancelled';
+    ticket.terminalReason = 'cancelled';
+    ticket.completedAt = Date.now();
+    ticket.updatedAt = ticket.completedAt;
+    try {
+      await this.tickets.save(ticket, expected);
+    } catch (error) {
+      if (error instanceof DomainError && error.code === 'conflict') {
+        const current = await this.getTicket(id);
+        if (current.status === 'cancelled') return current;
+      }
+      throw error;
+    }
+    return ticket;
+  }
+
+  async abandonTicket(id: string): Promise<Ticket> {
+    const ticket = await this.getTicket(id);
+    if (ticket.status !== 'manual_review')
+      throw conflict('Only manual_review tickets may be abandoned');
+    const expected = { status: ticket.status, attempt: ticket.attempt ?? 0 };
+    ticket.status = 'failed';
+    ticket.terminalReason = 'abandoned';
+    ticket.completedAt = Date.now();
+    ticket.updatedAt = Date.now();
+    await this.tickets.save(ticket, expected);
     return ticket;
   }
 
@@ -124,10 +175,11 @@ export class TicketService {
     status: Ticket['status'],
     workerId: string
   ): Promise<Ticket> {
+    const expected = { status: ticket.status, attempt: ticket.attempt ?? 0 };
     ticket.status = status;
     ticket.assignedWorkerId = workerId;
     ticket.updatedAt = Date.now();
-    await this.tickets.save(ticket);
+    await this.tickets.save(ticket, expected);
     return ticket;
   }
 }

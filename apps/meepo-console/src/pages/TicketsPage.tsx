@@ -1,3 +1,4 @@
+import { TicketDetail } from './ObservationPages';
 import { useState } from 'react';
 
 import type { Ticket } from '@meepo/core';
@@ -10,6 +11,7 @@ import { formatDateTime, nonEmpty, parseTags } from '../util';
 const ALL_SPACES = '';
 
 export function TicketsPage(): React.JSX.Element {
+  const [selected, setSelected] = useState('');
   const spaces = usePolling(() => api.listSpaces(), 10_000);
   const [spaceFilter, setSpaceFilter] = useState(ALL_SPACES);
   const tickets = usePolling(
@@ -48,7 +50,7 @@ export function TicketsPage(): React.JSX.Element {
               {tickets.data.map((ticket) => (
                 <tr key={ticket.id}>
                   <td>
-                    {ticket.title}
+                    <button onClick={() => setSelected(ticket.id)}>{ticket.title}</button>
                     <div className='muted'>{ticket.objective}</div>
                   </td>
                   <td>
@@ -71,6 +73,7 @@ export function TicketsPage(): React.JSX.Element {
           </table>
         ) : null}
       </Section>
+      {selected && <TicketDetail key={selected} id={selected} onChanged={tickets.refresh} />}
       <CreateTicketForm
         spaces={(spaces.data ?? []).map((space) => ({ id: space.id, name: space.name }))}
         onCreated={() => tickets.refresh()}
@@ -84,6 +87,8 @@ const TICKET_STATUS_CLASS: Record<Ticket['status'], string> = {
   claimed: 'status-busy',
   running: 'status-busy',
   completed: 'status-online',
+  cancelled: 'muted',
+  manual_review: 'warning',
   failed: 'status-offline',
 };
 

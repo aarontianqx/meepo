@@ -1,21 +1,13 @@
-import type { ModelConfig } from '@meepo/protocol';
-
-/** One globally available model: credentials plus the wire-protocol discriminator. */
-export interface ModelEntry {
-  id: string;
-  provider: string;
-  baseUrl: string;
-  apiKey: string;
-  model: string;
-}
-
-/** Registry of globally available models, resolved from server config. */
-export interface ModelRegistry {
-  entries: ModelEntry[];
-  defaultModelId?: string;
-}
-
+import type { ModelEntry, ModelRegistry } from './domain/models/model-registry.js';
+export {
+  resolveModel,
+  type ModelEntry,
+  type ModelRegistry,
+} from './domain/models/model-registry.js';
 export interface ServerConfig {
+  adminUserIds?: string[];
+  secretKey?: string;
+  production?: boolean;
   host: string;
   port: number;
   /** Interval the server asks workers to heartbeat at (advertised on registration) */
@@ -39,6 +31,12 @@ export interface FeishuConfig {
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   return {
+    adminUserIds: (env.MEEPO_ADMIN_USER_IDS ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
+    secretKey: env.MEEPO_SECRET_KEY,
+    production: env.NODE_ENV === 'production',
     host: env.MEEPO_HOST ?? '0.0.0.0',
     port: Number(env.MEEPO_PORT ?? 8780),
     heartbeatIntervalSeconds: Number(env.MEEPO_HEARTBEAT_INTERVAL_SECONDS ?? 15),
@@ -97,21 +95,4 @@ function loadFeishuConfig(env: NodeJS.ProcessEnv): FeishuConfig | undefined {
 function defaultDbPath(): string {
   const home = process.env.HOME ?? '.';
   return `${home}/.meepo/server/meepo.db`;
-}
-
-/** Resolves a registry entry to a full ModelConfig (with optional effort override). */
-export function resolveModel(
-  registry: ModelRegistry,
-  modelId: string,
-  thinkingLevel?: ModelConfig['thinkingLevel']
-): ModelConfig | undefined {
-  const entry = registry.entries.find((e) => e.id === modelId);
-  if (!entry) return undefined;
-  return {
-    provider: entry.provider,
-    baseUrl: entry.baseUrl,
-    apiKey: entry.apiKey,
-    model: entry.model,
-    thinkingLevel,
-  };
 }

@@ -22,6 +22,31 @@ function rowToMember(row: MembershipRow): SpaceMember {
 export class SqliteMembershipRepository implements MembershipRepository {
   constructor(private readonly db: Database) {}
 
+  async remove(spaceId: string, userId: string): Promise<void> {
+    this.db
+      .prepare("DELETE FROM memberships WHERE space_id = ? AND user_id = ? AND role != 'owner'")
+      .run(spaceId, userId);
+  }
+  async transfer(spaceId: string, fromUserId: string, toUserId: string): Promise<boolean> {
+    return this.db.transaction(() => {
+      if (
+        !this.db
+          .prepare("SELECT 1 FROM memberships WHERE space_id=? AND user_id=? AND role='owner'")
+          .get(spaceId, fromUserId) ||
+        !this.db
+          .prepare('SELECT 1 FROM memberships WHERE space_id=? AND user_id=?')
+          .get(spaceId, toUserId)
+      )
+        return false;
+      this.db
+        .prepare("UPDATE memberships SET role='operator' WHERE space_id=? AND user_id=?")
+        .run(spaceId, fromUserId);
+      this.db
+        .prepare("UPDATE memberships SET role='owner' WHERE space_id=? AND user_id=?")
+        .run(spaceId, toUserId);
+      return true;
+    })();
+  }
   async save(member: SpaceMember): Promise<void> {
     this.db
       .prepare(

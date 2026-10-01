@@ -1,80 +1,45 @@
-# System Overview Architecture
+# System Overview
 
-## 1. High-Level Architecture
+## 1. Deployment and ownership
 
-MEEPO decomposes the agentic team assistant problem into an asynchronous, capacity-routed system:
+Meepo is a general-purpose collaborative assistant accessed through Feishu, with optional coding presets. The current deployment is **one server with SQLite and multiple self-hosted workers**. The server also serves the console. PostgreSQL, multiple server replicas and edge SSO integration are planned, not implemented.
 
-```
-+-----------------------------------------------------------------------------------+
-|                                  Feishu Platform                                  |
-|               (Dev Chat / Support Chat / Operations Chat / Threads)               |
-+-----------------------------------------------------------------------------------+
-                                         │
-                        Feishu WebSocket / Webhook
-                                         ▼
-+-----------------------------------------------------------------------------------+
-|                        MEEPO Central Server (Control Plane)                       |
-|                                                                                   |
-|  [ Feishu Gateway ] ──> [ Space & Memory Manager ] ──> [ Dispatcher ]             |
-|          │                            │                             │             |
-|          ▼                            ▼                             ▼             |
-|  [ Card Streamer ]          [ Session Store (SST) ]       [ Ticket Queue ]        |
-|                                                                                   |
-|  [ Auth (edge JWT) ]              [ Scheduler (unified Schedule) ]                |
-+-----------------------------------------------------------------------------------+
-                                         │
-                           RPC WebSocket Stream (JSON)
-                                         ▼
-+-----------------------------------------------------------------------------------+
-|                         MEEPO Worker Fleet (Data Plane)                           |
-|                                                                                   |
-|   ┌───────────────────────────┐                  ┌────────────────────────────┐   |
-|   │   Private Physical Node   │                  │    Cloud Sandbox Node      │   |
-|   │ (MacBook / On-Prem Box)   │                  │   (Dynamic Docker / K8s)   │   |
-|   │  - Slots: 1               │                  │  - Slots: 4                │   |
-|   │  - Neutral task dirs      │                  │  - Neutral task dirs       │   |
-|   │  - Pi Agent Core Runner   │                  │  - Pi Agent Core Runner    │   |
-|   │  - Local Tools: Read/Bash │                  │  - Local Tools: Read/Bash  │   |
-|   └───────────────────────────┘                  └────────────────────────────┘   |
-+-----------------------------------------------------------------------------------+
+```text
+Feishu bots ── per-channel WebSocket ──► Server ◄── HTTP / event WebSocket ── Console
+                                       │
+                           SQLite: configuration, events,
+                           runs, tickets, schedules, outboxes
+                                       │
+                           authenticated JSON WebSocket
+                                       ▼
+                           Workers: Pi runtime, tools,
+                           MCP, per-task directories
 ```
 
-## 2. Architectural Invariants
+The execution model is `Schedule → Ticket | Turn → Run`, with turns belonging to a Session. A Space owns configuration, memory and execution records; each Channel is one bot application assigned to one space. See [space and chat mapping](../features/space-and-chat.md) and [triggers and scheduling](../features/triggers-and-scheduling.md).
 
-1. **Server Never Directly Modifies Repositories**: The control plane never executes local shell commands or modifies local workspace files. All disk and execution operations are delegated to workers.
-2. **Server Owns Truth; Worker Owns Live State**: The server is the single source of truth for space configuration, long-term memory, session transcripts, and ticket state. The worker owns what is inherently local: the agent process, working directories, and uncommitted changes. A worker crash never loses conversational data.
-3. **Strict Space Boundary**: Chat messages and agent actions are always fenced by the containing `Space`. A worker assigned to Space A cannot access Space B's long-term memory or session state.
-4. **Capacity-Aware Concurrency**: A worker enforces its registered slot limit locally via a semaphore over all runs; the server is slot-aware only for ticket dispatch. When slots are full, work queues locally on the worker — freed slots go to interactive turns before tickets.
-5. **Hard Session–Worker Affinity**: A session is bound to one worker at creation and always routes back to it while that worker remains enrolled — its workspace and uncommitted state live there. A bound worker going offline pauses the session (messages queue server-side); it never triggers silent migration. Rebinding is always a deliberate user action. Tickets are exempt: they run in fresh per-task directories and may be re-queued to any eligible worker.
-6. **Identity at the Edge**: User authentication happens at the edge (SSO); the server verifies the signed token and extracts the user's identity (`userId`). MEEPO maintains no account system of its own — the only authorization data it owns is space membership (one role per user per space).
-7. **Trusted Conversation Boundary**: anyone able to drive the bot in a bound chat is trusted with the agent's full tool set — there are no permission or approval modes. Worker owners constrain behavior through their machine's `~/.agents/AGENTS.md` (prompt-level), not through mechanism. Space configuration, tokens, bindings, and direct memory edits require space membership. Spaces sharing one worker form a single trust domain — they share the filesystem, MCP tools, and credentials on that machine (the console warns when enrolling a worker into a second space); a public-group space should use a dedicated worker container with no sensitive environment.
+## 2. Architectural invariants
 
-## 3. Multi-Tenancy & Worker Enrollment
+1. **Server owns durable truth.** Space configuration, memory, transcripts, ticket/run state and schedules are persisted server-side. Workers own live agents, local files and uncommitted changes. Only server-confirmed events are guaranteed durable; a worker crash may lose unacknowledged local events or tool outcomes.
+2. **Execution stays on workers.** The server persists its own data but does not execute task shell commands or manipulate task repositories. Each concurrent task uses an isolated directory. Repo checkout/worktree behavior is an optional prompt convention, not a harness requirement.
+3. **Sessions have hard affinity.** Main sessions use the space binding; thread sessions select an eligible worker and stay pinned. Offline means queue and wait. Explicit rebind interrupts and moves main sessions, preserves their transcript, and abandons old local state; existing thread sessions keep their worker. Tickets use fresh attempt directories and may retry elsewhere under the ticket retry policy.
+4. **Capacity is enforced locally.** One worker semaphore covers all runs; released slots favor interactive turns over tickets. The server also reserves ticket capacity, but does not use slot availability to migrate sessions.
+5. **Server authorization is per space.** User identity comes through an Authenticator port; the current adapter uses a development header, and a signed edge-token adapter is pending. There is no account system. Members have owner/operator roles; global admins manage registries without automatically gaining private-space access.
+6. **Shared workers are a shared trust domain.** Server APIs enforce resource ownership. Sharing a worker does not isolate files, environment credentials or MCP tools between spaces. A worker may serve only spaces covered by its enrollment token. IM participants admitted by channel routing may use the full agent tool set without console membership; there is no approval mode.
+7. **Reliability does not imply exactly-once side effects.** Event ACKs, fencing and transactional outboxes prevent stale state writes and support recovery. Unknown external tool outcomes are not blindly replayed; ticket retry eligibility is explicit.
 
-The deployment is centrally operated; spaces and workers join freely:
+## 3. Contract ownership
 
-```
-[User via edge SSO]                    [Space Owner]
-        │                                     │ issues enrollment token
-        ▼                                     ▼
-  meepo-server  <──── worker.register(token) ────  meepo-worker
-        │
-        └─ Space: membership (userId→role) + boundWorkerId (console-configured)
-```
+| Topic                                              | Authoritative document                                            |
+| -------------------------------------------------- | ----------------------------------------------------------------- |
+| Server modules, auth, cross-entity transactions    | [Server control plane](server-control-plane.md)                   |
+| Local runtime, prompt/model timing, files and MCP  | [Worker data plane](worker-data-plane.md)                         |
+| Wire format, reconnect, ACK and leases             | [Worker protocol](worker-protocol.md)                             |
+| Layer dependencies and port placement              | [Backend layering](backend-layering.md)                           |
+| Space/channel routing and membership               | [Space and chat](../features/space-and-chat.md)                   |
+| Window lifecycle, delivery and user interruption   | [Interactive session](../features/interactive-session.md)         |
+| Independent work, retry, cancellation and receipts | [Ticket pipeline](../features/ticket-pipeline.md)                 |
+| Scheduling and execution identities                | [Triggers and scheduling](../features/triggers-and-scheduling.md) |
+| Memory schema, retrieval and tools                 | [Memory](../features/memory.md)                                   |
 
-### Domain Glossary
-
-The execution domain has exactly five nouns:
-
-- **Schedule** — when work gets produced (`timing` + `action: create_ticket | resume_session`).
-- **Ticket** — an independent, self-contained work unit (queueable, retryable).
-- **Turn** — one continuation of an existing session.
-- **Run** — one execution attempt of a Ticket or a Turn.
-- **Session** — a window-bound conversation container (`main` / `thread`).
-
-Everything else is an attribute or an action, not a concept.
-
-- **Space is the tenant**: context, memory, sessions, and tickets are isolated per space. Access is governed by space membership keyed to the SSO `userId` — every member may administer the space, and exactly one member is the `owner`.
-- **Worker Enrollment Tokens** (`mep_...`) are issued by any space member for a chosen set of spaces. At registration the worker presents only its token; the server resolves the authorized space set (`WorkerNode.spaceIds`). Workers never self-select spaces.
-- **Worker–Space relationship**: a worker primarily _belongs to_ the space that enrolled it (one worker per space, container-friendly). When environments are compatible, a worker may enroll into multiple spaces; binding still routes each space's work to its own worker. See `specs/features/space-and-chat.md` for the full binding and migration semantics.
-- The dispatcher only ever routes a space's work to workers enrolled for that space (tag matching applies as a secondary filter).
+Field-level wire types live in `packages/protocol`; shared entity types live in `packages/core`. Evergreen documents describe current behavior and label implementation limitations explicitly. Operational setup belongs in the repository README.

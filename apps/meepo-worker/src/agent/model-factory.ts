@@ -57,7 +57,7 @@ export function createModel(config: ModelConfig): Model<'openai-completions'> {
     provider: config.provider,
     baseUrl: config.baseUrl,
     reasoning: true,
-    input: ['text'],
+    input: (config.imageInput ?? config.model.startsWith('kimi-k')) ? ['text', 'image'] : ['text'],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: capabilities.contextWindow,
     maxTokens: capabilities.maxTokens,

@@ -1,3 +1,4 @@
+import type { SessionBindingPort } from '../sessions/session-lifecycle.js';
 import { randomUUID } from 'node:crypto';
 
 import type { Space } from '@meepo/core';
@@ -8,15 +9,17 @@ import type { WorkerRepository } from '../workers/worker-repository.js';
 import type { SpaceRepository } from './space-repository.js';
 
 export interface CreateSpaceInput {
+  promptPreset?: Space['promptPreset'];
   name: string;
   description?: string;
-  repoUrl: string;
+  repoUrl?: string;
   defaultBranch?: string;
   requiredTags?: string[];
   timezone?: string;
 }
 
 export interface UpdateSpaceInput {
+  promptPreset?: Space['promptPreset'];
   description?: string;
   repoUrl?: string;
   defaultBranch?: string;
@@ -30,19 +33,25 @@ export class SpaceService {
   constructor(
     private readonly spaces: SpaceRepository,
     private readonly memberships: MembershipService,
-    private readonly workers: WorkerRepository
+    private readonly workers: WorkerRepository,
+    private readonly binding?: SessionBindingPort,
+    private readonly deletion?: { deleteSpace(spaceId: string): Promise<void> }
   ) {}
 
   /** Creates a space and makes the creator its owner. */
   async createSpace(input: CreateSpaceInput, userId: string): Promise<Space> {
-    if (!input.name.trim()) throw validation('Space name must not be empty');
-    if (!input.repoUrl.trim()) throw validation('Space repoUrl must not be empty');
+    if (typeof input.name !== 'string' || !input.name.trim())
+      throw validation('Space name must not be empty');
+    if (input.promptPreset && !['general', 'coding'].includes(input.promptPreset))
+      throw validation('Unknown prompt preset');
+    validatePatch(input);
     const now = Date.now();
     const space: Space = {
       id: randomUUID(),
       name: input.name.trim(),
       description: input.description,
-      repoUrl: input.repoUrl.trim(),
+      repoUrl: input.repoUrl?.trim() ?? '',
+      promptPreset: input.promptPreset,
       defaultBranch: input.defaultBranch ?? 'main',
       timezone: input.timezone ?? DEFAULT_TIMEZONE,
       boundChatIds: [],
@@ -56,6 +65,11 @@ export class SpaceService {
     return space;
   }
 
+  async deleteSpace(id: string, actor: string): Promise<void> {
+    await this.memberships.requireOwner(id, actor);
+    if (!this.deletion) throw validation('Space deletion is unavailable');
+    await this.deletion.deleteSpace(id);
+  }
   async getSpace(id: string): Promise<Space> {
     const space = await this.spaces.getById(id);
     if (!space) throw notFound(`Space not found: ${id}`);
@@ -69,40 +83,20 @@ export class SpaceService {
     return spaces.filter((space): space is Space => space !== undefined);
   }
 
-  async bindChat(spaceId: string, chatId: string, userId: string): Promise<Space> {
-    await this.memberships.requireManager(spaceId, userId);
-    const space = await this.getSpace(spaceId);
-    if (!chatId.trim()) throw validation('chatId must not be empty');
-    if (!space.boundChatIds.includes(chatId)) {
-      space.boundChatIds.push(chatId);
-      space.updatedAt = Date.now();
-      await this.spaces.save(space);
-    }
-    return space;
-  }
-
-  async unbindChat(spaceId: string, chatId: string, userId: string): Promise<Space> {
-    await this.memberships.requireManager(spaceId, userId);
-    const space = await this.getSpace(spaceId);
-    space.boundChatIds = space.boundChatIds.filter((id) => id !== chatId);
-    space.updatedAt = Date.now();
-    await this.spaces.save(space);
-    return space;
-  }
-
-  async updateMemory(spaceId: string, longTermMemory: string, userId: string): Promise<Space> {
-    await this.memberships.requireManager(spaceId, userId);
-    const space = await this.getSpace(spaceId);
-    space.longTermMemory = longTermMemory;
-    space.updatedAt = Date.now();
-    await this.spaces.save(space);
-    return space;
-  }
-
   /** Sets (or clears) the space's server-held model credentials. */
   async updateModel(spaceId: string, model: Space['model'], userId: string): Promise<Space> {
-    await this.memberships.requireManager(spaceId, userId);
+    await this.memberships.requireOperator(spaceId, userId);
     const space = await this.getSpace(spaceId);
+    if (
+      model !== undefined &&
+      (!model ||
+        typeof model !== 'object' ||
+        typeof model.modelId !== 'string' ||
+        !model.modelId.trim() ||
+        (model.thinkingLevel !== undefined &&
+          !['low', 'high', 'max'].includes(model.thinkingLevel)))
+    )
+      throw validation('Invalid model reference or thinking level');
     space.model = model;
     space.updatedAt = Date.now();
     await this.spaces.save(space);
@@ -111,11 +105,16 @@ export class SpaceService {
 
   /** Partially updates editable space fields. */
   async updateSpace(spaceId: string, patch: UpdateSpaceInput, userId: string): Promise<Space> {
-    await this.memberships.requireManager(spaceId, userId);
+    await this.memberships.requireOperator(spaceId, userId);
     const space = await this.getSpace(spaceId);
+    validatePatch(patch);
+    if (patch.promptPreset !== undefined) {
+      if (!['general', 'coding'].includes(patch.promptPreset))
+        throw validation('Unknown prompt preset');
+      space.promptPreset = patch.promptPreset;
+    }
     if (patch.description !== undefined) space.description = patch.description;
     if (patch.repoUrl !== undefined) {
-      if (!patch.repoUrl.trim()) throw validation('Space repoUrl must not be empty');
       space.repoUrl = patch.repoUrl.trim();
     }
     if (patch.defaultBranch !== undefined) space.defaultBranch = patch.defaultBranch;
@@ -131,12 +130,14 @@ export class SpaceService {
    * The target worker must be enrolled for this space.
    */
   async switchBinding(spaceId: string, workerId: string, userId: string): Promise<Space> {
-    await this.memberships.requireManager(spaceId, userId);
+    await this.memberships.requireOperator(spaceId, userId);
+    if (typeof workerId !== 'string' || !workerId.trim()) throw validation('workerId is required');
     const worker = await this.workers.getById(workerId);
     if (!worker || !worker.spaceIds.includes(spaceId)) {
       throw validation(`Worker ${workerId} is not enrolled for space ${spaceId}`);
     }
     const space = await this.getSpace(spaceId);
+    await this.binding?.rebind(spaceId, workerId);
     space.boundWorkerId = workerId;
     space.updatedAt = Date.now();
     await this.spaces.save(space);
@@ -150,5 +151,23 @@ export class SpaceService {
     space.boundWorkerId = workerId;
     space.updatedAt = Date.now();
     await this.spaces.save(space);
+  }
+}
+
+function validatePatch(input: UpdateSpaceInput): void {
+  for (const key of ['description', 'repoUrl', 'defaultBranch', 'timezone'] as const)
+    if (input[key] !== undefined && typeof input[key] !== 'string')
+      throw validation(`${key} must be a string`);
+  if (
+    input.requiredTags !== undefined &&
+    (!Array.isArray(input.requiredTags) || input.requiredTags.some((t) => typeof t !== 'string'))
+  )
+    throw validation('requiredTags must be strings');
+  if (input.timezone) {
+    try {
+      new Intl.DateTimeFormat('en', { timeZone: input.timezone });
+    } catch {
+      throw validation('Invalid timezone');
+    }
   }
 }

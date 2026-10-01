@@ -10,6 +10,9 @@ function makeRun(overrides: Partial<Run> = {}): Run {
     id: 'run-1',
     work: { kind: 'ticket', ticketId: 'ticket-1' },
     attempt: 1,
+    lastClientSeq: 0,
+    initiatorIds: [],
+    mergedSourceIds: [],
     status: 'dispatched',
     createdAt: 1000,
     ...overrides,
@@ -38,7 +41,11 @@ describe('SqliteRunRepository', () => {
   it('round-trips optional fields and every work kind', async () => {
     const runs = [
       makeRun({ workerId: 'worker-1', startedAt: 2000, completedAt: 3000, status: 'completed' }),
-      makeRun({ id: 'run-2', work: { kind: 'turn', sessionId: 'session-1' }, status: 'queued' }),
+      makeRun({
+        id: 'run-2',
+        work: { kind: 'turn', turnRef: { sessionId: 'session-1', sourceId: 'legacy' } },
+        status: 'queued',
+      }),
     ];
     for (const run of runs) {
       await repo.save(run);
@@ -64,7 +71,12 @@ describe('SqliteRunRepository', () => {
     await repo.save(makeRun({ id: 'run-2', attempt: 2 }));
     await repo.save(makeRun({ id: 'run-1', attempt: 1 }));
     await repo.save(makeRun({ id: 'run-3', work: { kind: 'ticket', ticketId: 'ticket-2' } }));
-    await repo.save(makeRun({ id: 'run-4', work: { kind: 'turn', sessionId: 'session-1' } }));
+    await repo.save(
+      makeRun({
+        id: 'run-4',
+        work: { kind: 'turn', turnRef: { sessionId: 'session-1', sourceId: 'legacy' } },
+      })
+    );
 
     const runs = await repo.listByTicket('ticket-1');
     expect(runs.map((run) => run.id)).toEqual(['run-1', 'run-2']);

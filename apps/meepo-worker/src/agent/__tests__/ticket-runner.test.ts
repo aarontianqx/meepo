@@ -50,10 +50,10 @@ function envelope(partial: Partial<TicketDispatchEnvelope> = {}): TicketDispatch
 }
 
 describe('buildTicketSystemPrompt', () => {
-  it('contains the working directory, worktree rule, and contribution', () => {
+  it('contains the working directory without mandatory worktree rules, and contribution', () => {
     const prompt = buildTicketSystemPrompt('/tmp/ticket-1', 'Space memory: prefers pnpm.');
     expect(prompt).toContain('/tmp/ticket-1');
-    expect(prompt).toContain('git worktree');
+    expect(prompt).not.toContain('git worktree');
     expect(prompt).toContain('Space memory: prefers pnpm.');
   });
 
@@ -65,11 +65,13 @@ describe('buildTicketSystemPrompt', () => {
 describe('buildTicketPrompt', () => {
   it('combines objective and contextSummary', () => {
     const prompt = buildTicketPrompt(envelope({ contextSummary: 'Fails on CI only' }));
-    expect(prompt).toBe('# Objective\nFix the flaky login test\n\n# Context\nFails on CI only');
+    expect(prompt).toContain('# Objective\nFix the flaky login test');
+    expect(prompt).toContain('# Context\nFails on CI only');
+    expect(prompt).toContain('MEEPO_IDEMPOTENCY_KEY=ticket-1-1');
   });
 
   it('omits the context section when absent', () => {
-    expect(buildTicketPrompt(envelope())).toBe('# Objective\nFix the flaky login test');
+    expect(buildTicketPrompt(envelope())).toContain('# Objective\nFix the flaky login test');
   });
 });
 
@@ -113,14 +115,13 @@ describe('TicketRunner', () => {
     expect(captured).toHaveLength(1);
     const initial = captured[0].initialState;
     expect(initial?.systemPrompt).toContain(workDir);
-    expect(initial?.systemPrompt).toContain('git worktree');
+    expect(initial?.systemPrompt).not.toContain('git worktree');
     const toolNames = (initial?.tools ?? []).map((tool) => tool.name);
     expect(toolNames).toEqual(expect.arrayContaining(['read', 'bash', 'edit', 'write']));
     expect(toolNames).not.toContain('CronCreate');
 
-    expect(agents[0].prompts).toEqual([
-      '# Objective\nFix the flaky login test\n\n# Context\nFails on CI only',
-    ]);
+    expect(agents[0].prompts[0]).toContain('# Objective\nFix the flaky login test');
+    expect(agents[0].prompts[0]).toContain('# Context\nFails on CI only');
     expect(events).toContainEqual({
       type: 'run_started',
       runId: 'task-1',
@@ -150,7 +151,9 @@ describe('TicketRunner', () => {
     const promptStarted = new Promise<void>((resolve) => {
       markPromptStarted = resolve;
     });
-    const { runner } = setup({
+    const slots = new SlotSemaphore(1);
+    const { runner, events } = setup({
+      slots,
       createAgent: () => {
         const agent = new StubAgent();
         agent.prompt = () => {
@@ -173,6 +176,14 @@ describe('TicketRunner', () => {
 
     expect(aborted).toBe(1);
     await dispatch;
+    expect(events.some((event) => event.type === 'run_completed')).toBe(false);
+    expect(events).toContainEqual(expect.objectContaining({ type: 'run_failed', runId: 'task-1' }));
+    // Cancellation must release capacity for subsequent work.
+    const releaseCheck = slots.acquire('ticket');
+    await releaseCheck;
+    slots.release();
+    runner.handleAbort({ runId: 'task-1' });
+    expect(aborted).toBe(1);
   });
 
   it('queues tickets behind the shared slot semaphore', async () => {

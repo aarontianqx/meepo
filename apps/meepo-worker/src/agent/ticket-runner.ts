@@ -1,3 +1,9 @@
+import { reclaimDirectories, touchDirectory } from './retention.js';
+import { withTicketContext } from './tool-context.js';
+import type { AnyAgentTool } from './tools.js';
+import { buildBasePrompt, renderPrompt, type PreparedPrompt } from './prompt.js';
+import { WORKER_CHANNEL_METHODS } from '@meepo/protocol';
+import { buildMemoryTools } from './tools.js';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 
@@ -11,6 +17,10 @@ import type { SlotSemaphore } from './slot-semaphore.js';
 
 export interface TicketRunnerDeps {
   workerId: string;
+  extraTools?: () => AnyAgentTool[];
+  acquireTools?: () => { tools: AnyAgentTool[]; release: () => void };
+  rpc?: (method: string, params: unknown) => Promise<unknown>;
+  beforeExecution?: (runId?: string) => Promise<void>;
   emit: (event: WorkerStreamEvent) => void;
   /** Root for neutral per-ticket working directories (`<ticketsDir>/<ticketId>`). */
   ticketsDir: string;
@@ -27,31 +37,27 @@ export interface TicketRunnerDeps {
  * server-injected space contribution verbatim when present.
  */
 export function buildTicketSystemPrompt(workDir: string, contribution?: string): string {
-  const parts = [
-    `You are Meepo, a background task execution agent. Your current working directory is ${workDir}.`,
-    [
-      'Working rules:',
-      '- When the task involves code, clone the repository yourself into your working directory.',
-      '  Do not assume any repository already exists.',
-      '- Before modifying any code, always create an isolated git worktree for your changes',
-      '  to avoid conflicts with concurrent executions.',
-      '- When finished, summarize what you changed and why.',
-    ].join('\n'),
-  ];
-  if (contribution) parts.push(contribution);
-  return parts.join('\n\n');
+  return buildBasePrompt(workDir, contribution, false);
 }
 
 /** The ticket's single user prompt: the objective plus optional context. */
 export function buildTicketPrompt(envelope: TicketDispatchEnvelope): string {
-  const parts = [`# Objective\n${envelope.objective}`];
+  const parts = [
+    `Current time: ${new Date(envelope.currentTime ?? Date.now()).toISOString()}`,
+    `# Objective\n${envelope.objective}`,
+  ];
+  parts.push(
+    `Tool environment: MEEPO_IDEMPOTENCY_KEY=${envelope.ticketId}-${envelope.attempt ?? 1}. Pass this value as the idempotency key on external API calls.`
+  );
   if (envelope.contextSummary) parts.push(`# Context\n${envelope.contextSummary}`);
   return parts.join('\n\n');
 }
 
 interface ActiveRun {
+  ticketId: string;
   agent?: RunnerAgent;
   aborted: boolean;
+  slotWait: AbortController;
 }
 
 /**
@@ -68,12 +74,21 @@ export class TicketRunner {
 
   async handleDispatch(envelope: TicketDispatchEnvelope): Promise<void> {
     const forwarder = new StreamForwarder(this.deps.emit);
-    const entry: ActiveRun = { aborted: false };
+    const entry: ActiveRun = {
+      aborted: false,
+      ticketId: envelope.ticketId,
+      slotWait: new AbortController(),
+    };
     this.active.set(envelope.runId, entry);
 
+    let releaseTools: (() => void) | undefined;
     let timeoutTimer: NodeJS.Timeout | undefined;
-    await this.deps.slots?.acquire();
+    let acquired = false;
     try {
+      if (this.deps.slots) {
+        await this.deps.slots.acquire('ticket', entry.slotWait.signal);
+        acquired = true;
+      }
       if (entry.aborted) {
         // Aborted while queued for a slot: never started.
         forwarder.failPendingRun(envelope.runId, 'aborted before execution', 'aborted');
@@ -83,19 +98,55 @@ export class TicketRunner {
         workerId: this.deps.workerId,
         ticketId: envelope.ticketId,
       });
-      const workDir = await this.ensureTicketDir(envelope.ticketId);
+      const workDir = await this.ensureTicketDir(envelope.ticketId, envelope.attempt ?? 1);
+      const lease = this.deps.acquireTools?.();
+      releaseTools = lease?.release;
+      const tools = withTicketContext(
+        [
+          ...createCodingTools(workDir),
+          ...(lease?.tools ?? this.deps.extraTools?.() ?? []),
+          ...(this.deps.rpc
+            ? buildMemoryTools(
+                (method, params) =>
+                  this.deps.rpc!(method, {
+                    ...(params as Record<string, unknown>),
+                    runId: envelope.runId,
+                  }),
+                { ticketId: envelope.ticketId }
+              )
+            : []),
+        ],
+        `${envelope.ticketId}-${envelope.attempt ?? 1}`
+      );
+      const prepared =
+        !this.deps.createAgent && this.deps.rpc
+          ? ((await this.deps.rpc(WORKER_CHANNEL_METHODS.promptPrepare, {
+              ticketId: envelope.ticketId,
+            })) as PreparedPrompt)
+          : undefined;
+      const systemPrompt = prepared
+        ? await renderPrompt(workDir, prepared, tools, false)
+        : buildTicketSystemPrompt(workDir, envelope.systemPromptContribution);
       const createAgent = this.deps.createAgent ?? ((options: AgentOptions) => new Agent(options));
       const agent = createAgent({
+        prepareRequest: async () => {
+          await this.deps.beforeExecution?.(envelope.runId);
+        },
         initialState: {
-          systemPrompt: buildTicketSystemPrompt(workDir, envelope.systemPromptContribution),
+          systemPrompt,
           model: createModel(envelope.model),
-          tools: createCodingTools(workDir),
+          tools,
         },
         streamFn: createStreamFn(envelope.model),
         sessionId: envelope.ticketId,
       });
       entry.agent = agent;
-      agent.subscribe((event) => forwarder.handleEvent(event));
+      if (entry.aborted) throw new Error('Ticket cancelled during startup');
+      agent.subscribe((event) => {
+        forwarder.handleEvent(event);
+        if (event.type !== 'message_update' && event.type !== 'tool_execution_update')
+          return this.deps.beforeExecution?.(envelope.runId);
+      });
 
       let timedOut = false;
       if (envelope.timeoutSeconds) {
@@ -109,29 +160,57 @@ export class TicketRunner {
       await agent.prompt(buildTicketPrompt(envelope));
       if (timedOut) {
         forwarder.failRun(`ticket timed out after ${envelope.timeoutSeconds}s`, 'timeout');
+      } else if (entry.aborted) {
+        forwarder.failRun('Ticket cancelled', 'interrupted');
       } else {
         forwarder.completeRun();
       }
     } catch (err) {
-      forwarder.failRun((err as Error).message, 'internal');
+      if (!forwarder.currentRunId)
+        forwarder.failPendingRun(
+          envelope.runId,
+          (err as Error).message,
+          entry.aborted ? 'aborted' : 'internal'
+        );
+      else forwarder.failRun((err as Error).message, 'internal');
     } finally {
-      this.deps.slots?.release();
+      releaseTools?.();
+      if (acquired) this.deps.slots!.release();
       if (timeoutTimer) clearTimeout(timeoutTimer);
       this.active.delete(envelope.runId);
+      void reclaimDirectories(
+        this.deps.ticketsDir,
+        new Set([...this.active.values()].map((r) => r.ticketId))
+      ).catch((error) => console.error('Ticket cleanup failed', error));
     }
+  }
+
+  async reclaim(): Promise<void> {
+    await reclaimDirectories(
+      this.deps.ticketsDir,
+      new Set([...this.active.values()].map((r) => r.ticketId))
+    );
+  }
+  async shutdown(): Promise<void> {
+    for (const id of this.active.keys())
+      this.handleAbort({ runId: id, reason: 'Worker shutting down' });
+    for (let i = 0; this.active.size && i < 200; i++)
+      await new Promise((resolve) => setTimeout(resolve, 25));
   }
 
   handleAbort(payload: RunAbortPayload): void {
     const entry = this.active.get(payload.runId);
     if (!entry) return;
     entry.aborted = true;
+    entry.slotWait.abort();
     entry.agent?.abort();
   }
 
-  private async ensureTicketDir(ticketId: string): Promise<string> {
+  private async ensureTicketDir(ticketId: string, attempt: number): Promise<string> {
     if (this.deps.ensureTicketDir) return this.deps.ensureTicketDir(ticketId);
-    const dir = join(this.deps.ticketsDir, ticketId);
+    const dir = join(this.deps.ticketsDir, ticketId, `attempt-${attempt}`);
     await mkdir(dir, { recursive: true });
+    await touchDirectory(join(this.deps.ticketsDir, ticketId));
     return dir;
   }
 }

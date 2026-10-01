@@ -1,5 +1,7 @@
 export interface SessionEventRecord {
   sessionId: string;
+  runId?: string;
+  clientSeq?: number;
   seq: number;
   type: string;
   payload: unknown;

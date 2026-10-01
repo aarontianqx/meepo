@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import type { DispatchCommitter } from '../dispatch-committer.js';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { Session, Space, Ticket, WorkerNode } from '@meepo/core';
 import type { TurnDispatchEnvelope, WorkerChannelDownstream } from '@meepo/protocol';
@@ -90,6 +91,7 @@ function makeTicket(id: string, spaceId: string): Ticket {
     objective: 'do it',
     requiredTags: [],
     status: 'pending',
+    pendingSince: 0,
     createdAt: 0,
     updatedAt: 0,
   };
@@ -161,7 +163,7 @@ describe('DispatchService', () => {
 
     const run = await runs.getById(envelope.runId);
     expect(run).toMatchObject({
-      work: { kind: 'turn', sessionId: 'se1' },
+      work: { kind: 'turn', turnRef: { sessionId: 'se1', sourceId: 'm1' } },
       attempt: 1,
       workerId: 'w1',
       status: 'dispatched',
@@ -199,15 +201,71 @@ describe('DispatchService', () => {
     sender.connected.add('w1');
     const flushed = await service.flushWorkerQueues('w1');
     expect(flushed).toBe(2);
-    expect((await queue.listBySession('se1')).length).toBe(0);
+    expect((await queue.listBySession('se1')).length).toBe(1);
     const frame = sender.sent[sender.sent.length - 1].frame;
     if (frame.kind !== 'notification') throw new Error('expected notification');
     const envelope = frame.payload as TurnDispatchEnvelope;
     expect(envelope.prompt).toContain('hi');
     expect(envelope.prompt).toContain('second');
-    for (const item of queued) {
-      expect((await runs.getById(item.envelope.runId))?.status).toBe('dispatched');
+    expect((await runs.getById(queued[0].envelope.runId))?.status).toBe('dispatched');
+    expect(await runs.getById(queued[1].envelope.runId)).toMatchObject({
+      status: 'merged',
+      mergedIntoRunId: queued[0].envelope.runId,
+    });
+  });
+
+  it('keeps a broken space queue pending without starving another session', async () => {
+    await spaces.save(makeSpace('bad', 'w1'));
+    await spaces.save(makeSpace('good', 'w1'));
+    await workers.save(makeWorker('w1', ['bad', 'good']));
+    for (const id of ['bad', 'good']) {
+      await sessions.save(makeSession(id, id, 'main'));
+      await service.dispatchSessionTurn({ sessionId: id, ...turn });
     }
+    await spaces.save({ ...makeSpace('bad', 'w1'), model: { modelId: 'deleted-model' } });
+    sender.connected.add('w1');
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await service.flushConnectedQueues();
+      expect(log).toHaveBeenCalledOnce();
+      expect(sender.sent).toHaveLength(1);
+      const frame = sender.sent[0].frame;
+      expect(frame).toMatchObject({ payload: { sessionId: 'good' } });
+      expect(await queue.listBySession('bad')).toHaveLength(1);
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it('tries another worker when the least-loaded heartbeat hides reserved slots', async () => {
+    await spaces.save(makeSpace('sp1'));
+    await workers.save(makeWorker('w1', ['sp1']));
+    await workers.save(makeWorker('w2', ['sp1']));
+    await tickets.save(makeTicket('t1', 'sp1'));
+    sender.connected.add('w1').add('w2');
+    const TxClaimTicket = vi.fn((_ticket, run) => run.workerId === 'w2');
+    const committer = {
+      TxClaimTicket,
+      TxEnqueueTurn: vi.fn(),
+      TxMergeQueue: vi.fn(),
+      hasProcessedMessage: () => false,
+    } satisfies DispatchCommitter;
+    const service = new DispatchService(
+      sessions,
+      spaces,
+      workers,
+      tickets,
+      runs,
+      queue,
+      sender,
+      new TranscriptService(new MemorySessionEventRepository(), sessions),
+      { entries: [MODEL_ENTRY], defaultModelId: 'm' },
+      committer
+    );
+    expect(await service.dispatchTicket('t1')).toMatchObject({ dispatched: true, workerId: 'w2' });
+    expect(TxClaimTicket.mock.calls.map(([, run]) => run.workerId)).toEqual(['w1', 'w2']);
+    expect(sender.sent).toHaveLength(1);
+    expect(sender.sent[0].workerId).toBe('w2');
   });
 
   it('dispatches a ticket to the least-loaded eligible worker and claims it', async () => {

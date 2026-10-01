@@ -6,6 +6,10 @@ export class MemoryDispatchQueueRepository
   extends MemoryTable<QueuedDispatch>
   implements DispatchQueueRepository
 {
+  async delete(id: string): Promise<void> {
+    this.rows.delete(id);
+  }
+
   async enqueue(item: QueuedDispatch): Promise<void> {
     await this.save(item);
   }

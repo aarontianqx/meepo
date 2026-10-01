@@ -35,7 +35,7 @@ interface ErrorPayload {
   error?: { code?: string; message?: string };
 }
 
-async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+export async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(path, {
     method,
     headers: {
@@ -107,21 +107,12 @@ export const api = {
   createSpace: (input: CreateSpaceInput) => request<Space>('POST', '/api/spaces', input),
   getSpace: (spaceId: string) =>
     request<Space>('GET', `/api/spaces/${encodeURIComponent(spaceId)}`),
-  bindChat: (spaceId: string, chatId: string) =>
-    request<Space>('POST', `/api/spaces/${encodeURIComponent(spaceId)}/chats`, { chatId }),
-  unbindChat: (spaceId: string, chatId: string) =>
-    request<Space>(
-      'DELETE',
-      `/api/spaces/${encodeURIComponent(spaceId)}/chats/${encodeURIComponent(chatId)}`
-    ),
-  updateMemory: (spaceId: string, longTermMemory: string) =>
-    request<Space>('PUT', `/api/spaces/${encodeURIComponent(spaceId)}/memory`, { longTermMemory }),
   switchBinding: (spaceId: string, workerId: string) =>
     request<Space>('POST', `/api/spaces/${encodeURIComponent(spaceId)}/binding`, { workerId }),
   updateSpaceModel: (spaceId: string, model: SpaceModelRef | undefined) =>
     request<Space>('PUT', `/api/spaces/${encodeURIComponent(spaceId)}/model`, { model }),
 
-  listModels: () => request<ModelRegistryEntry[]>('GET', '/api/models'),
+  listModels: () => request<ModelRegistryEntry[]>('GET', '/api/model-options'),
 
   listMembers: (spaceId: string) =>
     request<SpaceMember[]>('GET', `/api/spaces/${encodeURIComponent(spaceId)}/members`),

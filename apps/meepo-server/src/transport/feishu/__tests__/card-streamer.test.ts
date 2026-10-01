@@ -92,18 +92,22 @@ describe('CardStreamer', () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
 
-  it('deletes the prewarm reply and creates a streaming card with a stop button', async () => {
+  it('waits for content before replacing prewarm with a card and keeps runId on stop', async () => {
     const client = new FakeFeishuClient();
     const streamer = makeStreamer(client);
 
     streamer.handleEvent(started(), REF);
     await vi.advanceTimersByTimeAsync(0);
 
+    expect(client.createdCards).toHaveLength(0);
+    streamer.handleEvent({ type: 'text_delta', runId: 't1', delta: 'Hello' }, REF);
+    await vi.advanceTimersByTimeAsync(500);
     expect(client.deletedMessages).toEqual(['om_prewarm']);
     expect(client.createdCards).toHaveLength(1);
     const card = lastCard(client);
     const tags = card.body.elements.map((e) => e.tag);
     expect(tags).toEqual(['markdown', 'button']);
+    expect(card.body.elements.at(-1)).toMatchObject({ value: { runId: 't1' } });
     expect(client.cardsSentTo).toEqual([{ messageId: 'om_root', cardId: 'card_1' }]);
   });
 
@@ -130,6 +134,20 @@ describe('CardStreamer', () => {
     expect(client.cardUpdates).toHaveLength(2);
     expect(client.cardUpdates[1].sequence).toBe(2);
     expect(lastCard(client).body.elements[0]).toMatchObject({ content: 'Hello world!' });
+  });
+
+  it('replaces partial deltas with canonical text and preserves repeated assistant messages', async () => {
+    const client = new FakeFeishuClient();
+    const streamer = makeStreamer(client);
+    streamer.handleEvent({ type: 'text_delta', runId: 't1', delta: 'Hel' }, REF);
+    streamer.handleEvent({ type: 'assistant_text', runId: 't1', content: 'Hello' }, REF);
+    streamer.handleEvent({ type: 'text_delta', runId: 't1', delta: 'Hello' }, REF);
+    streamer.handleEvent({ type: 'assistant_text', runId: 't1', content: 'Hello' }, REF);
+    streamer.handleEvent({ type: 'run_completed', runId: 't1' }, REF);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(lastCard(client).body.elements.find((e) => e.tag === 'markdown')).toMatchObject({
+      content: 'Hello\n\nHello',
+    });
   });
 
   it('renders thinking deltas into a collapsible panel', async () => {
@@ -192,5 +210,81 @@ describe('CardStreamer', () => {
     await vi.advanceTimersByTimeAsync(1_000);
 
     expect(client.createdCards).toHaveLength(0);
+  });
+  it('tools alone and machine failures remain silent', async () => {
+    const client = new FakeFeishuClient();
+    const streamer = new CardStreamer({
+      client,
+      sessions: { getSession: async () => SESSION },
+      isUserRun: async () => false,
+    });
+    streamer.handleEvent(
+      {
+        type: 'tool_execution_start',
+        runId: 'machine',
+        toolCallId: 'c',
+        toolName: 'bash',
+        args: { secret: 'hidden' },
+      },
+      REF
+    );
+    await vi.advanceTimersByTimeAsync(500);
+    streamer.handleEvent({ type: 'run_failed', runId: 'machine', error: 'failed' }, REF);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(client.createdCards).toEqual([]);
+  });
+  it('rotates long content in order and exposes tool names without arguments', async () => {
+    const client = new FakeFeishuClient(),
+      streamer = makeStreamer(client);
+    streamer.handleEvent(
+      {
+        type: 'tool_execution_start',
+        runId: 't1',
+        toolCallId: 'c',
+        toolName: 'bash',
+        args: { secret: 'hidden' },
+      },
+      REF
+    );
+    streamer.handleEvent({ type: 'assistant_text', runId: 't1', content: 'A'.repeat(60001) }, REF);
+    streamer.handleEvent({ type: 'run_completed', runId: 't1' }, REF);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(client.cardsSentTo).toHaveLength(3);
+    expect(client.settingsUpdates).toHaveLength(3);
+    expect(client.createdCards.join('')).toContain('bash');
+    expect(client.createdCards.join('')).not.toContain('hidden');
+    expect(client.createdCards.join('')).not.toContain('abort_run');
+    expect(client.cardUpdates.every((x) => x.sequence === 1)).toBe(true);
+  });
+  it('recovers a send whose response was lost by checking Feishu before retrying', async () => {
+    const client = new FakeFeishuClient();
+    const state = {
+      runId: 't1',
+      sessionId: 's1',
+      channelId: 'ch',
+      text: 'recovered',
+      thinking: '',
+      tools: {},
+      cardId: 'existing',
+      sendStartedAt: 10,
+      sequence: 3,
+      part: 0,
+      offset: 0,
+      state: 'completed' as const,
+      dirty: true,
+      updatedAt: 20,
+    };
+    const findReply = vi.fn(async () => ({ messageId: 'already-sent' }));
+    const streamer = new CardStreamer({
+      client: Object.assign(client, { findReply }),
+      sessions: { getSession: async () => SESSION },
+      channelId: 'ch',
+      outbox: { get: () => state, listPending: () => [state], save: vi.fn() },
+    });
+    streamer.recover();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(findReply).toHaveBeenCalled();
+    expect(client.cardsSentTo).toEqual([]);
+    expect(client.cardUpdates[0].sequence).toBe(4);
   });
 });

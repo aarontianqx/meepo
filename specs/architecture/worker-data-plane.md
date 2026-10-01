@@ -9,21 +9,21 @@ The `meepo-worker` is a self-hosted runner daemon executing on developer machine
 - Establishes a persistent outbound connection to `meepo-server` via WebSocket.
 - Authenticates with an enrollment token issued by any space member; the token alone determines which spaces the worker may serve.
 - Generates its `workerId` at first boot and persists it in the data directory; the token binds to that `workerId` on first use and later mismatches are rejected — bindings and queued dispatches are restored against it on reconnect.
-- Emits periodic heartbeats (15s) including active slot utilization, CPU/memory stats, and current run IDs (`activeRunIds`); each heartbeat renews the execution lease of the runs it carries in `activeRunIds` (lease = 3 heartbeat intervals — 45s at the default 15s — server clock authoritative). On connection loss the worker starts no new runs and suspends active ones past the lease window; on reconnect it reconciles runs with the server and kills any the server has invalidated.
+- Emits periodic heartbeats (15s) including active slot utilization and current run IDs (CPU/memory metrics are optional wire fields) (`activeRunIds`); each heartbeat renews the execution lease of the runs it carries in `activeRunIds` (lease = 3 heartbeat intervals — 45s at the default 15s — server clock authoritative). On connection loss the worker starts no new runs and aborts local work after the disconnected lease window; on reconnect it reconciles runs with the server and kills any the server has invalidated.
 
 ### 2. Working Directories
 
 - Owns the physical state of executions: per-task working directories and their contents. This local state is what makes session affinity a hard constraint, and it is never migrated implicitly.
-- **Meepo manages no repositories**: sessions and tickets both start in a neutral per-task directory (`~/.meepo/sessions/<session-id>`, `~/.meepo/tickets/<ticketId>-attempt-N` — a fresh directory per ticket attempt, old attempts kept for audit). Whether a task involves a repo is a prompt-level concern — the agent clones or worktrees repositories itself. (The worktree-before-modifying-code rule lives in the optional _coding preset_, not in the universal base prompt.)
+- **Meepo manages no repositories**: sessions and tickets both start in a neutral per-task directory (`~/.meepo/sessions/<session-id>`, `~/.meepo/tickets/<ticketId>/attempt-N` — a fresh directory per ticket attempt, old attempts kept for audit). Whether a task involves a repo is a prompt-level concern — the agent clones or worktrees repositories itself. (The worktree-before-modifying-code rule lives in the optional _coding preset_, not in the universal base prompt.)
 - Repository credentials belong to the worker's own environment (the machine owner's git/SSH configuration); neither plane ever handles repo auth.
-- Working directories are reclaimed after 7 days, and a `session.closed` notification reclaims the session's local resources immediately; a directory is abandoned only through an explicit, state-losing rebind initiated by the user.
+- Inactive task directories are eligible for reclamation after 7 days; active runners and pending creates are protected, and a `session.closed` notification aborts work and reclaims local resources after execution actually settles; normal worker shutdown preserves directories. An explicit rebind releases the old main-session directory only after active work stops.
 
 ### 3. Agent Execution Engine
 
 - Embeds `@earendil-works/pi-agent-core`'s `Agent` loop; model credentials resolve from the server's model registry (space references a `modelId`) and are injected per dispatch (TLS on the worker channel is a prerequisite for real credentials).
 - Sessions stay warm: the agent process may outlive a turn. After TTL eviction or a worker restart, the session cold-starts from the server-provided snapshot.
-- **System prompt = universal skeleton + optional domain presets**: identity/runtime (bot name, time, workdir) + space memory index + skills (`~/.agents/skills/` descriptions) + channel info. Domain presets (e.g. the coding preset with worktree discipline) are opt-in per space, never hardcoded into the base. The rendered prompt is snapshotted at session creation so resumes don't drift — the freeze covers identity, presets, and tool descriptions; the directory-level Memory Map is a separately versioned suffix block, re-rendered at cold starts (new session, TTL eviction, `/new`) and recorded with each snapshot.
-- Effective timing is split three ways: identity/preset/tool descriptions are frozen for the session's lifetime; memory is retrieved live via tools, never injected; the wall-clock time is frozen in the prompt snapshot while the current time rides in each turn's envelope (machine turns' origin envelopes included) — the prompt stays cache-stable without the agent losing track of elapsed time.
+- **System prompt = universal skeleton + optional domain presets**: identity/runtime (bot name, time, workdir) + space memory index + skills (`~/.agents/skills/` descriptions) + channel info. Domain presets (e.g. the coding preset with worktree discipline) are opt-in per space, never hardcoded into the base. The rendered prompt is recorded at the first cold execution so resumes don't drift — the freeze covers identity and presets; tool descriptions remain stable while warm and are refreshed with local rules and skills on cold start; the directory-level Memory Map is a separately versioned suffix block, re-rendered at cold starts (first execution of a new session, restart, TTL eviction, `/new`) and recorded with each snapshot.
+- Effective timing is split three ways: identity/presets are frozen for the session's lifetime; tool descriptions and local rules refresh only at cold starts; memory bodies are retrieved live via tools, with only the directory map injected; the wall-clock time is frozen in the prompt snapshot while the current time rides in each turn's envelope (machine turns' origin envelopes included) — the prompt stays cache-stable without the agent losing track of elapsed time.
 - Injects local tool operations using `@earendil-works/pi-coding-agent` abstractions:
   - `createReadTool` with local filesystem access.
   - `createWriteTool` with local directory creation.
@@ -34,16 +34,32 @@ The `meepo-worker` is a self-hosted runner daemon executing on developer machine
   - `message_update` (text deltas).
   - `tool_execution_start` / `tool_execution_update` / `tool_execution_end`.
   - `turn_end` / `agent_end`.
-- Media normalization is worker-side: images referenced in the transcript are downloaded directly from the channel (credentials injected at dispatch), materialized into the session's `.media/` directory, and downscaled only on the model-bound copy.
+- Media normalization is worker-side: images referenced in the transcript are downloaded directly from the channel (credentials injected at dispatch), cached in the shared `<sessionsDir>/.media` directory, and downscaled only on the model-bound copy.
 
 ### 4. Delivery, Steering & Wakeup
 
-- Applies three delivery semantics to incoming work: `urgent` (end the active turn — run `interrupted` — and start a new one), `wait` (queue behind it), `if_idle` (drop when busy, leaving a `dropped` run record). Consecutive queued messages may merge into a single turn; runs pre-created for messages later merged are closed as `merged`.
+- All current producers use `wait`. The protocol also reserves the other delivery semantics: `urgent` (end the active turn — run `interrupted` — and start a new one), `wait` (queue behind it), `if_idle` (drop when busy, leaving a `dropped` run record). Consecutive queued messages may merge into a single turn; runs pre-created for messages later merged are closed as `merged`.
 - Handles `turn.dispatch` envelopes (user turns and schedule fires): cold-starts the session from the server snapshot if needed, then runs a turn in the restored context.
 - Listens for server-initiated `abort` signals and cancels running tool child processes.
 
 ### 5. Server-Backed Tools
 
 - Scheduling tools (`CronCreate` / `CronList` / `CronDelete` for session wakeups, `TicketCreate` for independent tasks) proxy to the server; schedule records live server-side. The worker holds no timers or scheduler of its own.
-- **Memory tools** (`MemoryList` / `MemorySearch` / `MemoryRead` / `MemoryWrite` / `MemoryDelete`) proxy to the server; the system prompt carries a directory-level Memory Map snapshot (frozen at session creation, possibly stale — the tools always return current data), and writes are guarded by `expected_revision` optimistic locking.
-- Context tools (history, space memory) query the server rather than local state, keeping the worker free of authoritative data.
+- **Memory tools** (`MemoryList` / `MemorySearch` / `MemoryRead` / `MemoryWrite` / `MemoryDelete`) proxy to the server; the system prompt carries a directory-level Memory Map snapshot (refreshed on cold starts, possibly stale while warm — tools always return current data), and writes are guarded by `expected_revision` optimistic locking.
+- Transcript snapshots are fetched by the runtime over RPC during cold restoration; there is no separate agent-facing history-query tool. Memory tools always query current server data.
+
+### 6. Configuration Lifecycle
+
+The owner configures TOML or JSON (`MEEPO_WORKER_CONFIG`, default `~/.meepo/worker.toml`). Environment overrides take precedence. File changes atomically publish MCP connections and model defaults for subsequent tickets/cold sessions; failed validation or connection retains the entire previous generation. Warm sessions retain their current tools/model, and old MCP connections close after their final session lease releases. Connection settings, paths, identity, tags, TTL and slot capacity require restart. Space thinking-level selection overrides the worker default. Shutdown aborts active runs, flushes terminal events when connected, closes MCP and WebSocket connections, and preserves workspace files.
+
+Agent-originated server tools include their current `runId`. The server checks ownership, resource association and an unexpired running lease before memory access or schedule/ticket mutations, fencing obsolete attempts independently of client behavior.
+
+### Media retention
+
+Downloaded originals live in `<sessionsDir>/.media`, keyed by app/message/file identity and excluded from task-directory reclamation. Closing a session or reclaiming its working directory does not delete those originals. A new worker can fetch the referenced source through the channel API; caches remain local to each worker. An operator retiring a worker must retain its media cache when historical source availability matters.
+
+### Model selection and reasoning effort
+
+The space selects a server model-registry entry. The agent stream uses `openai-completions`; a provider name identifies the configured endpoint and does not select a different wire API. Effective `thinkingLevel` is **space override → worker model default → model capability default**. New spaces/workers need not set it. Kimi entries in the current capability table (including K3) default to `max`; its named GPT entries default to `high`. Unknown model IDs currently fall back to K3 capabilities, so arbitrary model compatibility is not guaranteed.
+
+Ordinary agent requests explicitly send `reasoningEffort`. A warm session retains the model/effort used to create its runner; a fresh ticket or cold session resolves current configuration. Compaction uses a separate summary-provider path and does not explicitly inherit that effort setting. Compaction starts around 80% of the configured context window, retains a recent tail with intact tool pairs, and leaves the server event log unchanged; summary failure falls back to bounded recent history.

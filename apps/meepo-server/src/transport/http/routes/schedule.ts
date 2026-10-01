@@ -18,9 +18,16 @@ export function registerScheduleRoutes(app: FastifyInstance, services: ServiceCo
     return services.schedulerService.createSchedule(body, identityOf(req).userId);
   });
 
-  app.get<{ Querystring: ListSchedulesQuery }>('/api/schedules', async (req) =>
-    services.schedulerService.listSchedules(req.query.spaceId)
-  );
+  app.get<{ Querystring: ListSchedulesQuery }>('/api/schedules', async (req) => {
+    const allowed = new Set(
+      (await services.membershipService.listMemberships(identityOf(req).userId)).map(
+        (m) => m.spaceId
+      )
+    );
+    return (await services.schedulerService.listSchedules(req.query.spaceId)).filter((x) =>
+      allowed.has(x.spaceId)
+    );
+  });
 
   app.post<{ Params: ScheduleParams }>('/api/schedules/:id/cancel', async (req) =>
     services.schedulerService.cancelSchedule(req.params.id)

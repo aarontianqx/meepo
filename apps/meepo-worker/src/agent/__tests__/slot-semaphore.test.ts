@@ -168,6 +168,10 @@ describe('SessionRunner with a shared SlotSemaphore', () => {
     await flush();
 
     expect(b.runner.abort('rb')).toBe(true);
+    await flush();
+    expect(b.runner.busy).toBe(false);
+    expect(slots.waitingCount).toBe(0);
+    expect(slots.activeCount).toBe(1);
 
     a.agent.finishRun();
     await flush();

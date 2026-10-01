@@ -1,6 +1,7 @@
+import { randomUUID } from 'node:crypto';
+import { identityOf } from '../auth.js';
+import { validation } from '../../../domain/errors.js';
 import type { FastifyInstance } from 'fastify';
-
-import type { DeliveryMode, DispatchSource } from '@meepo/protocol';
 
 import type { OpenSessionInput } from '../../../domain/sessions/session-service.js';
 import type { ServiceContainer } from '../../../service-container.js';
@@ -15,14 +16,20 @@ interface ListSessionsQuery {
 
 interface PostTurnBody {
   prompt: string;
-  delivery?: DeliveryMode;
-  source?: DispatchSource;
+  delivery?: 'wait';
 }
 
 export function registerSessionRoutes(app: FastifyInstance, services: ServiceContainer): void {
   app.post('/api/sessions', async (req) => {
     const body = req.body as OpenSessionInput;
-    return services.sessionService.getOrCreateByThread(body);
+    if (body.channelId || body.anchorMessageId || body.prewarmMessageId)
+      throw validation('IM windows are created by their channel');
+    return services.sessionService.getOrCreateByThread({
+      spaceId: body.spaceId,
+      chatId: `console:${identityOf(req).userId}`,
+      threadId: randomUUID(),
+      kind: 'main',
+    });
   });
 
   app.get<{ Querystring: ListSessionsQuery }>('/api/sessions', async (req) => {
@@ -41,11 +48,16 @@ export function registerSessionRoutes(app: FastifyInstance, services: ServiceCon
   /** Injects a user turn into a session (drives the dispatch pipeline without IM). */
   app.post<{ Params: SessionParams }>('/api/sessions/:id/turns', async (req) => {
     const body = req.body as PostTurnBody;
+    if (body.delivery !== undefined && body.delivery !== 'wait')
+      throw validation('Session turns only support wait delivery');
+    if (typeof body.prompt !== 'string' || !body.prompt.trim())
+      throw validation('Prompt is required');
     return services.dispatchService.dispatchSessionTurn({
       sessionId: req.params.id,
       prompt: body.prompt,
-      delivery: body.delivery ?? 'wait',
-      source: body.source ?? { kind: 'user_message', messageId: `http-${Date.now()}` },
+      delivery: 'wait',
+      authorOpenId: identityOf(req).userId,
+      source: { kind: 'user_message', messageId: `http-${randomUUID()}` },
     });
   });
 }

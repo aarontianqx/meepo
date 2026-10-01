@@ -156,7 +156,7 @@ describe('SessionRunner', () => {
     await flush();
 
     expect(agent.prompts).toEqual(['p1']);
-    expect(events.some((e) => 'runId' in e && e.runId === 't2')).toBe(false);
+    expect(events).toContainEqual({ type: 'run_dropped', runId: 't2' });
   });
 
   it('starts if_idle turns immediately when idle', () => {
@@ -165,40 +165,21 @@ describe('SessionRunner', () => {
     expect(agent.prompts).toEqual(['p1']);
   });
 
-  it('steers urgent turns into the in-flight run and hands the stream over', async () => {
+  it('aborts the active tool immediately for urgent delivery and starts a new run', async () => {
     const { agent, events, runner } = setup();
-
     runner.runTurn('t1', 'p1', 'wait');
-    agent.emitEvent({ type: 'message_start', message: userMessage('p1') });
-
     runner.runTurn('t2', 'p2', 'urgent');
-    expect(agent.steered).toHaveLength(1);
-    expect(agent.steered[0]).toMatchObject({ role: 'user', content: 'p2' });
-    expect(agent.prompts).toEqual(['p1']);
-
-    // t1 finishes its assistant turn, then pi injects the steered message.
-    agent.emitEvent({ type: 'message_end', message: assistantMessage('partial answer') });
-    agent.emitEvent({ type: 'message_start', message: userMessage('p2') });
-
-    expect(events).toContainEqual({
-      type: 'run_completed',
-      runId: 't1',
-      resultSummary: 'partial answer',
-      usage: { inputTokens: 10, outputTokens: 5 },
-    });
+    expect(agent.abortCount).toBe(1);
+    expect(agent.steered).toEqual([]);
+    await flush();
+    expect(agent.prompts).toEqual(['p1', 'p2']);
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: 'run_failed', runId: 't1', code: 'aborted' })
+    );
     expect(events).toContainEqual(expect.objectContaining({ type: 'run_started', runId: 't2' }));
-
-    agent.emitEvent({ type: 'message_end', message: assistantMessage('final answer') });
     agent.finishRun();
     await flush();
-
-    expect(events).toContainEqual(
-      expect.objectContaining({
-        type: 'run_completed',
-        runId: 't2',
-        resultSummary: 'final answer',
-      })
-    );
+    expect(events).toContainEqual(expect.objectContaining({ type: 'run_completed', runId: 't2' }));
   });
 
   it('fails a queued task on abort without touching the running turn', async () => {
@@ -297,22 +278,23 @@ describe('mergeQueuedTurns', () => {
     expect(mergeQueuedTurns([turn])).toBe(turn);
   });
 
-  it('merges multiple turns, annotating each prompt and taking the last runId', () => {
+  it('merges multiple turns, annotating each prompt and taking the first runId', () => {
     const merged = mergeQueuedTurns([
       { runId: 't1', prompt: '[Alice] first' },
       { runId: 't2', prompt: '[Bob] second' },
       { runId: 't3', prompt: 'third', timeoutSeconds: 60 },
     ]);
     expect(merged).toEqual({
-      runId: 't3',
-      timeoutSeconds: 60,
+      images: [],
+      runId: 't1',
+      timeoutSeconds: undefined,
       prompt: '[1/3] [Alice] first\n\n[2/3] [Bob] second\n\n[3/3] third',
     });
   });
 });
 
 describe('SessionRunner queue merging', () => {
-  it('merges consecutive wait turns into one execution attributed to the last runId', async () => {
+  it('merges consecutive wait turns into one execution attributed to the first runId', async () => {
     const { agent, events, runner } = setup();
 
     runner.runTurn('t1', 'p1', 'wait');
@@ -327,13 +309,13 @@ describe('SessionRunner queue merging', () => {
     // One merged turn instead of three separate ones.
     expect(agent.prompts).toHaveLength(2);
     expect(agent.prompts[1]).toBe('[1/3] [Alice] p2\n\n[2/3] [Bob] p3\n\n[3/3] [Carol] p4');
-    expect(events).toContainEqual(expect.objectContaining({ type: 'run_started', runId: 't4' }));
-    expect(events.some((e) => 'runId' in e && e.runId === 't2')).toBe(false);
-    expect(events.some((e) => 'runId' in e && e.runId === 't3')).toBe(false);
+    expect(events).toContainEqual(expect.objectContaining({ type: 'run_started', runId: 't2' }));
+    expect(events).toContainEqual({ type: 'run_merged', runId: 't4', mergedIntoRunId: 't2' });
+    expect(events).toContainEqual({ type: 'run_merged', runId: 't3', mergedIntoRunId: 't2' });
 
     agent.finishRun();
     await flush();
-    expect(events).toContainEqual(expect.objectContaining({ type: 'run_completed', runId: 't4' }));
+    expect(events).toContainEqual(expect.objectContaining({ type: 'run_completed', runId: 't2' }));
     expect(agent.prompts).toHaveLength(2);
   });
 });

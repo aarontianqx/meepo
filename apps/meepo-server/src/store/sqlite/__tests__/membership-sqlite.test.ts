@@ -40,9 +40,9 @@ describe('SqliteMembershipRepository', () => {
 
   it('overwrites the membership for the same pair', async () => {
     await repo.save(makeMember());
-    await repo.save(makeMember({ role: 'manager' }));
+    await repo.save(makeMember({ role: 'operator' }));
 
-    expect((await repo.get('space-1', 'user-1'))?.role).toBe('manager');
+    expect((await repo.get('space-1', 'user-1'))?.role).toBe('operator');
     expect(await repo.listBySpace('space-1')).toHaveLength(1);
   });
 

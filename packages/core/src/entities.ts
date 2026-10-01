@@ -9,7 +9,7 @@ export interface UserIdentity {
   email?: string;
 }
 
-export type SpaceRole = 'owner' | 'manager';
+export type SpaceRole = 'owner' | 'operator';
 
 /** A space's model selection: a registry reference plus an optional effort override */
 export interface SpaceModelRef {
@@ -30,6 +30,8 @@ export interface SpaceMember {
  * Issued by a space member; presented by the worker at registration time.
  */
 export interface WorkerEnrollmentToken {
+  revokedAt?: number;
+  workerId?: string;
   id: string;
   spaceIds: string[];
   issuedByUserId: string;
@@ -43,6 +45,7 @@ export interface WorkerEnrollmentToken {
 
 /** Sovereign workspace boundary */
 export interface Space {
+  promptPreset?: 'general' | 'coding';
   id: string;
   name: string;
   description?: string;
@@ -77,6 +80,11 @@ export interface WorkerNode {
 
 /** Ticket entity for async background tasks */
 export interface Ticket {
+  /** Start of the most recent pending interval; preserved outside pending. */
+  pendingSince: number;
+  idempotent?: boolean;
+  attempt?: number;
+  terminalReason?: string;
   id: string;
   spaceId: string;
   title: string;
@@ -85,7 +93,8 @@ export interface Ticket {
   requiredTags: string[];
   /** Session the result reports back to, when the ticket was created from one */
   originSessionId?: string;
-  status: 'pending' | 'claimed' | 'running' | 'completed' | 'failed';
+  status:
+    'pending' | 'claimed' | 'running' | 'completed' | 'failed' | 'cancelled' | 'manual_review';
   assignedWorkerId?: string;
   result?: {
     branch?: string;
@@ -107,6 +116,8 @@ export type SessionKind = 'main' | 'thread';
 
 /** Session descriptor mapped to a Feishu window */
 export interface Session {
+  channelId?: string;
+  windowId?: string;
   id: string;
   spaceId: string;
   kind: SessionKind;
@@ -157,13 +168,27 @@ export interface Schedule {
   lastFiredAt?: number;
 }
 
-export type RunStatus = 'queued' | 'dispatched' | 'running' | 'completed' | 'failed';
+export type RunStatus =
+  'queued' | 'dispatched' | 'running' | 'completed' | 'failed' | 'merged' | 'dropped';
+
+export function isTerminalRun(status: RunStatus): boolean {
+  return ['completed', 'failed', 'merged', 'dropped'].includes(status);
+}
 
 /** One execution attempt of a ticket or a session turn */
 export interface Run {
   id: string;
-  work: { kind: 'ticket'; ticketId: string } | { kind: 'turn'; sessionId: string };
+  work:
+    | { kind: 'ticket'; ticketId: string }
+    | { kind: 'turn'; turnRef: { sessionId: string; sourceId: string } };
   attempt: number;
+  leaseExpiresAt?: number;
+  terminalReason?: string;
+  lastClientSeq?: number;
+  mergedIntoRunId?: string;
+  mergedSourceIds?: string[];
+  initiatorIds?: string[];
+  usage?: { inputTokens: number; outputTokens: number; costUsd?: number };
   workerId?: string;
   status: RunStatus;
   createdAt: number;

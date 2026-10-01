@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { Schedule, Session, Space } from '@meepo/core';
 
@@ -199,6 +199,24 @@ describe('SchedulerService', () => {
       expect((await schedules.getById('a1'))?.status).toBe('done');
 
       expect(await service.collectDueFires(NOW + 60_000)).toHaveLength(0);
+    });
+
+    it('isolates one schedule commit failure and continues collecting later schedules', async () => {
+      await schedules.save(makeSchedule({ id: 'broken', timing: { kind: 'at', at: NOW - 1000 } }));
+      await schedules.save(makeSchedule({ id: 'healthy', timing: { kind: 'at', at: NOW - 1000 } }));
+      const save = schedules.save.bind(schedules);
+      vi.spyOn(schedules, 'save').mockImplementation(async (schedule) => {
+        if (schedule.id === 'broken') throw new Error('commit failed');
+        await save(schedule);
+      });
+      const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        expect((await service.collectDueFires(NOW)).map((f) => f.schedule.id)).toEqual(['healthy']);
+        expect((await schedules.getById('broken'))?.status).toBe('active');
+        expect(log).toHaveBeenCalledOnce();
+      } finally {
+        log.mockRestore();
+      }
     });
 
     it('does not fire before its time', async () => {

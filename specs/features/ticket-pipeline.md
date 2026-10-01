@@ -6,53 +6,32 @@ While interactive sessions are optimized for synchronous dialogue, complex or de
 
 ## 2. Ticket Lifecycle
 
+```text
+Agent / HTTP / webhook / schedule → pending ticket → claimed attempt → running → result
 ```
-[Trigger: Agent intent / Webhook / Schedule fire]
-                 │
-                 ▼
-      [Create Ticket in Server]
-        (Status: Pending)
-                 │
-                 ▼
-     [Worker Claim / Run Dispatch]
-        (Status: Running)
-                 │
-                 ▼
- [Worker Executes in Neutral Task Directory]
-   (example coding flow — tickets are repo-agnostic)
-   - Clone/worktree repos on demand
-   - Apply edits & run tests
-   - Commit changes & push branch
-   - Open Pull Request
-                 │
-                 ▼
-     [Report Ticket Completion]
-        (Status: Completed)
-                 │
-                 ▼
-[Notify Origin Session / Feishu Thread]
-```
+
+Workers execute the supplied objective in a fresh neutral directory. Repository operations and publication are determined by that objective and the configured prompt, not an automatic ticket pipeline.
 
 Every dispatch of a ticket creates a **Run**; a retry is a new Run with an incremented `attempt` and a fresh task directory (see `specs/features/triggers-and-scheduling.md`).
 
 ### Ticket State Transitions
 
-| From | Event | To |
-| --- | --- | --- |
-| `pending` | claimed by a worker | `claimed` |
-| `pending` | 24h unclaimed | `failed(unclaimed)` |
-| `pending` / `claimed` / `manual_review` | user cancel | `cancelled` |
-| `claimed` | `run_started` | `running` |
-| `claimed` | lease lost before `run_started` | `pending` (re-dispatch) |
-| `running` | agent completes | `completed` |
-| `running` | agent errors | `failed(error)` |
-| `running` | lease expired; retry-eligible, attempts left | `pending` (new attempt) |
-| `running` | lease expired; not retry-eligible | `manual_review` |
-| `running` | lease expired; attempts exhausted | `failed(max_attempts)` |
-| `manual_review` | human retry | `pending` (new attempt) |
-| `manual_review` | human abandon | `failed(abandoned)` |
+| From                                                | Event                                          | To                      |
+| --------------------------------------------------- | ---------------------------------------------- | ----------------------- |
+| `pending`                                           | claimed by a worker                            | `claimed`               |
+| `pending`                                           | 24h unclaimed                                  | `failed(unclaimed)`     |
+| `pending` / `claimed` / `running` / `manual_review` | user cancel                                    | `cancelled`             |
+| `claimed`                                           | `run_started`                                  | `running`               |
+| `claimed`                                           | lease lost before `run_started`, attempts left | `pending` (new attempt) |
+| `running`                                           | agent completes                                | `completed`             |
+| `running`                                           | agent errors                                   | `failed(error)`         |
+| `running`                                           | lease expired; retry-eligible, attempts left   | `pending` (new attempt) |
+| `running`                                           | lease expired; not retry-eligible              | `manual_review`         |
+| `claimed` / `running`                               | lease expired; attempts exhausted              | `failed(max_attempts)`  |
+| `manual_review`                                     | human retry                                    | `pending` (new attempt) |
+| `manual_review`                                     | human abandon                                  | `failed(abandoned)`     |
 
-`completed` / `failed` / `cancelled` are terminal.
+`completed` / `failed` / `cancelled` are terminal. Manual retry accepts only `manual_review` with attempts remaining. `POST /api/tickets/:id/cancel` and the console Cancel ticket button also accept `running`. Repeated cancellation returns the same cancelled ticket and resends abort; completed/failed tickets reject cancellation with 409. When completion and cancellation race, the first committed transition wins; the other cannot overwrite it.
 
 ## 3. Data Model
 
@@ -68,19 +47,23 @@ interface Ticket {
   originSessionId?: string;
   /** Declares the ticket safely re-runnable */
   idempotent?: boolean;
-  /** Current attempt number (1-based) */
-  attempt: number;
-  status: 'pending' | 'claimed' | 'running' | 'completed' | 'failed' | 'cancelled' | 'manual_review';
+  /** Zero/absent before first dispatch; executions start at attempt 1. */
+  attempt?: number;
+  status:
+    'pending' | 'claimed' | 'running' | 'completed' | 'failed' | 'cancelled' | 'manual_review';
   assignedWorkerId?: string;
   result?: { summary: string };
+  pendingSince: number; // start of the most recent pending interval
+  terminalReason?: string;
   createdAt: number;
+  updatedAt: number;
   completedAt?: number;
 }
 ```
 
-`completed` means the agent finished normally (not human acceptance); the ticket prompt requires a precise final summary, which becomes `result.summary`. Each attempt executes in a fresh task directory (`<ticketId>-attempt-N`); previous attempts' artifacts stay in their own directories for audit.
+`completed` means the agent finished normally (not human acceptance); the ticket prompt requires a precise final summary, which becomes `result.summary`. Each attempt executes in a fresh task directory (`<ticketsDir>/<ticketId>/attempt-N`); previous attempts’ artifacts remain separate until worker directory retention reclaims them. The server execution trace remains durable.
 
-Attempt-level retry is conservative: a ticket auto-retries when it was declared `idempotent: true` at creation, or when the previous attempt's persisted event stream shows only read-only tools (`read`/`grep`/`ls`/`glob`; `bash`, `write`, `edit`, and any MCP tool count as side-effectful). Otherwise it parks in `manual_review`, where a human resolves it from the console or API: **retry** (new attempt, fresh directory) or **abandon** (`failed(reason=abandoned)`). `maxAttempts = 3` — exhaustion ends as `failed(reason=max_attempts)`; a ticket pending over 24 hours ends as `failed(reason=unclaimed)`. Pending, claimed, and manual_review tickets can be cancelled from the console or API. Ticket runs receive `MEEPO_IDEMPOTENCY_KEY=<ticketId>-<attempt>` in their tool environment, and the ticket prompt requires passing it as the idempotency key for external API calls.
+Attempt-level retry is conservative: within the attempt limit, a never-started attempt may retry; a started attempt retries when the ticket was declared `idempotent: true` at creation, or when the previous attempt's persisted event stream shows only read-only tools (`read`/`grep`/`ls`/`glob`; `bash`, `write`, `edit`, and any MCP tool count as side-effectful). Otherwise it parks in `manual_review`, where a human resolves it from the console or API: **retry** (new attempt, fresh directory) or **abandon** (`failed(reason=abandoned)`). `maxAttempts = 3` — exhaustion ends as `failed(reason=max_attempts)`; a ticket pending for 24 hours ends as `failed(reason=unclaimed)`. The clock uses `pendingSince`, initialized at creation and reset on every manual or automatic retry into pending; unrelated updates do not extend it. SQLite migration backfills existing tickets from `updatedAt` (the previous implementation’s pending transition timestamp). Pending, claimed, running, and manual_review tickets can be cancelled from the console or API. Ticket runs receive `MEEPO_IDEMPOTENCY_KEY=<ticketId>-<attempt>` in their tool environment, and the ticket prompt requires passing it as the idempotency key for external API calls.
 
 Each run's execution stream — tool calls/results and final text, with streaming deltas excluded — is persisted server-side, keyed by `ticketId + attempt`, and is replayable from the console ticket detail page. The origin session's transcript receives only the receipt event (the result summary), never the execution detail. Receipt delivery follows the origin session's state: active → delivered as a `wait` turn (the agent responds in the window); busy → queued behind the active turn; closed → transcript only, no wake.
 
@@ -90,14 +73,17 @@ Tickets are a **generic async-task mechanism**: they may or may not involve a re
 
 A ticket is created by any of:
 
+- **Console/API**: a space member creates a ticket through `POST /api/tickets`.
 - **Agent intent**: the agent formalizes a request into a ticket via the `TicketCreate` tool.
-- **Webhooks**: external systems (CI, monitoring) push events that materialize as tickets via `POST /api/webhooks/{spaceId}/tickets`, authenticated by a per-space webhook secret. No broader open API is provided.
+- **Webhooks**: external systems (CI, monitoring) push events that materialize as tickets via `POST /api/webhooks/{spaceId}/tickets`, authenticated by a per-space Bearer secret (stored as a SHA-256 hash), or by the authenticated space member. Members issue/rotate or revoke it through `POST`/`DELETE /api/spaces/:id/webhook-token`; rotation invalidates the old token. Input fields are `title?`, `objective`, `contextSummary?`, `idempotent?`; the caller cannot forge an origin session. An `Authorization` header on this route is always interpreted as a webhook credential; current member access uses the local identity adapter without that header. SSO Bearer coexistence must be resolved when adding the SSO adapter. No broader external integration API is provided.
 - **Schedule fires**: a `Schedule` with `action: create_ticket` materializes a fresh ticket at fire time (see `specs/features/triggers-and-scheduling.md`).
 
 Tickets are exempt from session affinity: any enrolled, tag-matched worker with a free slot may claim a ticket.
 
-## 5. Key Advantages
+## 5. Cancellation and receipt persistence
 
-- **Clean Execution Context**: The worker receives a concise, curated `objective` rather than a sprawling 50-turn chat history.
-- **Fault Tolerance**: If a worker disconnects mid-task, the ticket becomes re-dispatchable once the attempt's lease expires (late results from expired attempts are rejected). Attempt-level retry is conservative: never-started attempts re-dispatch automatically; started attempts re-dispatch only when declared `idempotent: true` or proven read-only by their persisted event stream; otherwise the ticket parks in `manual_review` for human resolution (retry / abandon).
-- **Full Traceability**: every execution attempt is recorded as a Run with its own task directory and persisted event stream, and the final summary is reported back to the origin.
+Cancellation first saves ticket state and fences its related runs in one SQLite transaction; the same transaction creates the origin receipt. The following abort notification targets those already-fenced runs by `terminalReason === 'cancelled'`. This ordering prevents stale events from restoring cancelled work while still stopping live worker execution. See the [server transaction contract](../architecture/server-control-plane.md#transaction-boundaries-and-cancellation-contract) for the repository adapter requirements.
+
+Receipts use a stable ticket/attempt/status key. Terminal outcomes and lease loss requiring manual review notify the origin when one exists; automatic retries do not send a failure receipt on each attempt. No origin session means no receipt destination. A receipt triggers a session response through `wait` delivery, not direct replay of the ticket’s full tool trace.
+
+Cancellation prevents further retries and requests worker interruption; it does not roll back files, messages or other effects already produced. Database cancellation is immediate, while local tool termination may take time. A disconnected worker is fenced immediately and aborts on lease loss/reconciliation. Ticket cancellation is available through Console/API; Feishu session Stop does not cancel independently created tickets.

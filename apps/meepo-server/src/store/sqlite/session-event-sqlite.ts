@@ -11,6 +11,8 @@ interface SessionEventRow {
   type: string;
   payload: string;
   timestamp: number;
+  run_id: string | null;
+  client_seq: number | null;
 }
 
 function rowToEvent(row: SessionEventRow): SessionEventRecord {
@@ -20,6 +22,8 @@ function rowToEvent(row: SessionEventRow): SessionEventRecord {
     type: row.type,
     payload: JSON.parse(row.payload) as unknown,
     timestamp: row.timestamp,
+    runId: row.run_id ?? undefined,
+    clientSeq: row.client_seq ?? undefined,
   };
 }
 
@@ -33,6 +37,15 @@ export class SqliteSessionEventRepository implements SessionEventRepository {
     timestamp: number = Date.now()
   ): Promise<SessionEventRecord> {
     return this.db.transaction(() => {
+      const externalId = (payload as { externalMessageId?: string } | undefined)?.externalMessageId;
+      if (externalId) {
+        const prior = this.db
+          .prepare(
+            "SELECT * FROM session_events WHERE session_id=? AND json_extract(payload,'$.externalMessageId')=?"
+          )
+          .get(sessionId, externalId) as SessionEventRow | undefined;
+        if (prior) return rowToEvent(prior);
+      }
       const seq = this.latestSeqSync(sessionId) + 1;
       const storedPayload = payload === undefined ? null : payload;
       this.db

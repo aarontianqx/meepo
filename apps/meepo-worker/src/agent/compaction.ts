@@ -12,7 +12,7 @@ import { stream, streamSimple } from '@earendil-works/pi-ai/api/openai-completio
 import type { ModelConfig } from '@meepo/protocol';
 
 import { createModel } from './model-factory.js';
-import type { SessionCompactor } from './session-runner.js';
+import { keepRecentMessages, type SessionCompactor } from './session-runner.js';
 
 /** Compact when estimated context exceeds 80% of the model's context window. */
 const THRESHOLD_RATIO = 0.8;
@@ -29,7 +29,7 @@ export function keepRecentByTokens(messages: AgentMessage[], tokenBudget: number
     kept.unshift(messages[i]);
     tokens += messageTokens;
   }
-  return kept;
+  return keepRecentMessages(messages, kept.length);
 }
 
 /**

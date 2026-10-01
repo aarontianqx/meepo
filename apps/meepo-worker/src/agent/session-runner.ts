@@ -1,5 +1,5 @@
 import type { AgentEvent, AgentMessage } from '@earendil-works/pi-agent-core';
-import type { AssistantMessage } from '@earendil-works/pi-ai';
+import type { AssistantMessage, ImageContent } from '@earendil-works/pi-ai';
 import type { DeliveryMode, WorkerStreamEvent } from '@meepo/protocol';
 
 import type { SlotSemaphore } from './slot-semaphore.js';
@@ -14,7 +14,7 @@ export const FALLBACK_KEEP_RECENT_MESSAGES = 20;
  */
 export interface RunnerAgent {
   subscribe(listener: (event: AgentEvent) => void): () => void;
-  prompt(input: string): Promise<void>;
+  prompt(input: string, images?: ImageContent[]): Promise<void>;
   steer(message: AgentMessage): void;
   abort(): void;
   readonly state: { messages: AgentMessage[] };
@@ -36,7 +36,22 @@ export interface SessionCompactor {
 
 /** Keep only the last `count` messages (crude truncation fallback). */
 export function keepRecentMessages(messages: AgentMessage[], count: number): AgentMessage[] {
-  return messages.slice(Math.max(0, messages.length - count));
+  let start = Math.max(0, messages.length - count);
+  const required = new Set(
+    messages
+      .slice(start)
+      .filter((m) => m.role === 'toolResult')
+      .map((m) => (m.role === 'toolResult' ? m.toolCallId : ''))
+  );
+  for (let i = 0; i < start; i++) {
+    const message = messages[i];
+    if (
+      message.role === 'assistant' &&
+      message.content.some((c) => c.type === 'toolCall' && required.has(c.id))
+    )
+      start = i;
+  }
+  return messages.slice(start);
 }
 
 interface RunContext {
@@ -161,7 +176,10 @@ export class StreamForwarder {
       .filter((block) => block.type === 'text')
       .map((block) => block.text)
       .join('');
-    if (text) this.lastAssistantText = text;
+    if (text) {
+      this.lastAssistantText = text;
+      if (this.runId) this.emit({ type: 'assistant_text', runId: this.runId, content: text });
+    }
     this.inputTokens += message.usage.input;
     this.outputTokens += message.usage.output;
     if (message.stopReason === 'error') {
@@ -173,6 +191,8 @@ export class StreamForwarder {
 }
 
 export interface QueuedTurn {
+  images?: ImageContent[];
+  urgent?: boolean;
   runId: string;
   prompt: string;
   timeoutSeconds?: number;
@@ -187,11 +207,16 @@ export interface QueuedTurn {
 export function mergeQueuedTurns(turns: QueuedTurn[]): QueuedTurn | undefined {
   if (turns.length === 0) return undefined;
   if (turns.length === 1) return turns[0];
-  const last = turns[turns.length - 1];
+  const last = turns[0];
   const prompt = turns
     .map((turn, index) => `[${index + 1}/${turns.length}] ${turn.prompt}`)
     .join('\n\n');
-  return { runId: last.runId, prompt, timeoutSeconds: last.timeoutSeconds };
+  return {
+    runId: last.runId,
+    prompt,
+    images: turns.flatMap((t) => t.images ?? []),
+    timeoutSeconds: last.timeoutSeconds,
+  };
 }
 
 export interface SessionRunnerOptions {
@@ -204,12 +229,12 @@ export interface SessionRunnerOptions {
   compactor?: SessionCompactor;
   /** Worker-global run concurrency limit; omit for unbounded (tests). */
   slots?: SlotSemaphore;
+  checkpoint?: (runId?: string) => Promise<void>;
 }
 
 /**
  * Wraps one pi Agent (one Meepo session). Turns are executed serially:
- * - `urgent` steers into the in-flight run and takes over the stream at the
- *   point the steered message enters the transcript;
+ * - `urgent` aborts the current turn and starts a separate run ahead of queued waits;
  * - `wait` queues behind the current turn; queued waits are merged into one
  *   turn when drained (chat bursts produce a single reply);
  * - `if_idle` is dropped while busy.
@@ -221,14 +246,15 @@ export class SessionRunner {
   private readonly sessionId: string;
   private readonly workerId: string;
   private readonly forwarder: StreamForwarder;
+  private readonly emit: (event: WorkerStreamEvent) => void;
   private readonly now: () => number;
   private readonly compactor?: SessionCompactor;
   private readonly slots?: SlotSemaphore;
+  private readonly pendingHistory: AgentMessage[] = [];
   private readonly queue: QueuedTurn[] = [];
-  private readonly steeredTurns: QueuedTurn[] = [];
   private current?: QueuedTurn;
   private running = false;
-  private sawInitialUserMessage = false;
+  private slotWait?: AbortController;
   private timedOut = false;
   private abortedCurrent = false;
   private timeoutTimer?: NodeJS.Timeout;
@@ -237,6 +263,7 @@ export class SessionRunner {
 
   constructor(options: SessionRunnerOptions) {
     this.agent = options.agent;
+    this.emit = options.emit;
     this.sessionId = options.sessionId;
     this.workerId = options.workerId;
     this.now = options.now ?? Date.now;
@@ -244,28 +271,60 @@ export class SessionRunner {
     this.slots = options.slots;
     this.forwarder = new StreamForwarder(options.emit);
     this.idleSince = this.now();
-    this.agent.subscribe((event) => this.onAgentEvent(event));
+    this.agent.subscribe((event) => {
+      this.onAgentEvent(event);
+      if (
+        options.checkpoint &&
+        event.type !== 'message_update' &&
+        event.type !== 'tool_execution_update'
+      )
+        return options.checkpoint(this.current?.runId);
+    });
+  }
+
+  appendHistory(messages: AgentMessage[]): void {
+    if (this.running) this.pendingHistory.push(...messages);
+    else this.agent.state.messages = [...this.agent.state.messages, ...messages];
+  }
+
+  get currentRunId(): string | undefined {
+    return this.current?.runId;
   }
 
   get busy(): boolean {
     return this.running || this.queue.length > 0;
   }
 
-  runTurn(runId: string, prompt: string, delivery: DeliveryMode, timeoutSeconds?: number): void {
-    const turn: QueuedTurn = { runId, prompt, timeoutSeconds };
+  runTurn(
+    runId: string,
+    prompt: string,
+    delivery: DeliveryMode,
+    timeoutSeconds?: number,
+    images?: ImageContent[]
+  ): void {
+    const turn: QueuedTurn = {
+      runId,
+      prompt,
+      timeoutSeconds,
+      images,
+      urgent: delivery === 'urgent',
+    };
     if (!this.running) {
       void this.startTurn(turn);
       return;
     }
     switch (delivery) {
       case 'urgent':
-        this.steeredTurns.push(turn);
-        this.agent.steer({ role: 'user', content: prompt, timestamp: this.now() });
+        this.abortedCurrent = true;
+        this.slotWait?.abort();
+        this.queue.unshift(turn);
+        this.agent.abort();
         break;
       case 'wait':
         this.queue.push(turn);
         break;
       case 'if_idle':
+        this.emit({ type: 'run_dropped', runId });
         break;
     }
   }
@@ -277,17 +336,17 @@ export class SessionRunner {
 
   /**
    * Abort a run: the running turn via the agent's abort signal; queued or
-   * steered-but-not-started runs are failed immediately. Returns false when
+   * not-started runs are failed immediately. Returns false when
    * the run is unknown to this runner.
    */
   abort(runId: string, reason?: string): boolean {
     if (this.current?.runId === runId) {
       this.abortedCurrent = true;
+      this.slotWait?.abort();
       this.agent.abort();
       return true;
     }
-    const queued =
-      this.removePending(this.queue, runId) ?? this.removePending(this.steeredTurns, runId);
+    const queued = this.removePending(this.queue, runId);
     if (queued) {
       this.forwarder.failPendingRun(runId, reason ?? 'aborted before execution', 'aborted');
       return true;
@@ -303,39 +362,23 @@ export class SessionRunner {
 
   private onAgentEvent(event: AgentEvent): void {
     this.forwarder.handleEvent(event);
-    if (event.type === 'message_start' && event.message.role === 'user') {
-      this.onUserMessageStart();
-    }
-  }
-
-  /**
-   * A user message entering the transcript mid-run is a steered message being
-   * injected: hand the stream over from the interrupted run to the steered one.
-   */
-  private onUserMessageStart(): void {
-    if (!this.running) return;
-    if (!this.sawInitialUserMessage) {
-      this.sawInitialUserMessage = true;
-      return;
-    }
-    const next = this.steeredTurns.shift();
-    if (!next) return;
-    this.completeCurrent();
-    this.current = next;
-    this.abortedCurrent = false;
-    this.forwarder.beginRun(next.runId, { workerId: this.workerId, sessionId: this.sessionId });
   }
 
   private async startTurn(turn: QueuedTurn): Promise<void> {
+    this.agent.state.messages = [...this.agent.state.messages, ...this.pendingHistory.splice(0)];
     this.running = true;
     this.current = turn;
-    this.sawInitialUserMessage = false;
     this.timedOut = false;
     this.abortedCurrent = false;
     this.armTimeout(turn);
     // Awaited only when configured, keeping prompt() same-tick otherwise.
-    if (this.slots) await this.slots.acquire();
+    let acquired = false;
+    this.slotWait = new AbortController();
     try {
+      if (this.slots) {
+        await this.slots.acquire('session', this.slotWait.signal);
+        acquired = true;
+      }
       if (this.timedOut || this.abortedCurrent) {
         // Aborted or timed out while queued for a slot: never started.
         this.forwarder.failPendingRun(
@@ -346,25 +389,45 @@ export class SessionRunner {
       } else {
         this.forwarder.beginRun(turn.runId, { workerId: this.workerId, sessionId: this.sessionId });
         if (this.compactor) await this.maybeCompactHistory();
-        await this.agent.prompt(turn.prompt);
+        if (this.abortedCurrent || this.timedOut) {
+          this.completeCurrent();
+          return;
+        }
+        await this.agent.prompt(turn.prompt, turn.images);
         this.completeCurrent();
       }
     } catch (err) {
-      this.forwarder.failRun((err as Error).message, 'internal');
-    } finally {
-      this.slots?.release();
-      this.clearTimeout();
-      for (const skipped of this.steeredTurns.splice(0)) {
+      if (!this.forwarder.currentRunId)
         this.forwarder.failPendingRun(
-          skipped.runId,
-          'run ended before steering took effect',
-          'aborted'
+          turn.runId,
+          this.timedOut
+            ? 'turn timed out'
+            : this.abortedCurrent
+              ? 'turn aborted'
+              : (err as Error).message,
+          this.timedOut ? 'timeout' : this.abortedCurrent ? 'aborted' : 'internal'
         );
-      }
+      else this.forwarder.failRun((err as Error).message, 'internal');
+    } finally {
+      if (acquired) this.slots!.release();
+      this.slotWait = undefined;
+      this.clearTimeout();
       this.current = undefined;
       this.running = false;
       this.idleSince = this.now();
-      const next = mergeQueuedTurns(this.queue.splice(0));
+      const queued = this.queue[0]?.urgent
+        ? this.queue.splice(0, 1)
+        : this.queue.splice(
+            0,
+            this.queue.findIndex((t) => t.urgent) < 0
+              ? this.queue.length
+              : this.queue.findIndex((t) => t.urgent)
+          );
+      const next = mergeQueuedTurns(queued);
+      if (next)
+        for (const merged of queued.slice(1)) {
+          this.emit({ type: 'run_merged', runId: merged.runId, mergedIntoRunId: next.runId });
+        }
       if (next) void this.startTurn(next);
     }
   }
@@ -399,6 +462,7 @@ export class SessionRunner {
     if (!turn.timeoutSeconds) return;
     this.timeoutTimer = setTimeout(() => {
       this.timedOut = true;
+      this.slotWait?.abort();
       this.agent.abort();
     }, turn.timeoutSeconds * 1000);
     this.timeoutTimer.unref();
