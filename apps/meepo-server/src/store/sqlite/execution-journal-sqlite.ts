@@ -1,6 +1,7 @@
 import { enqueueTicketReceipt } from './receipt-sqlite.js';
 import { rowToRun, type RunRow } from './run-sqlite.js';
 import { isTerminalRun, type Run, type Ticket } from '@meepo/core';
+import { boundedPayload } from '@meepo/protocol';
 import type { CanonicalEvent, SequencedWorkerEvent, StreamAck } from '@meepo/protocol';
 import type { Database } from 'better-sqlite3';
 
@@ -126,7 +127,7 @@ export class SqliteExecutionJournal implements ExecutionJournal {
           );
         if (
           work.kind === 'turn' &&
-          ['assistant_text', 'tool_call', 'tool_result'].includes(canonical.type)
+          ['assistant_text', 'tool_call', 'tool_result', 'system_note'].includes(canonical.type)
         ) {
           this.db
             .prepare(
@@ -267,13 +268,23 @@ function normalizeEvent(
     case 'tool_execution_start':
       return {
         type: 'tool_call',
-        payload: { toolCallId: event.toolCallId, toolName: event.toolName, args: event.args },
+        payload: {
+          toolCallId: event.toolCallId,
+          toolName: event.toolName,
+          args: boundedPayload(event.args),
+        },
       };
     case 'tool_execution_end':
       return {
         type: 'tool_result',
-        payload: { toolCallId: event.toolCallId, result: event.result, isError: event.isError },
+        payload: {
+          toolCallId: event.toolCallId,
+          result: boundedPayload(event.result),
+          isError: event.isError,
+        },
       };
+    case 'context_note':
+      return { type: 'system_note', payload: { content: event.content } };
     case 'assistant_text':
       return { type: event.type, payload: { content: event.content } };
     default:

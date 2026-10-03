@@ -12,6 +12,18 @@ export function registerAuthorization(
   app.addHook('preHandler', async (req) => {
     const path = req.url.split('?')[0];
     if (!path.startsWith('/api/') || path === '/api/health') return;
+    const params = req.params as { id?: string; spaceId?: string };
+    const query = req.query as { spaceId?: string };
+    const body = req.body as { spaceId?: string } | undefined;
+    // Never authorize one supplied space and execute against another.
+    const supplied = [
+      params.spaceId ?? (path.startsWith('/api/spaces/') ? params.id : undefined),
+      query.spaceId,
+      body?.spaceId,
+    ].filter((id) => id !== undefined);
+    if (supplied.some((id) => typeof id !== 'string' || !id.trim()))
+      throw validation('spaceId must be a nonempty string');
+    if (new Set(supplied).size > 1) throw validation('Conflicting spaceId sources');
     if (path.startsWith('/api/webhooks/') && req.headers.authorization) {
       const spaceId = (req.params as { spaceId: string }).spaceId;
       if (!services.webhookService) throw unauthorized('Webhook authentication unavailable');
@@ -25,10 +37,7 @@ export function registerAuthorization(
       if (!admins.includes(userId)) throw unauthorized('Global administrator required');
       return;
     }
-    const params = req.params as { id?: string; spaceId?: string };
-    const query = req.query as { spaceId?: string };
-    const body = req.body as { spaceId?: string } | undefined;
-    let spaceId = params.spaceId ?? query.spaceId ?? body?.spaceId;
+    let spaceId = supplied[0];
     if (path.startsWith('/api/spaces/') && params.id) spaceId = params.id;
     if (path.startsWith('/api/sessions/') && params.id)
       spaceId = (await services.sessionService.getSession(params.id)).spaceId;
@@ -43,6 +52,8 @@ export function registerAuthorization(
         throw unauthorized('Worker is outside your spaces');
       return;
     }
+    if (spaceId && supplied.some((id) => id !== spaceId))
+      throw validation('Conflicting resource space');
     if (spaceId) {
       await services.membershipService.requireMember(spaceId, userId);
       return;

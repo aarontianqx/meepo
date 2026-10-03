@@ -67,7 +67,7 @@ export class StreamProcessor {
       invalidRunIds: [],
       lastConfirmedClientSeq: {},
     };
-    for (const run of await this.runs.list()) {
+    for (const run of await this.runs.list({ workerId, activeOrIds: [...ids] })) {
       if (run.workerId !== workerId) continue;
       result.lastConfirmedClientSeq[run.id] = run.lastClientSeq ?? 0;
       if (ids.has(run.id)) {

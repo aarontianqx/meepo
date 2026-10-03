@@ -3,14 +3,26 @@ import { rowToRun, type RunRow } from './run-sqlite.js';
 import type { Database } from 'better-sqlite3';
 import type { CardOutbox, CardProjection } from '../../domain/outbound/card-outbox.js';
 export class SqliteCardOutbox implements CardOutbox {
+  private readonly terminalCursors = new Map<string, number>();
   constructor(private readonly db: Database) {}
   /** Rebuild render work lost between journal commit and the in-memory render hook. */
   reconcile(channelId: string): void {
     const rows = this.db
       .prepare(
-        "SELECT r.* FROM runs r JOIN sessions s ON s.id=json_extract(r.work,'$.turnRef.sessionId') WHERE s.channel_id=? AND r.status IN ('running','completed','failed')"
+        `SELECT r.* FROM runs r JOIN sessions s ON s.id=json_extract(r.work,'$.turnRef.sessionId')
+         WHERE s.channel_id=? AND r.status='running'
+         UNION SELECT r.* FROM runs r JOIN sessions s ON s.id=json_extract(r.work,'$.turnRef.sessionId')
+         WHERE s.channel_id=? AND r.status IN ('completed','failed') AND r.completed_at>=?
+         UNION SELECT r.* FROM card_outbox c JOIN runs r ON r.id=c.run_id WHERE c.channel_id=? AND c.pending=1`
       )
-      .all(channelId) as RunRow[];
+      .all(channelId, channelId, this.terminalCursors.get(channelId) ?? 0, channelId) as RunRow[];
+    this.terminalCursors.set(
+      channelId,
+      rows.reduce(
+        (max, r) => Math.max(max, r.completed_at ?? 0),
+        this.terminalCursors.get(channelId) ?? 0
+      )
+    );
     for (const row of rows) {
       const run = rowToRun(row);
       if (run.work.kind !== 'turn') continue;

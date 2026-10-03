@@ -426,4 +426,128 @@ describe('HTTP v2 ownership boundaries', () => {
     });
     expect((await runtime.app.inject(request)).statusCode).toBe(401);
   });
+  it.each(['tickets', 'sessions', 'schedules'])(
+    'rejects query/body authorization substitution for %s',
+    async (resource) => {
+      const other = (
+        await runtime.app.inject({
+          method: 'POST',
+          url: '/api/spaces',
+          headers: headers('bob'),
+          payload: { name: 'Bob' },
+        })
+      ).json<{ id: string }>().id;
+      const payload = {
+        spaceId: other,
+        title: 'probe',
+        objective: 'probe',
+        timing: { kind: 'at', at: Date.now() + 60000 },
+        action: { kind: 'create_ticket', objective: 'probe' },
+      };
+      expect(
+        (
+          await runtime.app.inject({
+            method: 'POST',
+            url: `/api/${resource}`,
+            headers: headers('owner'),
+            payload,
+          })
+        ).statusCode
+      ).toBe(401);
+      expect(
+        (
+          await runtime.app.inject({
+            method: 'POST',
+            url: `/api/${resource}?spaceId=${spaceId}`,
+            headers: headers('owner'),
+            payload,
+          })
+        ).statusCode
+      ).toBe(400);
+      expect(await runtime.services.ticketService.listTickets(other)).toEqual([]);
+      expect(await runtime.services.sessionService.listBySpace(other)).toEqual([]);
+      expect(await runtime.services.schedulerService.listSchedules(other)).toEqual([]);
+      expect(
+        (
+          await runtime.app.inject({
+            method: 'POST',
+            url: `/api/${resource}?spaceId=${spaceId}`,
+            headers: headers('owner'),
+            payload: { ...payload, spaceId },
+          })
+        ).statusCode
+      ).toBe(200);
+    }
+  );
+  it('rejects conflicting path/query/body spaces on member webhook requests', async () => {
+    const response = await runtime.app.inject({
+      method: 'POST',
+      url: `/api/webhooks/${spaceId}/tickets?spaceId=another`,
+      headers: headers('owner'),
+      payload: { spaceId: 'third', objective: 'test' },
+    });
+    expect(response.statusCode).toBe(400);
+  });
+  it('deduplicates concurrent webhook retries and rejects payload changes', async () => {
+    const request = {
+      method: 'POST' as const,
+      url: `/api/webhooks/${spaceId}/tickets`,
+      headers: { ...headers('owner'), 'idempotency-key': 'build-42' },
+      payload: { objective: 'audit' },
+    };
+    const responses = await Promise.all([runtime.app.inject(request), runtime.app.inject(request)]);
+    expect(responses.map((r) => r.statusCode)).toEqual([200, 200]);
+    expect(responses[0].json().id).toBe(responses[1].json().id);
+    expect(await runtime.services.ticketService.listTickets(spaceId)).toHaveLength(1);
+    expect(
+      (await runtime.app.inject({ ...request, payload: { objective: 'different' } })).statusCode
+    ).toBe(409);
+    expect(
+      (await runtime.app.inject({ ...request, headers: headers('outsider') })).statusCode
+    ).toBe(401);
+  });
+  it('bounds webhook fields, raw body and request rate', async () => {
+    const request = {
+      method: 'POST' as const,
+      url: `/api/webhooks/${spaceId}/tickets`,
+      headers: headers('owner'),
+      payload: { objective: 'a'.repeat(32001) },
+    };
+    expect((await runtime.app.inject(request)).statusCode).toBe(400);
+    expect(
+      (await runtime.app.inject({ ...request, payload: { objective: 'a'.repeat(140000) } }))
+        .statusCode
+    ).toBe(413);
+    for (let i = 0; i < 59; i++)
+      expect(
+        (
+          await runtime.app.inject({
+            ...request,
+            payload: { objective: 'audit' },
+            headers: { ...headers('owner'), 'idempotency-key': 'same' },
+          })
+        ).statusCode
+      ).toBe(200);
+    expect(
+      (await runtime.app.inject({ ...request, payload: { objective: 'audit' } })).statusCode
+    ).toBe(429);
+    expect(await runtime.services.ticketService.listTickets(spaceId)).toHaveLength(1);
+  });
+  it('defaults to loopback and rejects production header authentication without explicit opt-in', async () => {
+    expect(loadConfig({}).host).toBe('127.0.0.1');
+    await expect(
+      bootstrap({
+        ...loadConfig({ NODE_ENV: 'production' }),
+        dbPath: ':memory:',
+        secretKey: '0'.repeat(64),
+      })
+    ).rejects.toThrow('Production header authentication');
+    const isolated = await bootstrap({
+      ...loadConfig({ NODE_ENV: 'production', MEEPO_ALLOW_INSECURE_HEADER_AUTH: '1' }),
+      dbPath: ':memory:',
+      secretKey: '0'.repeat(64),
+      consoleDistPath: '/nonexistent',
+    });
+    await isolated.app.close();
+  });
 });

@@ -45,3 +45,20 @@ A Space supports a **1-to-N** relationship with chat windows across its bound ch
 Group binding mutations use `PUT /api/spaces/:spaceId/channels/:channelId/chats` with `{chatIds}`. ChannelRegistry is the routing authority; space-level `boundChatIds` returned for display is a projection. There is no channel-less group binding API.
 
 An enrollment token binds to one worker ID on first use; another token cannot claim that same ID. Replacing the token does not currently support retaining the old worker identity. A new enrollment/identity requires explicit rebind for main sessions; existing thread affinity is not migrated automatically.
+
+## 4. Configuration semantics
+
+The TypeScript entities remain the field-level schema; these are the configuration rules that affect routing and execution:
+
+| Configuration                           | Meaning / default                                                                                                                                     |
+| --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Space `timezone`                        | Schedule default; new spaces default to `UTC`.                                                                                                        |
+| Space `promptPreset`                    | `general` by default; `coding` adds optional worktree guidance. Frozen in an existing session's identity.                                             |
+| Space `model.modelId` / `thinkingLevel` | Registry reference plus optional `low/high/max`; absent selection uses the server model default. Effort resolution is specified in worker data plane. |
+| Space `boundWorkerId` / `requiredTags`  | Main-session affinity and eligible-worker filter; no implicit offline migration.                                                                      |
+| Channel `spaceId` / `appId`             | One application assigned to exactly one space; global admin manages the registry.                                                                     |
+| Channel `allowedOpenIds`                | Private-chat allowlist; empty admits any user able to message the bot.                                                                                |
+| Channel `boundChatIds`                  | Allowed group chats; space members manage bindings on channels belonging to their space.                                                              |
+| Space `boundChatIds`                    | Compatibility/display projection; ChannelRegistry owns routing.                                                                                       |
+
+Console automation coverage currently consists of server API regressions and recorded browser acceptance; there is no Console component/browser test suite in CI yet.

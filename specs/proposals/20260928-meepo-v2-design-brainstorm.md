@@ -85,6 +85,8 @@ MEEPO 已有一套可运行的 早期实现 实现（控制面 server + 数据�
 
 | D13-54 | 文件与媒体 | 图片存储与访问契约（F 包） | **server 零字节：transcript 只存引用 `{messageId, fileKey, fileName?, mimeType, sizeBytes}`，飞书为持久字节源；worker 直调飞书下载（dispatch 时注入渠道 appId/appSecret，与模型密钥同一注入机制，TLS 前提），物化到会话目录 `.media/`（字节派生 mime/尺寸，降采样只作用于模型 data URI）；冷启动/迁移按引用重新拉取；保留=worker 缓存随会话目录策略、server 引用永久；降级：下载失败→`[图片下载失败: reason]` 占位，>10MB 拒收说明，模型不支持图像→`[图片：当前模型不支持图像输入]` 占位** | 中心化 server 不做文件存储/带宽（kitty 全代理模式仅适用自托管）；worker 属 space 可信域，注入凭证与模型密钥同级不扩面 | 2026-09-30 |
 
+> 2026-10-03 用户确认修订：图片改由 server 通过 `media.read` 代理下载，不再向 worker 下发渠道 appSecret 或 tenant token。server 临时缓冲并转发图片字节，不持久化；worker 继续维护本地图片缓存。原行保留为讨论历史，现行契约见 `specs/features/interactive-session.md` 与 `specs/architecture/worker-protocol.md`。
+
 | D13-55 | 范围与杂项 | webhook/token 生命周期/stale 续期（P 包） | **①webhook 交付最小可用入口：`POST /api/webhooks/{spaceId}/tickets`，per-space webhook secret 鉴权，body 建 ticket（W10 保留为最末工作项）；开放 API 其余缓议 ②enrollment token：`{id, spaceIds[], createdAt, expiresAt?(默认无), revokedAt?}`，可随时撤销，轮换=签发新+撤销旧，连接注册与每次心跳校验（拒绝带明确原因），console space 页管理（列表/签发/撤销） ③stale 续期维持 D11-39（7 天 stale 末次 fire 后 done，agent 见 stale 标记自行 CronCreate 重建），从待决策清单移除** | webhook 小实现直接打通 CI→ticket 场景；token 无生命周期在泄漏时无法收敛 | 2026-09-30 |
 
 > **提炼入口**：当前有效契约在 `specs/architecture/`、`specs/features/`；决策归属见[规划与决策](20260930-meepo-planning-and-decisions.md)，实现缺口及验收状态见[工作项与验收](20261001-meepo-work-items-and-acceptance.md)。讨论定案不自动代表功能已实现。

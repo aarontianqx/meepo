@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 import type { Ticket } from '@meepo/core';
 
@@ -30,7 +30,7 @@ export class TicketService {
     private readonly spaces: SpaceRepository
   ) {}
 
-  async createTicket(input: CreateTicketInput): Promise<Ticket> {
+  async createTicket(input: CreateTicketInput, requestKey?: string): Promise<Ticket> {
     const space = await this.spaces.getById(input.spaceId);
     if (!space) throw validation(`Unknown space: ${input.spaceId}`);
     if (typeof input.title !== 'string' || !input.title.trim())
@@ -44,6 +44,13 @@ export class TicketService {
       throw validation('requiredTags must be strings');
     if (input.idempotent !== undefined && typeof input.idempotent !== 'boolean')
       throw validation('idempotent must be boolean');
+    if (input.title.length > 200 || input.objective.length > 32000)
+      throw validation('Ticket title/objective exceeds 200/32000 characters');
+    if (
+      input.contextSummary !== undefined &&
+      (typeof input.contextSummary !== 'string' || input.contextSummary.length > 32000)
+    )
+      throw validation('contextSummary must be at most 32000 characters');
     const now = Date.now();
     const ticket: Ticket = {
       id: randomUUID(),
@@ -60,8 +67,24 @@ export class TicketService {
       createdAt: now,
       updatedAt: now,
     };
-    await this.tickets.save(ticket);
-    return ticket;
+    if (requestKey !== undefined && !/^[\x21-\x7e]{1,128}$/.test(requestKey))
+      throw validation('Idempotency-Key must contain 1–128 printable non-space ASCII characters');
+    const {
+      id: _id,
+      createdAt: _created,
+      updatedAt: _updated,
+      pendingSince: _pending,
+      ...payload
+    } = ticket;
+    return this.tickets.create(
+      ticket,
+      requestKey === undefined
+        ? undefined
+        : {
+            key: requestKey,
+            fingerprint: createHash('sha256').update(JSON.stringify(payload)).digest('hex'),
+          }
+    );
   }
 
   async getTicket(id: string): Promise<Ticket> {

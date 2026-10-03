@@ -30,7 +30,9 @@ node apps/meepo-server/dist/index.js
 
 Generate the encryption key with `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` and keep it in your private environment configuration. Retain the key with SQLite backups; changing it makes stored model/channel secrets unreadable. Production mode requires it. Development without it uses plaintext and logs a warning.
 
-The server listens on port 8780 and serves the built console. `MEEPO_HOST`, `MEEPO_PORT`, `MEEPO_DB_PATH` and `MEEPO_CONSOLE_DIST` override defaults. The default database is `~/.meepo/server/meepo.db`. Use `MEEPO_HOST=127.0.0.1` for a local-only listener.
+The server listens on `127.0.0.1:8780` by default and serves the built console. `MEEPO_HOST`, `MEEPO_PORT`, `MEEPO_DB_PATH` and `MEEPO_CONSOLE_DIST` override defaults. The default database is `~/.meepo/server/meepo.db`. Set `MEEPO_HOST` explicitly when workers on other machines need access through your trusted network/edge.
+
+With `NODE_ENV=production`, startup rejects the current header authenticator unless `MEEPO_ALLOW_INSECURE_HEADER_AUTH=1` explicitly opts into an isolated deployment. This opt-in does not implement SSO or make client-supplied identity headers trustworthy.
 
 The current development authenticator reads `x-meepo-user-id` / `x-meepo-user-name`, with `dev-user` as fallback. Set the console's User field to `aaron` in this example. Replace this adapter with verified edge SSO before exposing the service to untrusted users; global admin status grants access to Models/Channels, not membership in other users' spaces.
 
@@ -128,3 +130,11 @@ Build shared packages before starting development processes. The console dev ser
 MIT
 
 Downloaded image originals are cached under `<sessionsDir>/.media` independently of the seven-day task-directory cleanup. Preserve that directory when retaining historical media on a worker.
+
+## Protocol upgrades and webhook retries
+
+Server and worker currently use protocol **3**; update and rebuild both together. Old worker versions are rejected at registration. SQLite migrations apply on startup (schema 18 adds indexes, webhook request deduplication and compaction caches); back up the database before upgrading.
+
+Webhook callers may supply `Idempotency-Key` (1–128 non-space printable ASCII characters) to `POST /api/webhooks/:spaceId/tickets`. Reusing a key with the same normalized payload returns the original ticket; a changed payload returns 409. Keys are scoped to the space and retained with server data. Without a key, each request creates a ticket. Limits: 128 KiB request body, 200-character title, 32,000-character objective/context summary, and 60 requests/minute/space (429 with `Retry-After`; the rate counter resets on server restart).
+
+Feishu image downloads are proxied through the server. Workers receive only authorized image bytes and metadata, never the channel app secret or tenant token. Workers still receive model API keys to make model requests, so enrolling a worker trusts its owner with those keys. Large tool results are retained locally under the task's `.tool-output/` directory with a bounded preview in the model context and server trace.

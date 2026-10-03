@@ -350,14 +350,18 @@ describe('SessionRunner compaction', () => {
 
   it('falls back to keeping the most recent messages when compaction fails', async () => {
     const { compactor } = fakeCompactor({ compact: () => Promise.resolve(undefined) });
-    const { agent, runner } = setup(compactor);
+    const { agent, runner, events } = setup(compactor);
     agent.state.messages = Array.from({ length: 25 }, (_, i) => userMessage(`m${i}`));
 
     runner.runTurn('t1', 'p1', 'wait');
     await flush();
 
-    expect(agent.state.messages).toHaveLength(20);
-    expect(agent.state.messages[0]).toEqual(userMessage('m5'));
+    expect(agent.state.messages).toHaveLength(21);
+    expect(agent.state.messages[0]).toMatchObject({
+      content: expect.stringContaining('上下文已截断'),
+    });
+    expect(agent.state.messages[1]).toEqual(userMessage('m5'));
+    expect(events).toContainEqual(expect.objectContaining({ type: 'context_note' }));
     expect(agent.prompts).toEqual(['p1']);
   });
 
@@ -371,7 +375,10 @@ describe('SessionRunner compaction', () => {
     runner.runTurn('t1', 'p1', 'wait');
     await flush();
 
-    expect(agent.state.messages).toHaveLength(20);
+    expect(agent.state.messages).toHaveLength(21);
+    expect(agent.state.messages[0]).toMatchObject({
+      content: expect.stringContaining('上下文已截断'),
+    });
     expect(agent.prompts).toEqual(['p1']);
   });
 

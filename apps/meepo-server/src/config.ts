@@ -8,6 +8,7 @@ export interface ServerConfig {
   adminUserIds?: string[];
   secretKey?: string;
   production?: boolean;
+  allowInsecureHeaderAuth?: boolean;
   host: string;
   port: number;
   /** Interval the server asks workers to heartbeat at (advertised on registration) */
@@ -37,7 +38,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
       .filter(Boolean),
     secretKey: env.MEEPO_SECRET_KEY,
     production: env.NODE_ENV === 'production',
-    host: env.MEEPO_HOST ?? '0.0.0.0',
+    allowInsecureHeaderAuth: env.MEEPO_ALLOW_INSECURE_HEADER_AUTH === '1',
+    host: env.MEEPO_HOST ?? '127.0.0.1',
     port: Number(env.MEEPO_PORT ?? 8780),
     heartbeatIntervalSeconds: Number(env.MEEPO_HEARTBEAT_INTERVAL_SECONDS ?? 15),
     workerOfflineAfterMs: Number(env.MEEPO_WORKER_OFFLINE_AFTER_MS ?? 45_000),

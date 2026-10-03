@@ -1,3 +1,4 @@
+import { boundedTools } from './tool-output.js';
 import { reclaimDirectories, touchDirectory } from './retention.js';
 import { withTicketContext } from './tool-context.js';
 import type { AnyAgentTool } from './tools.js';
@@ -102,20 +103,23 @@ export class TicketRunner {
       const lease = this.deps.acquireTools?.();
       releaseTools = lease?.release;
       const tools = withTicketContext(
-        [
-          ...createCodingTools(workDir),
-          ...(lease?.tools ?? this.deps.extraTools?.() ?? []),
-          ...(this.deps.rpc
-            ? buildMemoryTools(
-                (method, params) =>
-                  this.deps.rpc!(method, {
-                    ...(params as Record<string, unknown>),
-                    runId: envelope.runId,
-                  }),
-                { ticketId: envelope.ticketId }
-              )
-            : []),
-        ],
+        boundedTools(
+          [
+            ...createCodingTools(workDir),
+            ...(lease?.tools ?? this.deps.extraTools?.() ?? []),
+            ...(this.deps.rpc
+              ? buildMemoryTools(
+                  (method, params) =>
+                    this.deps.rpc!(method, {
+                      ...(params as Record<string, unknown>),
+                      runId: envelope.runId,
+                    }),
+                  { ticketId: envelope.ticketId }
+                )
+              : []),
+          ],
+          workDir
+        ),
         `${envelope.ticketId}-${envelope.attempt ?? 1}`
       );
       const prepared =

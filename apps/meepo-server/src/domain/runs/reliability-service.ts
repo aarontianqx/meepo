@@ -14,7 +14,7 @@ export class ReliabilityService {
 
   async sweep(): Promise<void> {
     const now = this.now();
-    for (const run of await this.runs.list()) {
+    for (const run of await this.runs.list({ expiredBefore: now })) {
       if (isTerminalRun(run.status) || !run.leaseExpiresAt || run.leaseExpiresAt > now) continue;
       run.status = 'failed';
       run.terminalReason = run.startedAt === undefined ? 'worker_lost' : 'lease_lost';
@@ -47,7 +47,7 @@ export class ReliabilityService {
       if (ticket.status === 'failed') ticket.completedAt = now;
       this.journal.TxExpire(run, ticket);
     }
-    for (const ticket of await this.tickets.listPending()) {
+    for (const ticket of await this.tickets.listPending(now - 86_400_000)) {
       if (now - ticket.pendingSince < 86_400_000) continue;
       ticket.status = 'failed';
       ticket.terminalReason = 'unclaimed';

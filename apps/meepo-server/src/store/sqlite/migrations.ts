@@ -347,6 +347,25 @@ export const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 18,
+    name: 'bounded history queries and durable request caches',
+    up(db) {
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS runs_expiring ON runs(lease_expires_at) WHERE status IN ('queued','dispatched','running');
+        CREATE INDEX IF NOT EXISTS runs_status_completed ON runs(status,completed_at);
+        CREATE INDEX IF NOT EXISTS runs_worker_status ON runs(worker_id,status);
+        CREATE INDEX IF NOT EXISTS runs_session ON runs(json_extract(work,'$.turnRef.sessionId'),created_at);
+        CREATE INDEX IF NOT EXISTS runs_ticket ON runs(json_extract(work,'$.ticketId'),attempt);
+        CREATE INDEX IF NOT EXISTS session_event_external ON session_events(session_id,json_extract(payload,'$.externalMessageId'));
+        CREATE INDEX IF NOT EXISTS session_event_type ON session_events(session_id,type,seq);
+        CREATE INDEX IF NOT EXISTS ticket_pending_clock ON tickets(pending_since) WHERE status='pending';
+        CREATE INDEX IF NOT EXISTS card_pending ON card_outbox(channel_id,pending);
+        CREATE TABLE webhook_requests(space_id TEXT NOT NULL, key TEXT NOT NULL, fingerprint TEXT NOT NULL, ticket_id TEXT NOT NULL, PRIMARY KEY(space_id,key));
+        CREATE TABLE session_compactions(session_id TEXT NOT NULL, covers_through_seq INTEGER NOT NULL, summary TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(session_id,covers_through_seq));
+      `);
+    },
+  },
 ];
 
 /** Applies pending migrations in version order, tracking progress via `user_version`. */

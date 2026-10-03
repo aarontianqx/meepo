@@ -28,7 +28,15 @@ input.on('line', (line) => {
       setTimeout(() => reply({ content: [{ type: 'text', text: 'late' }] }), 30000).unref();
     else
       reply({
-        content: [{ type: 'text', text: request.params.arguments?.text ?? 'echo' }],
+        content: [
+          {
+            type: 'text',
+            text:
+              request.params.arguments?.text === 'meta'
+                ? JSON.stringify(request.params._meta)
+                : (request.params.arguments?.text ?? 'echo'),
+          },
+        ],
         meta: request.params._meta,
       });
   } else reply({});

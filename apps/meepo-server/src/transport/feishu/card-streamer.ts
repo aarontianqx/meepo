@@ -139,7 +139,7 @@ export class CardStreamer {
     if (this.stopped || !p.dirty) return;
     if (p.failure) {
       if (p.text || p.thinking || ((await this.deps.isUserRun?.(p.runId)) ?? true))
-        p.text += `\n\n> ⚠️ 任务失败：${p.failure}`;
+        p.text += `\n\n> ⚠️ 任务失败：${failureText(p.failure)}`;
       p.failure = undefined;
     }
     if (!p.text && !p.thinking) {
@@ -267,4 +267,19 @@ function buildCardJson(
     },
     body: { elements },
   });
+}
+
+function failureText(reason: string): string {
+  switch (reason) {
+    case 'lease_lost':
+      return 'Worker 连接中断，本次执行已终止。已发生的外部操作可能仍需核实。';
+    case 'worker_lost':
+      return 'Worker 连接中断，本次执行无法继续。';
+    case 'interrupted':
+      return '本次执行已中断。';
+    case 'cancelled':
+      return '任务已取消。';
+    default:
+      return reason;
+  }
 }

@@ -21,19 +21,16 @@ describe('image boundaries', () => {
     })
       .png()
       .toBuffer();
-    const fetcher = vi
-      .fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify({ tenant_access_token: 'test-token' })))
-      .mockResolvedValueOnce(new Response(source));
+    const fetcher = vi.fn().mockResolvedValue(source);
     vi.stubGlobal('fetch', fetcher);
     const refs = [{ messageId: 'm', fileKey: 'img' }],
-      credentials = { appId: 'test', appSecret: 'test' };
+      credentials = { namespace: 'test', download: fetcher };
     const first = await loadImages(refs, dir, credentials);
     expect(first.images).toHaveLength(1);
     const metadata = await sharp(Buffer.from(first.images[0].data, 'base64')).metadata();
     expect(metadata.width).toBe(2048);
     expect((await loadImages(refs, dir, credentials)).images).toHaveLength(1);
-    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(fetcher).toHaveBeenCalledTimes(1);
   });
   it('retains shared media when session directories are closed or reclaimed', async () => {
     const root = await mkdtemp(join(tmpdir(), 'meepo-media-retention-'));
@@ -46,18 +43,15 @@ describe('image boundaries', () => {
     })
       .png()
       .toBuffer();
-    const fetcher = vi
-      .fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify({ tenant_access_token: 'test' })))
-      .mockResolvedValueOnce(new Response(source));
+    const fetcher = vi.fn().mockResolvedValue(source);
     vi.stubGlobal('fetch', fetcher);
     const refs = [{ messageId: 'm', fileKey: 'img' }],
-      credentials = { appId: 'test', appSecret: 'test' };
+      credentials = { namespace: 'test', download: fetcher };
     expect((await loadImages(refs, session, credentials, true, cache)).images).toHaveLength(1);
     await rm(session, { recursive: true, force: true });
     await reclaimDirectories(root, new Set(['.media']), Date.now() + 8 * 86400000);
     expect((await loadImages(refs, session, credentials, true, cache)).images).toHaveLength(1);
-    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(fetcher).toHaveBeenCalledTimes(1);
   });
 
   it('unsupported, oversize, and failed downloads return placeholders without exposing credentials', async () => {
@@ -75,6 +69,6 @@ describe('image boundaries', () => {
     );
     expect(fetcher).not.toHaveBeenCalled();
     expect((await loadImages([ref], dir)).notes[0]).toBe('[图片下载失败]');
-    expect(warning).toHaveBeenCalledWith('Image unavailable:', 'channel credentials unavailable');
+    expect(warning).toHaveBeenCalledWith('Image unavailable:', 'image proxy unavailable');
   });
 });

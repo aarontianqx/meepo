@@ -54,6 +54,10 @@ export async function buildHttpServer(options: HttpServerOptions): Promise<Fasti
         },
       });
     }
+    if ((err as { statusCode?: number }).statusCode === 413)
+      return reply
+        .status(413)
+        .send({ error: { code: 'payload_too_large', message: 'Request body exceeds the limit' } });
     if ((err as { statusCode?: number }).statusCode === 400)
       return reply
         .status(400)

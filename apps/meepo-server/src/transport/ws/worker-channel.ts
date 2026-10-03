@@ -1,3 +1,5 @@
+import type { MediaService } from '../../domain/sessions/media-service.js';
+import type { MediaReadParams } from '@meepo/protocol';
 import type { RunRepository } from '../../domain/runs/run-repository.js';
 import type { PromptService } from '../../domain/prompts/prompt-service.js';
 import {
@@ -21,6 +23,7 @@ import {
   type RpcRequest,
   type RpcResponse,
   type SessionSnapshotParams,
+  type CompactionRecordParams,
   type TicketCreateParams,
   type TicketCreateResult,
   type WorkerChannelDownstream,
@@ -48,6 +51,7 @@ const DOMAIN_TO_RPC_CODE: Record<DomainError['code'], string> = {
 };
 
 export interface WorkerChannelDeps {
+  mediaService?: MediaService;
   runRepository?: RunRepository;
   workerService: WorkerService;
   schedulerService: SchedulerService;
@@ -184,6 +188,33 @@ export class WorkerChannelHandler implements WorkerSender {
 
           return;
         }
+        case WORKER_CHANNEL_METHODS.compactionRecord: {
+          const p = frame.params as CompactionRecordParams;
+          if (!p.sessionId) throw validation('sessionId is required');
+          const run = p.runId ? await this.deps.runRepository?.getById(p.runId) : undefined;
+          if (
+            !run ||
+            run.workerId !== workerId ||
+            run.work.kind !== 'turn' ||
+            run.work.turnRef.sessionId !== p.sessionId ||
+            !['dispatched', 'running'].includes(run.status) ||
+            !run.leaseExpiresAt ||
+            run.leaseExpiresAt <= Date.now()
+          )
+            throw unauthorized('Compaction execution lease is invalid');
+          await this.deps.transcriptService.recordCompaction(p.sessionId, p, p.degraded);
+          this.send(socket, { kind: 'response', id: frame.id, result: { recorded: true } });
+          return;
+        }
+        case WORKER_CHANNEL_METHODS.mediaRead: {
+          if (!this.deps.mediaService) throw validation('Media unavailable');
+          const result = await this.deps.mediaService.read(
+            workerId!,
+            frame.params as MediaReadParams
+          );
+          this.send(socket, { kind: 'response', id: frame.id, result });
+          return;
+        }
         case WORKER_CHANNEL_METHODS.promptRecord: {
           const p = frame.params as { sessionId: string; snapshot: unknown };
           if (!p.sessionId || JSON.stringify(p.snapshot).length > 256_000)
@@ -286,7 +317,8 @@ export class WorkerChannelHandler implements WorkerSender {
           const snapshot = await this.deps.transcriptService.getSnapshot(
             params.sessionId,
             params.beforeTimestamp,
-            params.beforeSeq
+            params.beforeSeq,
+            { useCompaction: params.useCompaction, afterSeq: params.afterSeq }
           );
           this.send(socket, { kind: 'response', id: frame.id, result: snapshot });
           return;

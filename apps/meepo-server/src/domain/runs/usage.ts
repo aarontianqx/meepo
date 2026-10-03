@@ -1,5 +1,14 @@
 import type { Run } from '@meepo/core';
 
+export interface UsageSummary {
+  runCount: number;
+  reportedRunCount: number;
+  inputTokens: number;
+  outputTokens: number;
+  costUsd: number;
+  costReportedRunCount: number;
+}
+
 /** Cumulative provider-reported usage; missing reports are not treated as zero-cost runs. */
 export function summarizeUsage(runs: Run[], sessionIds: Set<string>, ticketIds: Set<string>) {
   const summary = {

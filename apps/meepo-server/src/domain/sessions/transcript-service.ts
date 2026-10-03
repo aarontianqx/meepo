@@ -1,6 +1,8 @@
+import type { CompactionRepository } from './compaction-repository.js';
+import type { CompactionSnapshot } from '@meepo/protocol';
 import type { SessionSnapshot, TranscriptMessage, CanonicalEvent } from '@meepo/protocol';
 
-import { notFound } from '../errors.js';
+import { notFound, validation } from '../errors.js';
 import type { SessionEventRepository } from './session-event-repository.js';
 import type { SessionRepository } from './session-repository.js';
 
@@ -13,7 +15,8 @@ export const MESSAGE_EVENT_TYPE = 'message';
 export class TranscriptService {
   constructor(
     private readonly events: SessionEventRepository,
-    private readonly sessions: SessionRepository
+    private readonly sessions: SessionRepository,
+    private readonly compactions?: CompactionRepository
   ) {}
 
   async appendMessage(sessionId: string, message: TranscriptMessage): Promise<void> {
@@ -23,11 +26,28 @@ export class TranscriptService {
   async getSnapshot(
     sessionId: string,
     beforeTimestamp?: number,
-    beforeSeq?: number
+    beforeSeq?: number,
+    options: { useCompaction?: boolean; afterSeq?: number } = {}
   ): Promise<SessionSnapshot> {
     const session = await this.sessions.getById(sessionId);
     if (!session) throw notFound(`Session not found: ${sessionId}`);
-    const events = await this.events.listBySession(sessionId);
+    for (const value of [beforeSeq, options.afterSeq]) {
+      if (value !== undefined && (!Number.isSafeInteger(value) || value < 0))
+        throw validation('Invalid snapshot cursor');
+    }
+    // A timestamp-only historical request cannot safely reuse a sequence cache.
+    const usableCompaction =
+      options.useCompaction && (beforeSeq !== undefined || beforeTimestamp === undefined)
+        ? this.compactions?.latest(sessionId, beforeSeq ?? Number.MAX_SAFE_INTEGER)
+        : undefined;
+    const rows = await this.events.listBySession(sessionId, {
+      beforeSeq,
+      beforeTimestamp,
+      includeHistoryNotes: true,
+      afterSeq: Math.max(options.afterSeq ?? 0, usableCompaction?.coversThroughSeq ?? 0),
+      limit: options.useCompaction ? 51 : undefined,
+    });
+    const events = options.useCompaction ? rows.slice(0, 50) : rows;
     const selected = events.filter(
       (e) =>
         (beforeSeq === undefined ||
@@ -57,10 +77,30 @@ export class TranscriptService {
       );
     return {
       sessionId,
-      version: events.at(-1)?.seq ?? 0,
+      compaction: usableCompaction,
+      hasMore: options.useCompaction ? rows.length > 50 : false,
+      version: await this.events.latestSeq(sessionId),
       messages,
       events: selected as CanonicalEvent[],
     };
+  }
+
+  async recordCompaction(sessionId: string, snapshot: CompactionSnapshot, degraded = false) {
+    if (!this.compactions) throw validation('Compaction storage unavailable');
+    if (
+      typeof snapshot.summary !== 'string' ||
+      !snapshot.summary.trim() ||
+      new TextEncoder().encode(snapshot.summary).length > 32768 ||
+      !Number.isSafeInteger(snapshot.coversThroughSeq) ||
+      snapshot.coversThroughSeq < 1 ||
+      snapshot.coversThroughSeq > (await this.events.latestSeq(sessionId))
+    )
+      throw validation('Invalid compaction boundary or summary');
+    this.compactions.TxSave(sessionId, snapshot, degraded);
+  }
+
+  async firstEvent(sessionId: string, type: string) {
+    return (await this.events.listBySession(sessionId, { type, limit: 1 }))[0];
   }
 
   async appendEvent(sessionId: string, type: string, payload: unknown): Promise<CanonicalEvent> {
@@ -68,6 +108,7 @@ export class TranscriptService {
   }
 
   async listEvents(sessionId: string, afterSeq = 0): Promise<CanonicalEvent[]> {
-    return (await this.events.listBySession(sessionId)).filter((e) => e.seq > afterSeq);
+    if (!Number.isSafeInteger(afterSeq) || afterSeq < 0) throw validation('Invalid event cursor');
+    return this.events.listBySession(sessionId, { afterSeq, limit: 500 });
   }
 }

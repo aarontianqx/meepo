@@ -1,7 +1,8 @@
+import type { UsageSummary } from '../../domain/runs/usage.js';
 import type { Run } from '@meepo/core';
 import type { Database } from 'better-sqlite3';
 
-import type { RunRepository } from '../../domain/runs/run-repository.js';
+import type { RunQuery, RunRepository } from '../../domain/runs/run-repository.js';
 
 export interface RunRow {
   id: string;
@@ -76,10 +77,48 @@ export class SqliteRunRepository implements RunRepository {
       );
   }
 
-  async list(): Promise<Run[]> {
-    return (this.db.prepare('SELECT * FROM runs ORDER BY created_at').all() as RunRow[]).map(
-      rowToRun
-    );
+  async list(query: RunQuery = {}): Promise<Run[]> {
+    const where: string[] = [],
+      values: (string | number)[] = [];
+    if (query.workerId) {
+      where.push('worker_id=?');
+      values.push(query.workerId);
+    }
+    if (query.sessionId) {
+      where.push("json_extract(work,'$.turnRef.sessionId')=?");
+      values.push(query.sessionId);
+    }
+    if (query.expiredBefore !== undefined) {
+      where.push("status IN ('queued','dispatched','running') AND lease_expires_at<=?");
+      values.push(query.expiredBefore);
+    }
+    if (query.activeOrIds) {
+      where.push(
+        "(status IN ('queued','dispatched','running') OR id IN (SELECT value FROM json_each(?)))"
+      );
+      values.push(JSON.stringify(query.activeOrIds));
+    }
+    return (
+      this.db
+        .prepare(
+          `SELECT * FROM runs ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY created_at`
+        )
+        .all(...values) as RunRow[]
+    ).map(rowToRun);
+  }
+
+  async usage(sessionIds: string[], ticketIds: string[]) {
+    return this.db
+      .prepare(
+        `SELECT COUNT(*) AS runCount, COUNT(usage) AS reportedRunCount,
+      COALESCE(SUM(json_extract(usage,'$.inputTokens')),0) AS inputTokens,
+      COALESCE(SUM(json_extract(usage,'$.outputTokens')),0) AS outputTokens,
+      COALESCE(SUM(json_extract(usage,'$.costUsd')),0) AS costUsd,
+      COUNT(json_extract(usage,'$.costUsd')) AS costReportedRunCount
+      FROM runs WHERE json_extract(work,'$.turnRef.sessionId') IN (SELECT value FROM json_each(?))
+      OR json_extract(work,'$.ticketId') IN (SELECT value FROM json_each(?))`
+      )
+      .get(JSON.stringify(sessionIds), JSON.stringify(ticketIds)) as UsageSummary;
   }
 
   async getById(id: string): Promise<Run | undefined> {

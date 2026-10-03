@@ -1,6 +1,7 @@
 import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { withTicketContext } from '../tool-context.js';
 import { McpManager } from '../mcp.js';
 
 describe('worker MCP tool generations', () => {
@@ -20,6 +21,12 @@ describe('worker MCP tool generations', () => {
       });
       await expect(manager.reload({ broken: { url: 'not-a-url' } })).rejects.toThrow();
       expect(manager.tools()).toBe(old);
+      expect(
+        await withTicketContext(old, 'ticket-1-2')[0].execute('meta', { text: 'meta' })
+      ).toMatchObject({ content: [{ text: expect.stringContaining('meepoIdempotencyKey') }] });
+      expect(
+        await withTicketContext(old, 'ticket-1-2')[0].execute('meta', { text: 'meta' })
+      ).toMatchObject({ content: [{ text: expect.stringContaining('ticket-1-2') }] });
       const abort = new AbortController();
       const pending = old[0].execute('wait', { text: 'wait' }, abort.signal);
       abort.abort();

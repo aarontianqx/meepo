@@ -1,3 +1,5 @@
+import { loadDurableHistory } from './durable-history.js';
+import { boundedTools } from './tool-output.js';
 import { reclaimDirectories, touchDirectory } from './retention.js';
 import { loadImages } from './media.js';
 import type { AnyAgentTool } from './tools.js';
@@ -11,6 +13,8 @@ import { createCodingTools } from '@earendil-works/pi-coding-agent';
 import {
   WORKER_CHANNEL_METHODS,
   formatUserMessage,
+  type MediaReadResult,
+  type ImageReference,
   type ModelConfig,
   type ContextAppendPayload,
   type RunAbortPayload,
@@ -173,7 +177,7 @@ export class SessionManager {
     const media = await loadImages(
       envelope.images ?? [],
       await this.ensureSessionDir(envelope.sessionId),
-      envelope.mediaCredentials,
+      this.mediaSource(envelope),
       createModel(envelope.model).input.includes('image'),
       join(this.deps.sessionsDir, '.media')
     );
@@ -317,13 +321,16 @@ export class SessionManager {
         ...(params as Record<string, unknown>),
         runId: this.runners.get(envelope.sessionId)?.currentRunId,
       });
-    const tools = [
-      ...createCodingTools(workDir),
-      ...(lease?.tools ?? this.deps.extraTools?.() ?? []),
-      ...buildCronTools(executionRpc, envelope.sessionId),
-      ...buildTicketTools(executionRpc, envelope.sessionId),
-      ...buildMemoryTools(executionRpc, { sessionId: envelope.sessionId }),
-    ];
+    const tools = boundedTools(
+      [
+        ...createCodingTools(workDir),
+        ...(lease?.tools ?? this.deps.extraTools?.() ?? []),
+        ...buildCronTools(executionRpc, envelope.sessionId),
+        ...buildTicketTools(executionRpc, envelope.sessionId),
+        ...buildMemoryTools(executionRpc, { sessionId: envelope.sessionId }),
+      ],
+      workDir
+    );
     const prepared = this.deps.createAgent
       ? undefined
       : ((await this.deps.rpc(WORKER_CHANNEL_METHODS.promptPrepare, {
@@ -370,6 +377,21 @@ export class SessionManager {
     return runner;
   }
 
+  private mediaSource(envelope: TurnDispatchEnvelope) {
+    return {
+      namespace: envelope.mediaNamespace ?? envelope.spaceId,
+      download: async (ref: ImageReference) => {
+        const result = (await this.deps.rpc(WORKER_CHANNEL_METHODS.mediaRead, {
+          sessionId: envelope.sessionId,
+          messageId: ref.messageId,
+          fileKey: ref.fileKey,
+        })) as MediaReadResult;
+        if (result.sizeBytes > 10 * 1024 * 1024 || result.data.length > 14 * 1024 * 1024)
+          throw new Error('image exceeds 10 MB');
+        return Buffer.from(result.data, 'base64');
+      },
+    };
+  }
   private async ensureSessionDir(sessionId: string): Promise<string> {
     if (this.deps.ensureSessionDir) return this.deps.ensureSessionDir(sessionId);
     const dir = join(this.deps.sessionsDir, sessionId);
@@ -379,11 +401,31 @@ export class SessionManager {
   }
 
   private async fetchSnapshot(envelope: TurnDispatchEnvelope): Promise<AgentMessage[]> {
-    const snapshot = (await this.deps.rpc(WORKER_CHANNEL_METHODS.sessionSnapshot, {
-      sessionId: envelope.sessionId,
-      beforeTimestamp: envelope.snapshotBefore,
-      beforeSeq: envelope.snapshotBeforeSeq,
-    })) as SessionSnapshot;
+    const compactor = createCompactor(envelope.model);
+    const snapshot = await loadDurableHistory({
+      fetch: async (afterSeq) =>
+        (await this.deps.rpc(WORKER_CHANNEL_METHODS.sessionSnapshot, {
+          sessionId: envelope.sessionId,
+          beforeTimestamp: envelope.snapshotBefore,
+          beforeSeq: envelope.snapshotBeforeSeq,
+          useCompaction: true,
+          afterSeq,
+        })) as SessionSnapshot,
+      summarize: compactor.summarize,
+      checkpoint: async () => {
+        if (this.cancelledRuns.has(envelope.runId))
+          throw new Error('Run cancelled during history recovery');
+        await this.deps.beforeExecution?.(envelope.runId);
+      },
+      record: async (cache, degraded) => {
+        await this.deps.rpc(WORKER_CHANNEL_METHODS.compactionRecord, {
+          sessionId: envelope.sessionId,
+          runId: envelope.runId,
+          ...cache,
+          degraded,
+        });
+      },
+    });
     if (snapshot.events) {
       const restored = restoreEvents(snapshot.events, envelope.model);
       const users = restored.filter((m) => m.role === 'user');
@@ -400,7 +442,7 @@ export class SessionManager {
         const media = await loadImages(
           payload.images,
           await this.ensureSessionDir(envelope.sessionId),
-          envelope.mediaCredentials,
+          this.mediaSource(envelope),
           createModel(envelope.model).input.includes('image'),
           join(this.deps.sessionsDir, '.media')
         );

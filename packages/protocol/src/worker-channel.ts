@@ -31,6 +31,8 @@ export const WORKER_CHANNEL_PATH = '/ws/worker';
 
 /** RPC methods the worker invokes on the server. */
 export const WORKER_CHANNEL_METHODS = {
+  mediaRead: 'media.read',
+  compactionRecord: 'session.compaction',
   promptPrepare: 'prompt.prepare',
   promptRecord: 'prompt.record',
   memory: 'memory.call',
@@ -62,13 +64,35 @@ export const SERVER_CHANNEL_EVENTS = {
 } as const;
 
 export interface SessionSnapshotParams {
+  useCompaction?: boolean;
+  afterSeq?: number;
   sessionId: string;
   /** Exclude transcript entries at or after this timestamp */
   beforeTimestamp?: number;
   beforeSeq?: number;
 }
 
+export interface MediaReadParams {
+  sessionId: string;
+  messageId: string;
+  fileKey: string;
+}
+export interface MediaReadResult {
+  data: string;
+  sizeBytes: number;
+  mimeType: string;
+}
+
+export interface CompactionRecordParams {
+  sessionId: string;
+  runId: string;
+  summary: string;
+  coversThroughSeq: number;
+  degraded?: boolean;
+}
 export type WorkerChannelUpstream =
+  | RpcRequest<typeof WORKER_CHANNEL_METHODS.compactionRecord, CompactionRecordParams>
+  | RpcRequest<typeof WORKER_CHANNEL_METHODS.mediaRead, MediaReadParams>
   | RpcRequest<typeof WORKER_CHANNEL_METHODS.streamAppend, SequencedWorkerEvent>
   | RpcRequest<typeof WORKER_CHANNEL_METHODS.reconcile, ReconcileParams>
   | RpcRequest<typeof WORKER_CHANNEL_METHODS.ready, Record<string, never>>

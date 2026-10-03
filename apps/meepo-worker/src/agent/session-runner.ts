@@ -1,6 +1,6 @@
 import type { AgentEvent, AgentMessage } from '@earendil-works/pi-agent-core';
 import type { AssistantMessage, ImageContent } from '@earendil-works/pi-ai';
-import type { DeliveryMode, WorkerStreamEvent } from '@meepo/protocol';
+import { boundedPayload, type DeliveryMode, type WorkerStreamEvent } from '@meepo/protocol';
 
 import type { SlotSemaphore } from './slot-semaphore.js';
 
@@ -32,6 +32,7 @@ export interface SessionCompactor {
    * back to keeping only the most recent messages.
    */
   compact(messages: AgentMessage[]): Promise<AgentMessage[] | undefined>;
+  fallback?(messages: AgentMessage[]): AgentMessage[];
 }
 
 /** Keep only the last `count` messages (crude truncation fallback). */
@@ -115,7 +116,7 @@ export class StreamForwarder {
           runId,
           toolName: event.toolName,
           toolCallId: event.toolCallId,
-          args: event.args as unknown,
+          args: boundedPayload(event.args),
         });
         break;
       case 'tool_execution_update':
@@ -123,7 +124,7 @@ export class StreamForwarder {
           type: 'tool_execution_update',
           runId,
           toolCallId: event.toolCallId,
-          partialResult: event.partialResult as unknown,
+          partialResult: boundedPayload(event.partialResult),
         });
         break;
       case 'tool_execution_end':
@@ -131,7 +132,7 @@ export class StreamForwarder {
           type: 'tool_execution_end',
           runId,
           toolCallId: event.toolCallId,
-          result: event.result as unknown,
+          result: boundedPayload(event.result),
           isError: event.isError,
         });
         break;
@@ -444,8 +445,16 @@ export class SessionRunner {
     } catch {
       compacted = undefined;
     }
-    this.agent.state.messages =
-      compacted ?? keepRecentMessages(messages, FALLBACK_KEEP_RECENT_MESSAGES);
+    if (!compacted) {
+      const content = '历史摘要生成失败，部分早期上下文已截断。原始事件仍可在 Console 查询。';
+      if (this.current) this.emit({ type: 'context_note', runId: this.current.runId, content });
+      compacted = [
+        { role: 'user', content: `<system_note>${content}</system_note>`, timestamp: this.now() },
+        ...(this.compactor.fallback?.(messages) ??
+          keepRecentMessages(messages, FALLBACK_KEEP_RECENT_MESSAGES)),
+      ];
+    }
+    this.agent.state.messages = compacted;
   }
 
   private completeCurrent(): void {

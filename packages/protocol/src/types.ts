@@ -8,7 +8,7 @@
  */
 
 export type ProtocolVersion = number;
-export const CURRENT_PROTOCOL_VERSION: ProtocolVersion = 2;
+export const CURRENT_PROTOCOL_VERSION: ProtocolVersion = 3;
 
 /** Heartbeat payload emitted by worker to server */
 export interface WorkerHeartbeatPayload {
@@ -93,14 +93,10 @@ export interface ImageReference {
   mimeType?: string;
   sizeBytes?: number;
 }
-export interface MediaCredentials {
-  appId: string;
-  appSecret: string;
-}
 
 export interface TurnDispatchEnvelope {
   images?: ImageReference[];
-  mediaCredentials?: MediaCredentials;
+  mediaNamespace?: string;
   runId: string;
   sessionId: string;
   spaceId: string;
@@ -152,7 +148,13 @@ export interface TranscriptMessage {
 }
 
 /** Full session snapshot served to a worker cold-starting a session */
+export interface CompactionSnapshot {
+  summary: string;
+  coversThroughSeq: number;
+}
 export interface SessionSnapshot {
+  compaction?: CompactionSnapshot;
+  hasMore?: boolean;
   sessionId: string;
   version: number;
   messages: TranscriptMessage[];
@@ -215,6 +217,7 @@ export type TicketCreateResult =
 
 /** Streaming events emitted by Worker -> Server */
 export type WorkerStreamEvent =
+  | { type: 'context_note'; runId: string; content: string }
   | { type: 'assistant_text'; runId: string; content: string }
   | { type: 'run_merged'; runId: string; mergedIntoRunId: string }
   | { type: 'run_dropped'; runId: string }

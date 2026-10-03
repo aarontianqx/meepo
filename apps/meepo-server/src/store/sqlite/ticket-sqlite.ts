@@ -3,7 +3,7 @@ import { enqueueTicketReceipt } from './receipt-sqlite.js';
 import type { Ticket } from '@meepo/core';
 import type { Database } from 'better-sqlite3';
 
-import type { TicketRepository } from '../../domain/tickets/ticket-repository.js';
+import type { TicketRepository, TicketRequestKey } from '../../domain/tickets/ticket-repository.js';
 
 interface TicketRow {
   id: string;
@@ -50,10 +50,44 @@ function rowToTicket(row: TicketRow): Ticket {
 export class SqliteTicketRepository implements TicketRepository {
   constructor(private readonly db: Database) {}
 
+  async create(ticket: Ticket, request?: TicketRequestKey): Promise<Ticket> {
+    return this.db.transaction(() => {
+      if (request) {
+        const row = this.db
+          .prepare('SELECT fingerprint,ticket_id FROM webhook_requests WHERE space_id=? AND key=?')
+          .get(ticket.spaceId, request.key) as
+          { fingerprint: string; ticket_id: string } | undefined;
+        if (row) {
+          if (row.fingerprint !== request.fingerprint)
+            throw conflict('Idempotency-Key reused with a different payload');
+          const saved = this.db.prepare('SELECT * FROM tickets WHERE id=?').get(row.ticket_id) as
+            TicketRow | undefined;
+          if (!saved) throw conflict('Original webhook ticket is no longer available');
+          return rowToTicket(saved);
+        }
+      }
+      this.saveRecord(ticket);
+      if (request)
+        this.db
+          .prepare(
+            'INSERT INTO webhook_requests(space_id,key,fingerprint,ticket_id) VALUES(?,?,?,?)'
+          )
+          .run(ticket.spaceId, request.key, request.fingerprint, ticket.id);
+      return ticket;
+    })();
+  }
+
   async save(
     ticket: Ticket,
     expected?: { status: Ticket['status']; attempt: number }
   ): Promise<void> {
+    this.saveRecord(ticket, expected);
+  }
+
+  private saveRecord(
+    ticket: Ticket,
+    expected?: { status: Ticket['status']; attempt: number }
+  ): void {
     this.db.transaction(() => {
       if (expected) {
         const current = this.db
@@ -127,10 +161,10 @@ export class SqliteTicketRepository implements TicketRepository {
     return rows.map(rowToTicket);
   }
 
-  async listPending(): Promise<Ticket[]> {
+  async listPending(pendingBefore?: number): Promise<Ticket[]> {
     const rows = this.db
-      .prepare(`SELECT * FROM tickets WHERE status = 'pending'`)
-      .all() as TicketRow[];
+      .prepare(`SELECT * FROM tickets WHERE status = 'pending' AND pending_since <= ?`)
+      .all(pendingBefore ?? Number.MAX_SAFE_INTEGER) as TicketRow[];
     return rows.map(rowToTicket);
   }
 }

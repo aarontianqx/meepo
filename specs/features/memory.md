@@ -39,6 +39,8 @@ The system prompt carries a **directory-level map** — never entry content — 
 
 Format: one line per top-level directory — `dir/ (count): keyword1, keyword2, …` (up to 5 representative keywords). Budget: ≤ 50 directories and ≤ 1000 chars total; overflow collapses to `… and N more directories`.
 
+Ordering is deterministic: entries are read by `pinned DESC, path ASC`; directories appear in first-encounter order. Keywords preserve stored array order, are deduplicated per directory in first-encounter order, and the first five are displayed. Pinning or changing keywords may legitimately change the map; unchanged entries do not randomly reorder.
+
 Refresh points: first session execution, worker restart, cold start after TTL eviction, and a new session after `/new`. Warm sessions keep their map. The rendered map is recorded with each `prompt_snapshot` event. `memoryMapVersion` currently records generation time (`Date.now()`), not a content revision and not a reliable content-change detector.
 
 ## 3. Retrieval

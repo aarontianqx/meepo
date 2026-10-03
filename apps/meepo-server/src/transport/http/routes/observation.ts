@@ -1,4 +1,3 @@
-import { summarizeUsage } from '../../../domain/runs/usage.js';
 import { randomBytes, randomUUID } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import type { ServiceContainer } from '../../../service-container.js';
@@ -7,15 +6,13 @@ import { validation } from '../../../domain/errors.js';
 
 export function registerObservationRoutes(app: FastifyInstance, services: ServiceContainer): void {
   app.get<{ Params: { id: string } }>('/api/spaces/:id/usage', async (req) => {
-    const [runs, sessions, tickets] = await Promise.all([
-      services.runRepository!.list(),
+    const [sessions, tickets] = await Promise.all([
       services.sessionService.listBySpace(req.params.id),
       services.ticketService.listTickets(req.params.id),
     ]);
-    return summarizeUsage(
-      runs,
-      new Set(sessions.map((s) => s.id)),
-      new Set(tickets.map((t) => t.id))
+    return services.runRepository!.usage(
+      sessions.map((s) => s.id),
+      tickets.map((t) => t.id)
     );
   });
   app.post<{ Params: { id: string; runId: string } }>(
@@ -50,9 +47,7 @@ export function registerObservationRoutes(app: FastifyInstance, services: Servic
       services.transcriptService.listEvents(req.params.id, Number(req.query.afterSeq ?? 0))
   );
   app.get<{ Params: { id: string } }>('/api/sessions/:id/runs', async (req) =>
-    (await services.runRepository!.list()).filter(
-      (r) => r.work.kind === 'turn' && r.work.turnRef.sessionId === req.params.id
-    )
+    services.runRepository!.list({ sessionId: req.params.id })
   );
   app.post<{ Params: { id: string } }>('/api/sessions/:id/close', async (req) =>
     services.sessionService.close(req.params.id)

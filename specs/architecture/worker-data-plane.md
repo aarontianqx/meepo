@@ -34,7 +34,7 @@ The `meepo-worker` is a self-hosted runner daemon executing on developer machine
   - `message_update` (text deltas).
   - `tool_execution_start` / `tool_execution_update` / `tool_execution_end`.
   - `turn_end` / `agent_end`.
-- Media normalization is worker-side: images referenced in the transcript are downloaded directly from the channel (credentials injected at dispatch), cached in the shared `<sessionsDir>/.media` directory, and downscaled only on the model-bound copy.
+- Media normalization is worker-side: images referenced in the transcript are downloaded through the server’s resource-authorized `media.read` proxy, cached in the shared `<sessionsDir>/.media` directory, and downscaled only on the model-bound copy.
 
 ### 4. Delivery, Steering & Wakeup
 
@@ -56,10 +56,18 @@ Agent-originated server tools include their current `runId`. The server checks o
 
 ### Media retention
 
-Downloaded originals live in `<sessionsDir>/.media`, keyed by app/message/file identity and excluded from task-directory reclamation. Closing a session or reclaiming its working directory does not delete those originals. A new worker can fetch the referenced source through the channel API; caches remain local to each worker. An operator retiring a worker must retain its media cache when historical source availability matters.
+Downloaded originals live in `<sessionsDir>/.media`, keyed by channel namespace/message/file identity and excluded from task-directory reclamation. Closing a session or reclaiming its working directory does not delete those originals. A new worker can fetch the referenced source through the server proxy; caches remain local to each worker. An operator retiring a worker must retain its media cache when historical source availability matters.
 
 ### Model selection and reasoning effort
 
 The space selects a server model-registry entry. The agent stream uses `openai-completions`; a provider name identifies the configured endpoint and does not select a different wire API. Effective `thinkingLevel` is **space override → worker model default → model capability default**. New spaces/workers need not set it. Kimi entries in the current capability table (including K3) default to `max`; its named GPT entries default to `high`. Unknown model IDs currently fall back to K3 capabilities, so arbitrary model compatibility is not guaranteed.
 
-Ordinary agent requests explicitly send `reasoningEffort`. A warm session retains the model/effort used to create its runner; a fresh ticket or cold session resolves current configuration. Compaction uses a separate summary-provider path and does not explicitly inherit that effort setting. Compaction starts around 80% of the configured context window, retains a recent tail with intact tool pairs, and leaves the server event log unchanged; summary failure falls back to bounded recent history.
+Ordinary agent requests explicitly send `reasoningEffort`. A warm session retains the model/effort used to create its runner; a fresh ticket or cold session resolves current configuration. Compaction uses a separate summary-provider path and now forwards the configured thinking level. Compaction starts around 80% of the configured context window, retains a recent tail with intact tool pairs, and leaves the server event log unchanged; summary failure falls back to bounded recent history.
+
+### Durable history and output budgets
+
+Cold recovery reads 50-event pages. Above 256 KiB of buffered canonical history, it summarizes an old prefix and retains at least 40 recent relevant events, moving the split backward to keep tool call/result pairs together. Each prefix cache is recorded server-side with `coversThroughSeq`; later cold starts resume from the compatible cached prefix and original tail. Until a complete tool pair is available, recovery waits to compact that prefix; an orphan at the end remains explicitly unknown. History size is counted incrementally on append/removal. The 256 KiB threshold triggers compaction; it is not a hard memory limit. The accumulated relevant-event buffer is capped at 4 MiB of serialized history or 4,096 events. Exceeding either cap fails recovery explicitly (including when an unresolved tool prevents a safe split), without deleting raw history or inventing tool outcomes. The error directs users to inspect the Console and open a new session. These limits bound the accumulated buffer, not total process memory or the page already fetched. The first recovery of uncached historical data may still need multiple summary requests.
+
+Warm runners retain their local summary/tail and use token-threshold compaction. Canonical prefix caches are built during cold recovery rather than assigning invented event sequence numbers to warm Pi messages. A warm summary is not itself a canonical transcript entry. Both paths summarize in bounded chunks (≤32,000 input bytes per chunk, reduced further for a small model context), carry a bounded preceding summary and retain original server history. Failure records an explicit truncation note visible in the Console and model context; the warm fallback also applies a token budget, including an oversized single-message/tool-group escape hatch.
+
+All tool adapters bound returned output before it reaches model history. Oversize output is saved with mode `0600` under `<taskDir>/.tool-output/`, and the model/server see a bounded preview plus local path. These artifacts follow task-directory retention and are not downloadable from the server; bash's own full-output temporary file remains governed by its tool implementation.

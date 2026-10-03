@@ -22,15 +22,15 @@ W 编号保留用于关联[设计讨论](20260928-meepo-v2-design-brainstorm.md)
 
 ## 2. 最新质量门禁
 
-以下来自 **2026-10-01 running ticket 取消补齐后的执行**。
+以下来自 **2026-10-03 第四轮评审修复后的执行**。
 
-| 检查               | 结果                                                                 |
-| ------------------ | -------------------------------------------------------------------- |
-| `pnpm check`       | 20 项任务通过；server 173 + worker 59 = **232 项测试**               |
-| `pnpm build`       | 6 项任务通过                                                         |
-| `git diff --check` | 通过                                                                 |
-| 数据库             | schema 17；旧 schema 的 pending 计时迁移有回归测试                   |
-| 本机运行检查       | 在无活跃 run 时重启 server/worker；workers API 200，主 worker online |
+| 检查               | 结果                                                                |
+| ------------------ | ------------------------------------------------------------------- |
+| `pnpm check`       | 20 项任务通过；server 194 + worker 71 = **265 项测试**              |
+| `pnpm build`       | 6 项任务通过                                                        |
+| `git diff --check` | 通过                                                                |
+| 数据库             | schema 18；新增索引、webhook 请求去重与摘要缓存表                   |
+| 本机运行检查       | 常驻 server/worker 保持停止；本轮以隔离组合测试验证，不冒充部署验收 |
 
 自动化覆盖入口：
 
@@ -39,7 +39,7 @@ W 编号保留用于关联[设计讨论](20260928-meepo-v2-design-brainstorm.md)
 - [ticket 存储测试](../../apps/meepo-server/src/store/sqlite/__tests__/ticket-sqlite.test.ts)：迁移与持久化；worker `agent/__tests__` 覆盖工具/slot/取消/模型/媒体/MCP。
 - Feishu transport 测试覆盖路由、回调授权、卡片序列/分页、输入去重与重试。CI 工作流已配置，未声称远端 CI 已运行。
 
-最近门禁日志：`/tmp/meepo-ticket-cancel-check.log`、`/tmp/meepo-ticket-cancel-build.log`。临时日志不属于持久交付物。
+最近门禁日志：`/tmp/meepo-r4-check.log`、`/tmp/meepo-r4-build.log`。临时日志不属于持久交付物。
 
 ## 3. 真实场景验收
 
@@ -109,12 +109,12 @@ W 编号保留用于关联[设计讨论](20260928-meepo-v2-design-brainstorm.md)
 | F1  | 明确 ticket 跨实体事务 port | 保存 ticket、run fencing、receipt 原子性可从接口看出；新 adapter 通过同一组合回归。文档已补，接口收敛未做                             |
 | F2  | 统一 worker ready 门控      | 消除 register/reconcile 前后由周期 sweep 提前 flush/派发的路径；保留 worker 本地执行检查，并验证重连 ACK/派发次序                     |
 | F3  | 收敛非事务兼容路径          | 将 StreamProcessor、DispatchService、SchedulerService 依赖旧路径的测试迁到生产事务语义，删除兼容分支及 bootstrap 非原子 fire fallback |
-| F4  | 历史查询规模治理            | 按实际查询建立索引、按条件读取/分页，完成规模目标下的容量验收                                                                         |
+| F4  | 历史查询规模治理            | 已补租约/卡片周期查询、worker 对账筛选、SQL usage 聚合、增量事件分页和相关索引；容量目标/压测及更全面列表分页仍待做                   |
 | F5  | 无人值守调度歧义提示        | 将“默认自包含 ticket，注明假设”明确写入提示词/工具指导；当前只有 context continuity 说明                                              |
 | F6  | 空间主窗口                  | 决策保留但未实现，待明确入口、配置和用途；现有 kind=main 不等价                                                                       |
 | F7  | 离线提示、channel 显示名    | 待产品选择；当前静默排队，提示身份固定 Meepo。详见规划文档                                                                            |
 | F8  | SSO 与 webhook 凭证分流     | 接入 SSO 时明确认证入口，避免 JWT 被当作 webhook secret 校验                                                                          |
-| F9  | 模型默认与摘要 effort       | 明确未知模型能力兜底、压缩摘要是否继承 effort；现状已如实写入 worker 规范                                                             |
+| F9  | 模型默认与摘要 effort       | 摘要已传递配置 effort；未知模型能力表兜底仍待明确                                                                                     |
 | F10 | Memory Map 版本             | 当前是生成时间；若用于内容缓存/一致性比较，需改为 revision 或内容标识                                                                 |
 
 可选/需求驱动：embedding 字段与向量检索（尚无存储实现）、usage 超额告警、附件与富文本输入、第二 IM、身份感知 worker 选择、更广开放 API、卡片 TODO 面板和 worker 预置镜像。没有将这些项目算作本次已交付。
@@ -127,4 +127,27 @@ W 编号保留用于关联[设计讨论](20260928-meepo-v2-design-brainstorm.md)
 - server 持有持久状态与事务，worker 持有 agent、工具、工作目录及共享 slot；会话亲和、ticket 独立执行和显式换绑职责一致。生产组合统一注入 SQLite journal、dispatch/fire committer 与 lifecycle adapter，取消、迟到事件围栏及回执没有形成第二套状态源。
 - domain 未发现反向依赖具体 store 或 transport；core/protocol 保持共享契约职责。HTTP/RPC 在入口校验身份和资源归属，Console 通过 API 操作。当前 header 身份适配器的边界仍按既有开发环境约定。
 - 明显冗余集中在为旧测试保留的非事务分支，F3 已补全范围；跨实体 ticket save 的隐式接口约定仍归 F1。后续收敛应保留当前原子性和组合回归，不能直接删掉级联或用逐实体写入替换事务。ready 门控和历史查询规模仍分别归 F2/F4。
-- 本轮未修改运行时代码，沿用 §2 最近通过的 build/check；F11 已做真实模型/worker/Console 验收。没有重新执行飞书群或容量测试。用户已授权整体审查通过后提交。
+- 本轮未修改运行时代码，沿用当时已通过的 build/check（232 项测试）；F11 已做真实模型/worker/Console 验收。没有重新执行飞书群或容量测试。用户已授权整体审查通过后提交。
+
+## 7. 第四轮评审修复（2026-10-03，未提交）
+
+本轮发现并修复了 10 月 1 日整体审查遗漏的多来源 space 鉴权漏洞；此前“无阻断问题”是当次审查结论，不能替代这次发现。原三项 P0 中，越权属实、header auth 缺少部署保护属实、租约卡片永久不关闭是漏看 outbox 恢复的误报。
+
+| 评审项 | 本轮处理                                                                                                                                             |
+| ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 3.1    | 修复 query/body/path 空间混用；三类创建接口及冲突来源回归。                                                                                          |
+| 3.2    | 默认 loopback；生产 header auth 拒绝启动，显式隔离环境 opt-in 有警告。                                                                               |
+| 3.3    | 保留正确的 outbox 对账链路；新增租约过期→失败提示→关闭 streaming/Stop 组合测试。                                                                     |
+| 3.4    | worker 无渠道密钥/token；受会话归属和已记录引用约束的图片代理，校验实际字节上限。                                                                    |
+| 3.5    | canonical 前缀摘要缓存、冷恢复分页、摘要分块和显式截断提示；工具输出本地留全量、模型/日志有界；MCP 同样覆盖。Warm Pi 摘要不冒充 canonical 事件缓存。 |
+| 3.6    | 索引及条件查询覆盖 sweep/reconcile/usage/事件增量/外部消息去重；卡片对账首次重建、随后按终态水位与 pending 查询。                                    |
+| 3.7    | webhook 原子幂等键/载荷冲突、字段和 128 KiB 体量限制、每 space 每分钟 60 次限制；原 Fastify 默认限制并非不存在。                                     |
+| 3.8    | 明确保守入口范围，未开放 agent/schedule/Console 的 idempotent 声明。                                                                                 |
+| 3.9    | bash 环境变量与 MCP `_meta` 均有准确说明；新增真实本地 stdio 协议传递回归。                                                                          |
+| 3.10   | 补模型接口权限、关键配置语义、Memory Map 稳定排序；Console 缺少 CI 自动化界面测试如实记录。                                                          |
+
+验证使用内存/临时 SQLite、Fastify inject、模拟飞书客户端及本地 stdio/HTTP MCP；没有重启常驻 server/worker，未重新执行真实飞书群交互。独立摘要 smoke 使用 `kimi-k3-0829-highspeed`、effort `high`，成功生成摘要并保留测试事实；日志 `/tmp/meepo-r4-model-smoke.log`。此前真实场景证据不视为本轮新协议的实测。协议 3 与 schema 18 需要双方重建后再运行。
+
+本轮门禁：`pnpm check` 20 项任务通过，server 194 + worker 71 = **265 项测试**；`pnpm build` 6 项任务通过。新增回归入口为 server `store/sqlite/__tests__/review-r4.test.ts`、HTTP authorization 测试、media downloader 测试，以及 worker durable-history/tool-output/MCP 测试。Console 仍无自动化 UI 测试，本轮也没有重跑浏览器验收。改动留在工作区，按用户要求未提交。
+
+补强验收：媒体 token 缓存覆盖到期提前刷新、并发合并、渠道隔离、凭证轮换与旧请求交错、鉴权失败重试及 401 失效；卡片集成回归验证中文展示与内部 `lease_lost` 保留；历史恢复覆盖跨页工具配对、未闭合工具导致的字节/条数上限以及单事件超限。D13-54 已补用户确认的代理修订注记。仍不增加即时卡片钩子，未重新做真实飞书交互。

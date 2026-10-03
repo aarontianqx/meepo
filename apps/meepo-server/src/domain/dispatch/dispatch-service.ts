@@ -12,7 +12,6 @@ import {
   WORKER_CHANNEL_EVENTS,
   type DeliveryMode,
   type ImageReference,
-  type MediaCredentials,
   type DispatchSource,
   type ModelConfig,
   type TicketDispatchEnvelope,
@@ -77,7 +76,6 @@ export class DispatchService {
     private readonly now: () => number = Date.now,
     private readonly leaseDurationMs = 45_000,
     private readonly onInterrupted?: (run: Run) => void,
-    private readonly mediaCredentials?: (channelId: string) => MediaCredentials,
     private readonly journal?: ExecutionJournal
   ) {}
 
@@ -157,7 +155,7 @@ export class DispatchService {
       await this.queue.enqueue(queued);
     }
 
-    if (session.channelId) envelope.mediaCredentials = this.mediaCredentials?.(session.channelId);
+    envelope.mediaNamespace = session.channelId;
     if (online) {
       this.sender.sendToWorker(workerId, {
         kind: 'notification',
@@ -302,9 +300,7 @@ export class DispatchService {
             payload: {
               ...item.envelope,
               model: this.resolveSpaceModel(space),
-              mediaCredentials: session?.channelId
-                ? this.mediaCredentials?.(session.channelId)
-                : undefined,
+              mediaNamespace: session?.channelId,
             },
           });
       }
@@ -362,9 +358,7 @@ export class DispatchService {
         event: WORKER_CHANNEL_EVENTS.turnDispatch,
         payload: {
           ...merged,
-          mediaCredentials: session?.channelId
-            ? this.mediaCredentials?.(session.channelId)
-            : undefined,
+          mediaNamespace: session?.channelId,
         },
       });
     return queued.length;

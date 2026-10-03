@@ -1,6 +1,7 @@
 import type { Database } from 'better-sqlite3';
 
 import type {
+  EventQuery,
   SessionEventRecord,
   SessionEventRepository,
 } from '../../domain/sessions/session-event-repository.js';
@@ -30,6 +31,15 @@ function rowToEvent(row: SessionEventRow): SessionEventRecord {
 export class SqliteSessionEventRepository implements SessionEventRepository {
   constructor(private readonly db: Database) {}
 
+  async hasImage(sessionId: string, messageId: string, fileKey: string): Promise<boolean> {
+    return !!this.db
+      .prepare(
+        `SELECT 1 FROM session_events e, json_each(e.payload,'$.images') i
+      WHERE e.session_id=? AND e.type IN ('message','user_message')
+      AND json_extract(i.value,'$.messageId')=? AND json_extract(i.value,'$.fileKey')=? LIMIT 1`
+      )
+      .get(sessionId, messageId, fileKey);
+  }
   async append(
     sessionId: string,
     type: string,
@@ -58,10 +68,29 @@ export class SqliteSessionEventRepository implements SessionEventRepository {
     })();
   }
 
-  async listBySession(sessionId: string): Promise<SessionEventRecord[]> {
+  async listBySession(sessionId: string, query: EventQuery = {}): Promise<SessionEventRecord[]> {
+    const clauses = ['session_id = ?', 'seq > ?'];
+    const args: (string | number)[] = [sessionId, query.afterSeq ?? 0];
+    if (query.beforeSeq !== undefined) {
+      clauses.push(
+        query.includeHistoryNotes
+          ? "(seq < ? OR (type='system_note' AND json_extract(payload,'$.historyOnly')=1))"
+          : 'seq < ?'
+      );
+      args.push(query.beforeSeq);
+    } else if (query.beforeTimestamp !== undefined) {
+      clauses.push('timestamp < ?');
+      args.push(query.beforeTimestamp);
+    }
+    if (query.type) {
+      clauses.push('type=?');
+      args.push(query.type);
+    }
     const rows = this.db
-      .prepare('SELECT * FROM session_events WHERE session_id = ? ORDER BY seq ASC')
-      .all(sessionId) as SessionEventRow[];
+      .prepare(
+        `SELECT * FROM session_events WHERE ${clauses.join(' AND ')} ORDER BY seq ASC LIMIT ?`
+      )
+      .all(...args, query.limit ?? -1) as SessionEventRow[];
     return rows.map(rowToEvent);
   }
 

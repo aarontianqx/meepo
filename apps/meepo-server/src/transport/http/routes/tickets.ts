@@ -14,21 +14,46 @@ interface ListTicketsQuery {
 }
 
 export function registerTicketRoutes(app: FastifyInstance, services: ServiceContainer): void {
-  app.post<{ Params: { spaceId: string } }>('/api/webhooks/:spaceId/tickets', async (req) => {
-    const body = req.body as {
-      title?: string;
-      objective: string;
-      contextSummary?: string;
-      idempotent?: boolean;
-    };
-    return services.ticketService.createTicket({
-      spaceId: req.params.spaceId,
-      title: body.title ?? 'Webhook event',
-      objective: body.objective,
-      contextSummary: body.contextSummary,
-      idempotent: body.idempotent,
-    });
-  });
+  const webhookWindows = new Map<string, { start: number; count: number }>();
+  app.post<{ Params: { spaceId: string } }>(
+    '/api/webhooks/:spaceId/tickets',
+    { bodyLimit: 128 * 1024 },
+    async (req, reply) => {
+      const now = Date.now();
+      for (const [id, window] of webhookWindows)
+        if (now - window.start >= 60000) webhookWindows.delete(id);
+      const window = webhookWindows.get(req.params.spaceId) ?? { start: now, count: 0 };
+      webhookWindows.set(req.params.spaceId, window);
+      if (++window.count > 60)
+        return reply
+          .code(429)
+          .header('retry-after', Math.ceil((60000 - now + window.start) / 1000))
+          .send({
+            error: {
+              code: 'rate_limited',
+              message: 'Webhook limit: 60 requests per minute per space',
+            },
+          });
+      const key = req.headers['idempotency-key'];
+      if (key !== undefined && typeof key !== 'string') throw validation('Invalid Idempotency-Key');
+      const body = req.body as {
+        title?: string;
+        objective: string;
+        contextSummary?: string;
+        idempotent?: boolean;
+      };
+      return services.ticketService.createTicket(
+        {
+          spaceId: req.params.spaceId,
+          title: body.title ?? 'Webhook event',
+          objective: body.objective,
+          contextSummary: body.contextSummary,
+          idempotent: body.idempotent,
+        },
+        key
+      );
+    }
+  );
 
   app.post('/api/tickets', async (req) => {
     const body = req.body as CreateTicketInput;

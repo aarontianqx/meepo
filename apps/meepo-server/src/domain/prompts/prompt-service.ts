@@ -17,7 +17,7 @@ export class PromptService {
     if (!space) throw notFound('Space not found');
     const session = sessionId ? await this.sessions.getById(sessionId) : undefined;
     const previous = sessionId
-      ? (await this.transcripts.listEvents(sessionId)).find((e) => e.type === 'prompt_identity')
+      ? await this.transcripts.firstEvent(sessionId, 'prompt_identity')
       : undefined;
     let base = (previous?.payload as { base?: string } | undefined)?.base;
     if (!base) {

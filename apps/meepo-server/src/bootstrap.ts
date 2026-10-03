@@ -15,6 +15,8 @@ import { SqliteSessionLifecycle } from './store/sqlite/session-lifecycle-sqlite.
 import { ReceiptService } from './domain/tickets/receipt-service.js';
 import { SqliteReceiptRepository } from './store/sqlite/receipt-sqlite.js';
 import { SqliteFireCommitter } from './store/sqlite/fire-committer-sqlite.js';
+import { MediaService } from './domain/sessions/media-service.js';
+import { FeishuMediaDownloader } from './transport/feishu/media-downloader.js';
 import { ReliabilityService } from './domain/runs/reliability-service.js';
 import { ChannelService } from './domain/channels/channel-service.js';
 import { SqliteChannelRepository } from './store/sqlite/channel-sqlite.js';
@@ -29,6 +31,7 @@ import { MembershipService } from './domain/memberships/membership-service.js';
 import { SchedulerService } from './domain/schedule/scheduler-service.js';
 import { SessionService } from './domain/sessions/session-service.js';
 import { StreamProcessor } from './domain/sessions/stream-processor.js';
+import { SqliteCompactionRepository } from './store/sqlite/compaction-sqlite.js';
 import { TranscriptService } from './domain/sessions/transcript-service.js';
 import { SpaceService } from './domain/spaces/space-service.js';
 import { TicketService } from './domain/tickets/ticket-service.js';
@@ -69,6 +72,14 @@ export interface ServerRuntime {
 
 /** Composition root: wires config -> stores -> domain services -> transports. */
 export async function bootstrap(config: ServerConfig = loadConfig()): Promise<ServerRuntime> {
+  if (config.production && !config.allowInsecureHeaderAuth)
+    throw new Error(
+      'Production header authentication is disabled; configure trusted edge authentication or explicitly set MEEPO_ALLOW_INSECURE_HEADER_AUTH=1 for an isolated environment'
+    );
+  if (config.production && config.allowInsecureHeaderAuth)
+    console.warn(
+      'Insecure header authentication explicitly enabled; client identity headers are trusted.'
+    );
   const db = openDatabase(config.dbPath);
   const membershipRepository = new SqliteMembershipRepository(db);
   const enrollmentTokens = new SqliteEnrollmentTokenRepository(db);
@@ -120,7 +131,11 @@ export async function bootstrap(config: ServerConfig = loadConfig()): Promise<Se
     spaceRepository,
     new SqliteFireCommitter(db)
   );
-  const transcriptService = new TranscriptService(sessionEvents, sessionRepository);
+  const transcriptService = new TranscriptService(
+    sessionEvents,
+    sessionRepository,
+    new SqliteCompactionRepository(db)
+  );
   const journal = new SqliteExecutionJournal(db);
   const reliability = new ReliabilityService(runRepository, ticketRepository, journal);
   const streamProcessor: StreamProcessor = new StreamProcessor(
@@ -150,10 +165,6 @@ export async function bootstrap(config: ServerConfig = loadConfig()): Promise<Se
     Date.now,
     config.heartbeatIntervalSeconds * 3_000,
     (run) => streamProcessor.renderInterrupted(run),
-    (id) => {
-      const channel = channelService.get(id);
-      return { appId: channel.appId, appSecret: channel.appSecret };
-    },
     journal
   );
   const receiptService = new ReceiptService(
@@ -162,6 +173,11 @@ export async function bootstrap(config: ServerConfig = loadConfig()): Promise<Se
     dispatchService
   );
   const workerChannel = new WorkerChannelHandler({
+    mediaService: new MediaService(
+      sessionRepository,
+      sessionEvents,
+      new FeishuMediaDownloader(channelService)
+    ),
     runRepository,
     workerService,
     schedulerService,
