@@ -70,9 +70,9 @@ export class SqliteTicketRepository implements TicketRepository {
       if (request)
         this.db
           .prepare(
-            'INSERT INTO webhook_requests(space_id,key,fingerprint,ticket_id) VALUES(?,?,?,?)'
+            'INSERT INTO webhook_requests(space_id,key,fingerprint,ticket_id,created_at) VALUES(?,?,?,?,?)'
           )
-          .run(ticket.spaceId, request.key, request.fingerprint, ticket.id);
+          .run(ticket.spaceId, request.key, request.fingerprint, ticket.id, Date.now());
       return ticket;
     })();
   }

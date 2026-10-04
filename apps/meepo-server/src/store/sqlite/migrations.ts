@@ -366,6 +366,17 @@ export const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 19,
+    name: 'degraded compaction flag and webhook request timestamps',
+    up(db) {
+      db.exec(`
+        ALTER TABLE session_compactions ADD COLUMN degraded INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE webhook_requests ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0;
+        UPDATE webhook_requests SET created_at = ${Date.now()} WHERE created_at = 0;
+      `);
+    },
+  },
 ];
 
 /** Applies pending migrations in version order, tracking progress via `user_version`. */

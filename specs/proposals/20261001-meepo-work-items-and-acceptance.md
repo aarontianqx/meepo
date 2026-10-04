@@ -129,7 +129,7 @@ W 编号保留用于关联[设计讨论](20260928-meepo-v2-design-brainstorm.md)
 - 明显冗余集中在为旧测试保留的非事务分支，F3 已补全范围；跨实体 ticket save 的隐式接口约定仍归 F1。后续收敛应保留当前原子性和组合回归，不能直接删掉级联或用逐实体写入替换事务。ready 门控和历史查询规模仍分别归 F2/F4。
 - 本轮未修改运行时代码，沿用当时已通过的 build/check（232 项测试）；F11 已做真实模型/worker/Console 验收。没有重新执行飞书群或容量测试。用户已授权整体审查通过后提交。
 
-## 7. 第四轮评审修复（2026-10-03，未提交）
+## 7. 第四轮评审修复（2026-10-03，已提交于 f7b53af）
 
 本轮发现并修复了 10 月 1 日整体审查遗漏的多来源 space 鉴权漏洞；此前“无阻断问题”是当次审查结论，不能替代这次发现。原三项 P0 中，越权属实、header auth 缺少部署保护属实、租约卡片永久不关闭是漏看 outbox 恢复的误报。
 
@@ -148,6 +148,6 @@ W 编号保留用于关联[设计讨论](20260928-meepo-v2-design-brainstorm.md)
 
 验证使用内存/临时 SQLite、Fastify inject、模拟飞书客户端及本地 stdio/HTTP MCP；没有重启常驻 server/worker，未重新执行真实飞书群交互。独立摘要 smoke 使用 `kimi-k3-0829-highspeed`、effort `high`，成功生成摘要并保留测试事实；日志 `/tmp/meepo-r4-model-smoke.log`。此前真实场景证据不视为本轮新协议的实测。协议 3 与 schema 18 需要双方重建后再运行。
 
-本轮门禁：`pnpm check` 20 项任务通过，server 194 + worker 71 = **265 项测试**；`pnpm build` 6 项任务通过。新增回归入口为 server `store/sqlite/__tests__/review-r4.test.ts`、HTTP authorization 测试、media downloader 测试，以及 worker durable-history/tool-output/MCP 测试。Console 仍无自动化 UI 测试，本轮也没有重跑浏览器验收。改动留在工作区，按用户要求未提交。
+本轮门禁：`pnpm check` 20 项任务通过，server 194 + worker 71 = **265 项测试**；`pnpm build` 6 项任务通过。新增回归入口为 server `store/sqlite/__tests__/review-r4.test.ts`、HTTP authorization 测试、media downloader 测试，以及 worker durable-history/tool-output/MCP 测试。Console 仍无自动化 UI 测试，本轮也没有重跑浏览器验收。已提交于 f7b53af。
 
 补强验收：媒体 token 缓存覆盖到期提前刷新、并发合并、渠道隔离、凭证轮换与旧请求交错、鉴权失败重试及 401 失效；卡片集成回归验证中文展示与内部 `lease_lost` 保留；历史恢复覆盖跨页工具配对、未闭合工具导致的字节/条数上限以及单事件超限。D13-54 已补用户确认的代理修订注记。仍不增加即时卡片钩子，未重新做真实飞书交互。

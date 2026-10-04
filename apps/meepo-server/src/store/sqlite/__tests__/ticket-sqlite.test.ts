@@ -52,7 +52,7 @@ describe('SqliteTicketRepository', () => {
       updatedAt: 90000000,
       pendingSince: 90000000,
     });
-    expect(db.pragma('user_version', { simple: true })).toBe(18);
+    expect(db.pragma('user_version', { simple: true })).toBe(19);
   });
 
   it('saves and retrieves a ticket by id', async () => {

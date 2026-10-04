@@ -292,6 +292,7 @@ export async function bootstrap(config: ServerConfig = loadConfig()): Promise<Se
     db.prepare('DELETE FROM processed_messages WHERE processed_at < ?').run(
       Date.now() - 7 * 86400000
     );
+    db.prepare('DELETE FROM webhook_requests WHERE created_at < ?').run(Date.now() - 30 * 86400000);
   }, 3600000);
   retentionTimer.unref();
   const sweepTimer = setInterval(

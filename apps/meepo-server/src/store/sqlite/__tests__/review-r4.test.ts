@@ -130,6 +130,64 @@ describe('review R4 durable boundaries', () => {
     ).rejects.toThrow();
     await expect(transcripts.listEvents('s', NaN)).rejects.toThrow();
   });
+  it('never reuses a degraded compaction as a snapshot cache', async () => {
+    for (let i = 1; i <= 30; i++)
+      await events.append('s', 'user_message', { role: 'user', content: `m${i}`, timestamp: i }, i);
+    const caches = new SqliteCompactionRepository(db),
+      transcripts = new TranscriptService(events, sessions, caches);
+    await transcripts.recordCompaction('s', { summary: 'good prefix', coversThroughSeq: 10 });
+    await transcripts.recordCompaction(
+      's',
+      { summary: 'degraded excerpt', coversThroughSeq: 20 },
+      true
+    );
+    expect(
+      (await transcripts.getSnapshot('s', undefined, 100, { useCompaction: true })).compaction
+    ).toMatchObject({ summary: 'good prefix', coversThroughSeq: 10 });
+    const degradedOnly = new SqliteCompactionRepository(db);
+    degradedOnly.TxSave('s2', { summary: 'excerpt', coversThroughSeq: 5 }, true);
+    expect(degradedOnly.latest('s2', 100)).toBeUndefined();
+    degradedOnly.TxSave('s2', { summary: 'recovered summary', coversThroughSeq: 5 }, false);
+    expect(degradedOnly.latest('s2', 100)).toMatchObject({ summary: 'recovered summary' });
+    degradedOnly.TxSave('s2', { summary: 'another failure', coversThroughSeq: 5 }, true);
+    expect(degradedOnly.latest('s2', 100)).toMatchObject({ summary: 'recovered summary' });
+    expect(
+      (
+        db
+          .prepare(
+            "SELECT COUNT(*) AS c FROM session_events WHERE session_id='s2' AND type='system_note'"
+          )
+          .get() as { c: number }
+      ).c
+    ).toBe(1);
+  });
+  it('sweeps webhook idempotency keys after 30 days', async () => {
+    const tickets = new SqliteTicketRepository(db);
+    await tickets.create(
+      {
+        id: 't-fresh',
+        spaceId: 'sp',
+        title: 'fresh',
+        objective: 'fresh',
+        requiredTags: [],
+        status: 'pending',
+        pendingSince: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+      { key: 'fresh-key', fingerprint: 'fp' }
+    );
+    const row = db
+      .prepare('SELECT created_at FROM webhook_requests WHERE space_id=? AND key=?')
+      .get('sp', 'fresh-key') as { created_at: number };
+    expect(row.created_at).toBeGreaterThan(0);
+    const now = Date.now();
+    db.prepare(
+      'INSERT INTO webhook_requests(space_id,key,fingerprint,ticket_id,created_at) VALUES(?,?,?,?,?)'
+    ).run('sp', 'old', 'f1', 't1', now - 31 * 86400000);
+    db.prepare('DELETE FROM webhook_requests WHERE created_at < ?').run(now - 30 * 86400000);
+    expect(db.prepare('SELECT key FROM webhook_requests').all()).toEqual([{ key: 'fresh-key' }]);
+  });
   it('allows only referenced images from the worker-bound live session', async () => {
     await events.append('s', 'user_message', { images: [{ messageId: 'msg', fileKey: 'image' }] });
     const download = vi
