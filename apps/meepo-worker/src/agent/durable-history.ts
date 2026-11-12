@@ -44,6 +44,9 @@ export function safePrefixLength(events: CanonicalEvent[], retain = 40): number 
 /** Summary is a cache of an exact canonical prefix. Raw events are never deleted. */
 export async function loadDurableHistory(deps: DurableHistoryDeps): Promise<SessionSnapshot> {
   let afterSeq: number | undefined, cached: CompactionSnapshot | undefined;
+  // Once a prefix loses context, every summary derived from it remains degraded
+  // until a fresh recovery rereads the original events.
+  let degradedChain = false;
   let events: CanonicalEvent[] = [];
   let sizes: number[] = [],
     bufferedBytes = 0;
@@ -84,8 +87,8 @@ export async function loadDurableHistory(deps: DurableHistoryDeps): Promise<Sess
         if (e.type === 'tool_result') open.delete(key);
       }
       if (page.hasMore && open.size) continue;
-      let summary: string,
-        degraded = false;
+      let summary: string;
+      let degraded: boolean = degradedChain;
       await deps.checkpoint?.();
       try {
         summary = await deps.summarize(
@@ -97,12 +100,17 @@ export async function loadDurableHistory(deps: DurableHistoryDeps): Promise<Sess
           '[上下文已截断：历史摘要生成失败；原始事件保留于 Console。以下仅为不完整摘录，不应假定遗漏部分的事实。]\n' +
           boundedText(historyText({ previousSummary: cached?.summary, events: prefix }), 8000);
       }
+      if (degraded && !summary.startsWith('[上下文已截断'))
+        summary =
+          '[上下文已截断：本摘要继承了此前失败摘要的不完整摘录；原始事件保留于 Console，下次冷恢复将重试。]\n' +
+          summary;
       const checkpoint = {
         summary: boundedText(summary, 16000),
         coversThroughSeq: prefix.at(-1)!.seq,
       };
       await deps.checkpoint?.();
       await deps.record(checkpoint, degraded);
+      degradedChain = degraded;
       cached = checkpoint;
       for (let i = 0; i < cut; i++) bufferedBytes -= sizes[i];
       sizes = sizes.slice(cut);

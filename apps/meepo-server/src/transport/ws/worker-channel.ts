@@ -131,6 +131,9 @@ export class WorkerChannelHandler implements WorkerSender {
           workerId?: string;
           runId?: string;
         };
+        // A tool's execution lease and target must resolve through the same resource.
+        if (params.sessionId !== undefined && params.ticketId !== undefined)
+          throw validation('Specify either sessionId or ticketId, not both');
         if (
           this.deps.runRepository &&
           [

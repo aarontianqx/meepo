@@ -377,6 +377,18 @@ export const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 20,
+    name: 'invalidate legacy summary chains and index webhook retention',
+    up(db) {
+      // Versions 18/19 cannot distinguish successful summaries derived from
+      // degraded excerpts. These are disposable caches; canonical events stay intact.
+      db.exec(`
+        DELETE FROM session_compactions;
+        CREATE INDEX webhook_requests_created_at ON webhook_requests(created_at);
+      `);
+    },
+  },
 ];
 
 /** Applies pending migrations in version order, tracking progress via `user_version`. */

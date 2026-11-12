@@ -38,6 +38,53 @@ describe('durable history compaction', () => {
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(second.events).toEqual(first.events);
   });
+  it('retries the original prefix on a cold start after a failed summary contaminates later successful summaries', async () => {
+    const fact = 'decision: deploy only after owner approval';
+    const raw = Array.from({ length: 180 }, (_, i) => ({
+      ...event(i + 1),
+      payload: {
+        role: 'user',
+        content: `${i === 4 ? fact : ''}${'x'.repeat(10000)}`,
+        timestamp: i + 1,
+      },
+    }));
+    const checkpoints: { snapshot: CompactionSnapshot; degraded: boolean }[] = [];
+    const latest = () => checkpoints.filter((c) => !c.degraded).at(-1)?.snapshot;
+    const fetch = async (afterSeq = 0): Promise<SessionSnapshot> => {
+      const cache = latest();
+      const rows = raw.filter((e) => e.seq > Math.max(afterSeq, cache?.coversThroughSeq ?? 0));
+      return {
+        sessionId: 's',
+        version: 180,
+        messages: [],
+        compaction: cache,
+        events: rows.slice(0, 50),
+        hasMore: rows.length > 50,
+      };
+    };
+    const record = async (snapshot: CompactionSnapshot, degraded: boolean) => {
+      checkpoints.push({ snapshot, degraded });
+    };
+    const summarize = vi.fn(async (text: string) => (text.includes(fact) ? fact : 'fact missing'));
+    summarize.mockRejectedValueOnce(new Error('temporary timeout'));
+    await loadDurableHistory({ fetch, record, summarize });
+    expect(checkpoints.map((c) => c.snapshot.coversThroughSeq)).toEqual([10, 60, 110, 140]);
+    expect(checkpoints.every((c) => c.degraded)).toBe(true);
+    expect(checkpoints.every((c) => c.snapshot.summary.startsWith('[上下文已截断'))).toBe(true);
+    expect(latest()).toBeUndefined();
+    expect(summarize.mock.calls[1][0]).not.toContain(fact);
+
+    summarize.mockClear();
+    const recovered = await loadDurableHistory({ fetch, record, summarize });
+    expect(summarize.mock.calls[0][0]).toContain(fact);
+    expect(recovered.compaction?.summary).toBe(fact);
+    expect(latest()).toEqual(recovered.compaction);
+    expect(recovered.events?.slice(1).map((e) => e.seq)).toEqual(raw.slice(140).map((e) => e.seq));
+    summarize.mockClear();
+    await loadDurableHistory({ fetch, record, summarize });
+    expect(summarize).not.toHaveBeenCalled();
+    expect(raw).toHaveLength(180);
+  });
   it('records and exposes a degraded summary when the provider fails', async () => {
     const record = vi.fn().mockResolvedValue(undefined);
     const result = await loadDurableHistory({

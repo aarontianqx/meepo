@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Database } from 'better-sqlite3';
+import SqliteDatabase, { type Database } from 'better-sqlite3';
+import { migrations, runMigrations } from '../migrations.js';
 import type { Run, Session, Space } from '@meepo/core';
 import { openDatabase } from '../database.js';
 import { SqliteSpaceRepository } from '../space-sqlite.js';
@@ -161,6 +162,52 @@ describe('review R4 durable boundaries', () => {
       ).c
     ).toBe(1);
   });
+  it.each([18, 19])(
+    'invalidates legacy summary caches on upgrade from schema %s while preserving original history',
+    (version) => {
+      const legacy = new SqliteDatabase(':memory:');
+      try {
+        runMigrations(
+          legacy,
+          migrations.filter((m) => m.version <= version)
+        );
+        legacy
+          .prepare(
+            "INSERT INTO session_events(session_id,seq,type,payload,timestamp) VALUES(?,1,'user_message',?,1)"
+          )
+          .run('legacy', JSON.stringify({ content: 'original fact' }));
+        legacy
+          .prepare(
+            'INSERT INTO session_compactions(session_id,covers_through_seq,summary,created_at) VALUES(?,?,?,1)'
+          )
+          .run('legacy', 1, 'excerpt or successful summary derived from lost context');
+        legacy
+          .prepare(
+            'INSERT INTO webhook_requests(space_id,key,fingerprint,ticket_id) VALUES(?,?,?,?)'
+          )
+          .run('sp', 'key', 'fp', 'ticket');
+        runMigrations(legacy);
+        const caches = new SqliteCompactionRepository(legacy);
+        expect(caches.latest('legacy', 100)).toBeUndefined();
+        expect(legacy.prepare('SELECT payload FROM session_events').all()).toEqual([
+          { payload: JSON.stringify({ content: 'original fact' }) },
+        ]);
+        expect(legacy.prepare('SELECT key FROM webhook_requests').all()).toEqual([{ key: 'key' }]);
+        caches.TxSave('legacy', { summary: 'rebuilt from original', coversThroughSeq: 1 }, false);
+        runMigrations(legacy);
+        expect(caches.latest('legacy', 100)?.summary).toBe('rebuilt from original');
+        expect(
+          JSON.stringify(
+            legacy
+              .prepare('EXPLAIN QUERY PLAN DELETE FROM webhook_requests WHERE created_at < ?')
+              .all(100)
+          )
+        ).toContain('webhook_requests_created_at');
+      } finally {
+        legacy.close();
+      }
+    }
+  );
   it('sweeps webhook idempotency keys after 30 days', async () => {
     const tickets = new SqliteTicketRepository(db);
     await tickets.create(

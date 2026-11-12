@@ -98,7 +98,9 @@ describe('WorkerChannelHandler scheduling tools', () => {
     tickets = new MemoryTicketRepository();
     schedules = new MemoryScheduleRepository();
     await spaces.save(makeSpace('sp1'));
+    await spaces.save(makeSpace('sp2'));
     await sessions.save(makeSession('se1', 'sp1'));
+    await sessions.save(makeSession('se2', 'sp2'));
 
     const sessionService = new SessionService(sessions, spaces);
     const ticketService = new TicketService(tickets, spaces);
@@ -114,8 +116,12 @@ describe('WorkerChannelHandler scheduling tools', () => {
     deps = {
       dispatchService: { dispatchTicket } as unknown as DispatchService,
       workerService: {
-        register: async () => ({ workerId: 'w1', spaceIds: ['sp1'], heartbeatIntervalSeconds: 15 }),
-        getWorker: async () => ({ id: 'w1', spaceIds: ['sp1'] }),
+        register: async () => ({
+          workerId: 'w1',
+          spaceIds: ['sp1', 'sp2'],
+          heartbeatIntervalSeconds: 15,
+        }),
+        getWorker: async () => ({ id: 'w1', spaceIds: ['sp1', 'sp2'] }),
       } as unknown as WorkerService,
       schedulerService,
       sessionService,
@@ -190,6 +196,68 @@ describe('WorkerChannelHandler scheduling tools', () => {
           authorId: initiatorIds[0],
         });
       }
+    } finally {
+      db.close();
+    }
+  });
+
+  it('rejects a ticket execution that supplies a session to redirect its memory writes', async () => {
+    const db = openDatabase(':memory:');
+    try {
+      deps.runRepository = new MemoryRunRepository();
+      deps.memoryService = new MemoryService(new SqliteMemoryRepository(db));
+      const ticket = await deps.ticketService.createTicket({
+        spaceId: 'sp2',
+        title: 'audit',
+        objective: 'audit',
+      });
+      await tickets.save({ ...ticket, status: 'running', assignedWorkerId: 'w1', attempt: 1 });
+      await deps.runRepository.save({
+        id: 'ticket-run',
+        work: { kind: 'ticket', ticketId: ticket.id },
+        workerId: 'w1',
+        status: 'running',
+        attempt: 1,
+        createdAt: Date.now(),
+        leaseExpiresAt: Date.now() + 60000,
+      });
+      socket.receive({
+        kind: 'request',
+        id: 'mixed-resource',
+        method: 'memory.call',
+        params: {
+          runId: 'ticket-run',
+          ticketId: ticket.id,
+          sessionId: 'se1',
+          operation: 'write',
+          input: {
+            path: 'redirected',
+            description: 'wrong execution scope',
+            content: 'value',
+            expected_revision: 0,
+          },
+        },
+      });
+      expect((await socket.nextResponse()).error?.code).toBe('invalid_params');
+      expect(() => deps.memoryService!.read('sp1', 'redirected')).toThrow();
+      socket.receive({
+        kind: 'request',
+        id: 'ticket-resource',
+        method: 'memory.call',
+        params: {
+          runId: 'ticket-run',
+          ticketId: ticket.id,
+          operation: 'write',
+          input: {
+            path: 'allowed',
+            description: 'own space',
+            content: 'value',
+            expected_revision: 0,
+          },
+        },
+      });
+      expect((await socket.nextResponse()).error).toBeUndefined();
+      expect(deps.memoryService.read('sp2', 'allowed').content).toBe('value');
     } finally {
       db.close();
     }
