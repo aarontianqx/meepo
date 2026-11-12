@@ -1,104 +1,83 @@
 # Feature: Interactive Streaming Session
 
-## 1. Overview
+> **Scope**: Defines real-time conversational sessions — window addressing, `main` vs. `thread` session lifecycles, inbound routing gates, supported media modalities, queued turn merging, delivery/interruption semantics, `/new` and rebind state transitions, and live streaming card behavior.
 
-Interactive Sessions provide real-time, bidirectional communication between Feishu users and a MEEPO worker executing tasks in the context of an ongoing thread.
+## 1. Windows and Session Kinds
 
-## 2. Windows and Sessions
+An IM **window** is addressed as `windowId = {channelId}:{chatId}:{subId}`. At most one non-`closed` `Session` exists per window (`unique (spaceId, channelId, chatId, threadId) WHERE status != 'closed'`), persisted server-side across restarts:
 
-A **window** is the IM address a session is bound to: `window_id = {channelId}:{chat_id}:{sub_id}`. One window maps to at most one active session; the window→session mapping is persisted so it survives server restarts.
+- **Private chat (`p2p`)**: `subId = senderOpenId`, `kind = 'main'`. One long-lived main session per user under that channel; replies always stay in the direct chat stream (no threads). Supports `/new` to reset and auto-compacts when long.
+- **Group main stream (`group`, `subId = '_group'`)**: `kind = 'main'`. Long-lived conversation in the group's main timeline. Answering a **reply** message in the main stream that `@mentions` the bot continues this `main` session directly without spawning a thread. Supports `@bot /new`.
+- **Group thread (`group`, `subId = threadId`)**: `kind = 'thread'`. Dedicated per-topic session for focused multi-turn tasks (such as debugging or code changes).
+  - A fresh `@bot` message in the group main stream (not a reply) sends a temporary prewarm reply (`正在处理，请稍候…`) with `replyInThread: true` to establish a new thread and opens a `thread` session anchored to that root message.
+  - Mentioning `@bot` mid-way inside an existing unengaged thread opens a `thread` session and seeds its transcript with up to **50** prior messages from that thread (`seedThreadHistory`) so the agent has surrounding context.
+  - Once a thread has an engaged session, subsequent replies in that thread route to it **without** requiring `@bot` (unless they explicitly `@mention` only other users/bots). `/new` is rejected inside threads (`话题内不支持 /new（话题过长时会自动压缩）。`); threads rely on automatic context compaction instead.
 
-**Private chat** — one main session per user (`sub_id = sender open_id`), no threads anywhere: the bot always replies in the main flow. The session auto-compacts when it grows long; `/new` closes it and starts a fresh one.
+_Note on `kind = 'main'`_: `main` denotes a window's lifecycle and migration behavior (private or group main stream), not a single space-wide orchestration inbox.
 
-**Group chat** — two session shapes coexist:
+## 2. Inbound Decision Chain
 
-- **Thread sessions** (`sub_id = thread_id`, kind `thread`): one per thread, used for focused coding work. When the bot is first mentioned midway through a thread, the new session is seeded with the thread's existing history so it has the full context.
-- **The group's main session** (`sub_id = _group`, kind `main`): the long-lived conversation of the main stream. A **reply** that involves the bot (a reply mentioning it) continues this session and is answered in the main flow — it never spawns a thread.
+Every normalized inbound IM event passes four sequential gates:
 
-Routing inside the group main stream: a fresh `@bot` mention (not a reply) prewarms a **new thread** and a new thread session; a reply mentioning the bot goes to the group main session.
+1. **Durable deduplication**: Ignore non-user senders and message IDs already recorded in `ProcessedMessages` for `channelId` (committed atomically with work creation, retained 7 days).
+2. **Channel & space admission**: Resolve `spaceId` from `channelId` (`p2p` checks `allowedOpenIds`; `group` requires `chatId ∈ channel.boundChatIds`). Unadmitted events stay silent.
+3. **Command & respond gate**:
+   - Intercept `/new` (`p2p` directly, `group` when `@bot` is mentioned): execute session reset on `main` windows or reply with rejection inside threads.
+   - `p2p`: always respond.
+   - `group`: ignore messages that `@mention` other principals while omitting `@bot`. Inside an engaged thread, respond to any message; inside an unengaged thread or main stream, require `@bot`.
+4. **Session binding & placement**:
+   - Reuse the window's active session if present (coalescing concurrent session-creation races onto the same session).
+   - On creation: `main` sessions bind to `space.boundWorkerId`; `thread` sessions pick a random online, enrolled, tag-matched worker and remain pinned to it permanently.
 
-**`/new` rotates a main session** (private chat or group main flow): it closes the current session (transcript retained server-side) and opens a fresh one. It is rejected inside threads — threads auto-compact instead.
+### Supported Input Modalities
 
-`main` is a session kind, not a unique space-wide orchestration window. The current schema and console do not provide a designated main-window selector; that separate product concept remains unimplemented.
+Inbound messages accept **text**, **quoted parent messages**, and **images**:
 
-On a user-initiated space rebind, every active main session (private or group-main) follows to the new worker: the transcript is preserved server-side, the local working directory is abandoned, and a migration notice (`system_note`) is injected so the agent knows previous local files may no longer exist. Thread sessions stay pinned to their original worker.
+- **Quoted messages**: When a message replies to `parentId` in the same chat, the gateway fetches the parent message and prepends `<quoted_message>{"sender":"...","body":"..."}</quoted_message>` (`≤ 12,000` chars).
+- **Images**: Image messages normalize to `[Image]` plus `ImageReference { messageId, fileKey }`. Neither raw bytes nor channel secrets are stored in transcripts or sent in dispatch envelopes; the bound worker downloads bytes on demand via the server's `media.read` RPC (`≤ 10 MiB`), caches originals in `<sessionsDir>/.media`, and passes a downscaled JPEG to the model. Download errors or oversized files degrade to `[图片下载失败]`; models without vision support receive `[图片：当前模型不支持图像输入]`. Arbitrary file attachments and rich-text card inputs are currently ignored.
 
-The rebind transitions below apply to main sessions only. Existing thread sessions retain their worker and active execution; closing them implicitly would discard the very local state that hard affinity protects.
+## 3. Turn Batching, Delivery Modes, and Interruption
 
-**Rebind and `/new` are always allowed** — a running turn is terminated first (abort signaled if the worker is online, marked directly if offline; the run records `failed(interrupted)`), the streaming card is closed with the interruption reason noted, and late events from the old worker are rejected once the run is terminal:
+### Queued Turn Merging
 
-| Session state  | Rebind                                                    | `/new` (main windows only)                                                                                          |
-| -------------- | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| idle           | Session follows the binding; queued messages move with it | Current session closes (transcript retained), `resume_session` schedules are cascade-deleted, a fresh session opens |
-| running        | Active run terminated as above, then the idle path        | Active turn terminated as above, then the idle path                                                                 |
-| worker offline | Migrates immediately; the dead run is marked failed       | Stored nonterminal runs are fenced even if the worker is offline; then the same close/reset path applies            |
+When users send multiple messages while a session is busy or its bound worker is offline, consecutive `wait` inputs merge into one turn rather than generating fragmented back-to-back replies:
 
-`/new` remains rejected inside threads (they auto-compact instead).
+- **Offline server-side merge (`TxMergeQueue`)**: Coalesces never-dispatched `queued` turns on flush. The earliest pre-created `Run` survives as `dispatched` (inheriting all `initiatorIds` and `mergedSourceIds`), while absorbed runs close as `merged` (`mergedIntoRunId` pointing to the surviving run).
+- **Warm worker-side merge**: Turns arriving while a `SessionRunner` is executing queue locally and merge when the active turn finishes, emitting `run_merged` for absorbed runs.
 
-## 3. Inbound Decision Chain
+### Delivery Modes
 
-When a message arrives, the server applies these gates in order:
+| Mode      | Behavior                                                                                           | Current Producers                                                         |
+| --------- | -------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| `wait`    | Queue behind active execution; consecutive `wait` turns merge.                                     | All active sources: IM messages, HTTP turns, mailbox, receipts, schedules |
+| `urgent`  | Abort active run immediately (`failed(interrupted)`) and start a new turn ahead of queued `wait`s. | Protocol-reserved (`400` on HTTP `/turns`)                                |
+| `if_idle` | Execute if idle; drop immediately as `dropped` if the session is busy.                             | Protocol-reserved (`400` on HTTP `/turns`)                                |
 
-1. **Dedup**: persist `(channelId, message_id)` with the created work in one transaction; retain records for seven days. An in-memory cache is only an optimization.
-2. **Space resolution**: resolve `chat_id` → Space; an unbound chat is silent.
-3. **Respond gate**:
-   - Private-chat messages admitted by the channel are answered without a mention. In a bound group, `@bot` engages the addressed thread.
-   - A thread reply is answered only in an engaged thread — users do not need to re-mention.
-   - Messages with mentions that exclude this bot, and main-stream chatter without a mention, are silent. Non-user sender events are ignored.
-4. **Routing**:
-   - Window has a live session → reuse it (deliver per §6 semantics).
-   - Session creation already in flight for this window → piggyback on the same pending session; a second one is never created.
-   - Otherwise → create and dispatch. Creation-time binding depends on session type: private-chat and group-main sessions bind to the space's `boundWorkerId`; thread sessions pick a randomly chosen eligible worker, then stay pinned for life.
+### Space Rebind and `/new` Transitions
 
-### Input Scope
+Both explicit space rebinding (`POST /api/spaces/:id/binding`) and `/new` are **always permitted**, regardless of whether the target `main` session is idle, running, or pinned to an offline worker:
 
-Inbound content is limited to: **text**; **quoted text** (a reply carries the quoted message's sender and body as a `quoted_message` block); and **images** — the server stores only a reference (`{messageId, fileKey, mimeType?, sizeBytes?}`), never bytes; the server transiently proxies referenced image bytes through an authenticated worker RPC without persisting the bytes or exposing channel credentials; the worker materializes originals into the worker’s shared `<sessionsDir>/.media/` cache (retained across session cleanup), and passes the agent an `ImageContent`. Download failure, oversize (>10MB), or a model without image input degrade to a placeholder text. Feishu events may omit MIME type and size; workers enforce the 10MB limit against actual downloaded bytes as well as available metadata. Failure uses `[图片下载失败]`; unsupported models use `[图片：当前模型不支持图像输入]`. File attachments and rich-text card inputs are deferred.
+| Session State      | Space Rebind (`main` sessions only; `thread`s stay untouched)                                                                  | `/new` (`main` windows only; rejected in `thread`s)                                                                                  |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------ |
+| **Idle**           | Updates `boundWorkerId`, moves queued turns, sends `session.closed` to old worker, appends migration `system_note`.            | Closes old session (transcript retained), cascade-deletes `resume_session` schedules, opens fresh session, queues confirmation text. |
+| **Running**        | Marks active run `failed(interrupted)`, sends `run.abort` + `session.closed`, closes streaming card, then applies Idle path.   | Marks active run `failed(interrupted)`, sends `run.abort` + `session.closed`, closes streaming card, then applies Idle path.         |
+| **Worker offline** | Fences dead run as `failed(interrupted)` in storage immediately and migrates session + queued turns without waiting for lease. | Fences non-terminal runs in storage immediately, closes old session, cancels schedules, and opens fresh session.                     |
 
-## 4. Turn Batching & Speaker Attribution
+_Rationale: Rebinding is most urgently needed when a developer laptop goes offline; refusing rebind while a run is active or offline would trap main chat windows behind expired leases, whereas leaving `thread` sessions pinned protects uncommitted task files on the original machine._
 
-Users often send several messages before the bot answers. Consecutive queued turns for the same session are **merged into a single turn** at execution time. A merged turn takes the first message's id as its `turnRef.sourceId` and carries all sources in `mergedSourceIds`; runs pre-created for merged messages close as `merged` with a `mergedIntoRunId` pointer to the run that actually executed. Console injections and ticket receipts use server-generated event ids as their `sourceId`. Every user message in the transcript carries its **author** (display name or open_id), and the worker prefixes user messages with `[author]` when building the agent's context — the agent always knows who said what in multi-party windows.
+## 4. Outbound Streaming Projection
 
-## 5. Execution Lifecycle
+### Generic Streaming Semantics
 
-```
-[User Message in Thread] ──> [Server Ingestion & Dedupe]
-                                      │
-                                      ▼
-                        [Binding Lookup: Bound Worker]
-                                      │
-                                      ▼
-                        [Worker: Warm or Cold-Start Session]
-                                      │
-                       ┌──────────────┴──────────────┐
-                       ▼                             ▼
-                [Execute Tools]              [Stream Tokens]
-                       │                             │
-                       └──────────────┬──────────────┘
-                                      ▼
-                      [Stream to Server via WebSocket]
-                                      │
-                                      ▼
-                      [Server Patches Feishu CardKit]
-```
+- **Content-gated card creation**: A run opens an outbound card only once visible assistant text or thinking arrives (or when a user-initiated run fails). Tool calls alone never open a placeholder card, and proactive machine turns (schedule wakeups, ticket receipts) that complete silently or fail produce **no card at all**.
+- **Card anatomy**:
+  1. Collapsible thinking panel (`💭 思考中` while streaming, `思考过程` once settled; retains latest `6,000` chars of reasoning).
+  2. Tool status pills (`⏳` running, `✓` completed, `⚠️` failed + backticked tool name; latest `10` tools; never arguments or results).
+  3. Markdown answer body (`30,000`-character pagination — overflowing streams finalize the current card with `↓ 内容较长，后续见下一张卡片` and open a continuation card).
+  4. `停止` danger button (`action: 'abort_run'`, `runId`), shown **only** while streaming and authorized exclusively for `Run.initiatorIds` (Console members may also abort via `/api/sessions/:id/runs/:runId/abort`).
+- **Localized failure notices**: User-visible failures translate internal `terminalReason` codes into clear Chinese explanations (for example, `lease_lost` renders `Worker 连接中断，本次执行已终止。已发生的外部操作可能仍需核实。`, `worker_lost` renders `Worker 连接中断，本次执行无法继续。`, `interrupted` renders `本次执行已中断。`, `cancelled` renders `任务已取消。`).
 
-- The session runs on its bound worker. The agent process may stay warm between turns; after TTL eviction or a worker restart, it cold-starts from the server-provided snapshot.
-- If the bound worker is offline, messages queue server-side and resume on reconnect — the session never silently migrates.
-- An executed turn ends as completed or failed with a terminal reason. Inputs absorbed into another execution leave `merged` runs; a reserved `if_idle` drop leaves a `dropped` run. See [execution states](triggers-and-scheduling.md).
+### Feishu Adapter Mechanics
 
-## 6. Delivery, Steering & Interruption
-
-Incoming work for a session carries one of three delivery semantics:
-
-- **urgent** — end the active turn immediately: the running tool is aborted on arrival, the run is marked `interrupted`, and a new turn starts with the incoming message. `urgent` currently has no producer — it is protocol-reserved; the stop button is the user-facing interrupt.
-- **wait** — queue behind the active turn; consecutive queued messages may merge into a single turn.
-- **if_idle** — drop when the session is busy.
-
-Source → delivery mapping: user messages, console injections, ticket receipts, and schedule fires are all `wait` (a fire due during an active turn queues for the next idle moment); `if_idle` is reserved for future low-priority sources. `POST /api/sessions/:id/turns` accepts omitted delivery or `wait`; explicit reserved modes return 400. It records a user-message turn. The console mailbox records an attributed `system_note` and also delivers through `turn.dispatch`.
-
-`/new` syntax: sent directly in private chats; in groups it must @bot. Any user who can drive the bot may use it.
-
-## 7. Streaming to Feishu
-
-Terminal cards recovered through outbox reconciliation use a 2-second polling interval; actual completion also depends on scheduling and Feishu API latency, so this is not an immediate-close guarantee. Lease loss displays “Worker 连接中断，本次执行已终止。已发生的外部操作可能仍需核实。” while the stored terminal reason remains `lease_lost`. Other known interruption/cancellation reasons also use Chinese display text.
-
-The worker emits stream events (`text_delta`, `thinking_delta`, `tool_execution_*`, turn boundaries) to the server, which renders them into a live-updating CardKit card in the session’s own window (thread reply or main flow). The card is structured as `[collapsible thinking panel] + [answer markdown] + [tool pills] + [stop button (streaming only)]`; past ~30,000 characters of markdown the stream rolls over to a fresh card. The stop button is limited to the turn’s initiating users (all authors of merged inputs, persisted on the Run; space members may also stop from the console) and is removed — with streaming mode closed — at terminal state. Proactive/machine turns with no visible output produce no card at all. Rendering mechanics — snapshot frames, throttling, thread anchoring, callback binding — are owned by the Card Streamer module (`specs/architecture/server-control-plane.md`).
+- Cards use CardKit `schema: '2.0'` with `streaming_mode: true` during generation, patched serially per run at ~`500 ms` intervals with monotonically persisted `sequence` numbers, and explicitly close `streaming_mode: false` on settlement.
+- Thread session replies attach to `session.anchorMessageId` (the thread's root message) with `replyInThread: true`, deleting `prewarmMessageId` once the first card reply lands; `main` sessions reply with `replyInThread: false`.

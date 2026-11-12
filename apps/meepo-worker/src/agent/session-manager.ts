@@ -272,7 +272,7 @@ export class SessionManager {
     this.shuttingDown = true;
     this.stopSweep();
     await Promise.allSettled(
-      [...new Set(['.media', ...this.runners.keys(), ...this.pendingCreates.keys()])].map((id) => {
+      [...new Set([...this.runners.keys(), ...this.pendingCreates.keys()])].map((id) => {
         this.generations.set(id, (this.generations.get(id) ?? 0) + 1);
         return this.closeResources(id, false, this.dispatchChains.get(id));
       })

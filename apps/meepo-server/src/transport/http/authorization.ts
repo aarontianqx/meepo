@@ -11,7 +11,7 @@ export function registerAuthorization(
 ): void {
   app.addHook('preHandler', async (req) => {
     const path = req.url.split('?')[0];
-    if (!path.startsWith('/api/') || path === '/api/health') return;
+    if (!path.startsWith('/api/')) return;
     const params = req.params as { id?: string; spaceId?: string };
     const query = req.query as { spaceId?: string };
     const body = req.body as { spaceId?: string } | undefined;

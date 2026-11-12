@@ -49,8 +49,9 @@ interface PendingRequest {
 
 /**
  * Worker channel client: a single persistent WebSocket to the server carrying
- * id-paired RPC request/response frames (register, heartbeat, session.snapshot,
- * cron.*) and fire-and-forget notifications in both directions.
+ * id-paired upstream RPC request/response frames (`worker.*`, `run.reconcile`,
+ * `stream.append`, `session.*`, `prompt.*`, `memory.call`, `cron.*`,
+ * `ticket.create`, `media.read`) and server-pushed downstream notifications.
  */
 export class WorkerClient {
   private stopped = false;

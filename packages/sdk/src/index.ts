@@ -1,3 +1,7 @@
+/**
+ * Reserved client SDK package: re-exports shared contracts and provides a
+ * placeholder client stub for future programmatic extensions.
+ */
 export * from '@meepo/core';
 export * from '@meepo/protocol';
 

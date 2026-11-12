@@ -49,16 +49,19 @@ export interface Space {
   id: string;
   name: string;
   description?: string;
+  /** Optional repository hint included in prompt context; never auto-cloned */
   repoUrl: string;
   defaultBranch: string;
   /** Worker hosting this space's main sessions; unset until the first enrolled worker registers */
   boundWorkerId?: string;
   /** IANA timezone defaulting schedule timing rules */
   timezone: string;
-  /** Server-held model credentials injected into dispatches for this space */
+  /** Model registry reference and optional reasoning-effort override */
   model?: SpaceModelRef;
+  /** Display projection of bound group chats; ChannelRegistry is the routing authority */
   boundChatIds: string[];
   requiredTags: string[];
+  /** Legacy flat-text field retained for storage compatibility; structured MemoryEntry is authoritative */
   longTermMemory: string;
   createdAt: number;
   updatedAt: number;

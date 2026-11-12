@@ -5,9 +5,10 @@
   "description": "Multi-worker Execution Engine for Project-isolated Orchestration",
   "scripts": {
     "prepare": "simple-git-hooks",
-    "check": "moon run :lint :typecheck :test",
+    "check": "moon run :lint :typecheck :test && node scripts/check-specs.mjs",
+    "check:specs": "node scripts/check-specs.mjs",
     "build": "moon run :build",
-    "format": "moon run :format",
+    "format": "moon run :format && prettier --write AGENTS.md README.md \"specs/**/*.md\" \"scripts/**/*.mjs\"",
     "lint": "moon run :lint",
     "typecheck": "moon run :typecheck",
     "test": "moon run :test"

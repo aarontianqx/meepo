@@ -1,73 +1,88 @@
 # Worker Data Plane Architecture
 
-The `meepo-worker` is a self-hosted runner daemon executing on developer machines, on-prem servers, or cloud sandboxes. It is stateless across **ticket** lifetimes, but **sticky for sessions**: a session's agent process and workspace live on its bound worker for the session's whole lifetime.
+> **Scope**: Specifies the self-hosted `meepo-worker` execution daemon — registration and lease discipline, isolated working directories and media caches, built-in local and server-backed tools, MCP server hot-reloading, model resolution, and context compaction budgets. Wire framing lives in [Worker Protocol](worker-protocol.md); prompt text layout lives in [Prompt and Context Assembly](../features/prompt-and-context.md).
 
-## Core Modules
+## 1. Registration, Identity, and Execution Leases
 
-### 1. Registration & Heartbeat
+- **Stable local identity**: At first boot, the worker generates a UUID `workerId` and writes it with mode `0600` to `<dataDir>/worker-id` (honoring `MEEPO_WORKER_ID` on initial creation and rejecting subsequent mismatches). Preserving this file across restarts allows the server to restore session affinity and queued dispatches.
+- **Outbound enrollment**: Connects outbound to `serverUrl` (`/ws/worker`) using its `enrollmentToken`, which binds 1:1 to `workerId` on first registration and defines the exact `spaceIds` the worker may serve.
+- **Heartbeats and lease discipline**: Emits heartbeats at the server-advertised interval (default `15s`) carrying `activeSlots` and all owned `activeRunIds`. Each heartbeat extends the server lease of listed valid runs by `3 × heartbeatIntervalSeconds` (`45s` default, measured by the server clock).
+  - Before every model request and after every non-delta agent step, the runner awaits `beforeExecution(runId)`, verifying that the WebSocket is registered/reconciled, buffered events for `runId` are flushed and ACKed, and `runId` has not been invalidated.
+  - On disconnect, no new model or tool step begins; an already-running local subprocess may finish while events buffer in memory, but if the connection remains down past the local lease window (`45s`), the worker aborts all owned runs (`lease_lost`). On reconnect, `run.reconcile` aborts any run invalidated server-side before replaying buffered events and signaling `worker.ready`.
 
-- Establishes a persistent outbound connection to `meepo-server` via WebSocket.
-- Authenticates with an enrollment token issued by any space member; the token alone determines which spaces the worker may serve.
-- Generates its `workerId` at first boot and persists it in the data directory; the token binds to that `workerId` on first use and later mismatches are rejected — bindings and queued dispatches are restored against it on reconnect.
-- Emits periodic heartbeats (15s) including active slot utilization and current run IDs (CPU/memory metrics are optional wire fields) (`activeRunIds`); each heartbeat renews the execution lease of the runs it carries in `activeRunIds` (lease = 3 heartbeat intervals — 45s at the default 15s — server clock authoritative). On connection loss the worker starts no new runs and aborts local work after the disconnected lease window; on reconnect it reconciles runs with the server and kills any the server has invalidated.
+## 2. Working Directories and Media Cache
 
-### 2. Working Directories
-
-- Owns the physical state of executions: per-task working directories and their contents. This local state is what makes session affinity a hard constraint, and it is never migrated implicitly.
-- **Meepo manages no repositories**: sessions and tickets both start in a neutral per-task directory (`~/.meepo/sessions/<session-id>`, `~/.meepo/tickets/<ticketId>/attempt-N` — a fresh directory per ticket attempt, old attempts kept for audit). Whether a task involves a repo is a prompt-level concern — the agent clones or worktrees repositories itself. (The worktree-before-modifying-code rule lives in the optional _coding preset_, not in the universal base prompt.)
-- Repository credentials belong to the worker's own environment (the machine owner's git/SSH configuration); neither plane ever handles repo auth.
-- Inactive task directories are eligible for reclamation after 7 days; active runners and pending creates are protected, and a `session.closed` notification aborts work and reclaims local resources after execution actually settles; normal worker shutdown preserves directories. An explicit rebind releases the old main-session directory only after active work stops.
-
-### 3. Agent Execution Engine
-
-- Embeds `@earendil-works/pi-agent-core`'s `Agent` loop; model credentials resolve from the server's model registry (space references a `modelId`) and are injected per dispatch (TLS on the worker channel is a prerequisite for real credentials).
-- Sessions stay warm: the agent process may outlive a turn. After TTL eviction or a worker restart, the session cold-starts from the server-provided snapshot.
-- **System prompt = universal skeleton + optional domain presets**: identity/runtime (bot name, time, workdir) + space memory index + skills (`~/.agents/skills/` descriptions) + channel info. Domain presets (e.g. the coding preset with worktree discipline) are opt-in per space, never hardcoded into the base. The rendered prompt is recorded at the first cold execution so resumes don't drift — the freeze covers identity and presets; tool descriptions remain stable while warm and are refreshed with local rules and skills on cold start; the directory-level Memory Map is a separately versioned suffix block, re-rendered at cold starts (first execution of a new session, restart, TTL eviction, `/new`) and recorded with each snapshot.
-- Effective timing is split three ways: identity/presets are frozen for the session's lifetime; tool descriptions and local rules refresh only at cold starts; memory bodies are retrieved live via tools, with only the directory map injected; the wall-clock time is frozen in the prompt snapshot while the current time rides in each turn's envelope (machine turns' origin envelopes included) — the prompt stays cache-stable without the agent losing track of elapsed time.
-- Injects local tool operations using `@earendil-works/pi-coding-agent` abstractions:
-  - `createReadTool` with local filesystem access.
-  - `createWriteTool` with local directory creation.
-  - `createEditTool` with exact string replacement diffing.
-  - `createBashTool` with subprocess execution and streaming stdout/stderr.
-  - Custom tools are attachable via MCP servers (stdio or remote), configured in the worker's own config file by the worker owner; the server never provisions tool processes. Tools are namespaced `mcp__<server>__<tool>` and honor `timeoutSeconds` and abort. Config hot-reload applies to subsequently started sessions and cold-starts; a warm session keeps its tool set for its lifetime; a failed reload keeps the previous config and logs an error.
-- Subscribes to internal agent events and streams them back to the server:
-  - `message_update` (text deltas).
-  - `tool_execution_start` / `tool_execution_update` / `tool_execution_end`.
-  - `turn_end` / `agent_end`.
-- Media normalization is worker-side: images referenced in the transcript are downloaded through the server’s resource-authorized `media.read` proxy, cached in the shared `<sessionsDir>/.media` directory, and downscaled only on the model-bound copy.
-
-### 4. Delivery, Steering & Wakeup
-
-- All current producers use `wait`. The protocol also reserves the other delivery semantics: `urgent` (end the active turn — run `interrupted` — and start a new one), `wait` (queue behind it), `if_idle` (drop when busy, leaving a `dropped` run record). Consecutive queued messages may merge into a single turn; runs pre-created for messages later merged are closed as `merged`.
-- Handles `turn.dispatch` envelopes (user turns and schedule fires): cold-starts the session from the server snapshot if needed, then runs a turn in the restored context.
-- Listens for server-initiated `abort` signals and cancels running tool child processes.
-
-### 5. Server-Backed Tools
-
-- Scheduling tools (`CronCreate` / `CronList` / `CronDelete` for session wakeups, `TicketCreate` for independent tasks) proxy to the server; schedule records live server-side. The worker holds no timers or scheduler of its own.
-- **Memory tools** (`MemoryList` / `MemorySearch` / `MemoryRead` / `MemoryWrite` / `MemoryDelete`) proxy to the server; the system prompt carries a directory-level Memory Map snapshot (refreshed on cold starts, possibly stale while warm — tools always return current data), and writes are guarded by `expected_revision` optimistic locking.
-- Transcript snapshots are fetched by the runtime over RPC during cold restoration; there is no separate agent-facing history-query tool. Memory tools always query current server data.
-
-### 6. Configuration Lifecycle
-
-The owner configures TOML or JSON (`MEEPO_WORKER_CONFIG`, default `~/.meepo/worker.toml`). Environment overrides take precedence. File changes atomically publish MCP connections and model defaults for subsequent tickets/cold sessions; failed validation or connection retains the entire previous generation. Warm sessions retain their current tools/model, and old MCP connections close after their final session lease releases. Connection settings, paths, identity, tags, TTL and slot capacity require restart. Space thinking-level selection overrides the worker default. Shutdown aborts active runs, flushes terminal events when connected, closes MCP and WebSocket connections, and preserves workspace files.
-
-Agent-originated server tools include their current `runId`. The server checks ownership, resource association and an unexpired running lease before memory access or schedule/ticket mutations, fencing obsolete attempts independently of client behavior.
+- **Per-task directory isolation**: Concurrent tasks never share a working directory:
+  - Interactive sessions execute in `<sessionsDir>/<sessionId>`, preserved across turns and ordinary worker restarts so session-local state stays intact.
+  - Ticket attempts execute in `<ticketsDir>/<ticketId>/attempt-<N>` (`N = 1..3`), giving every retry a clean workspace while retaining prior attempt directories for local inspection.
+- **Repository neutrality**: Meepo never clones repositories or manages git credentials on behalf of tasks. Repository URLs on a space are optional prompt hints; cloning, branching, or creating a `git worktree` (required by the opt-in `coding` preset) is performed by the agent using the worker host's ambient SSH/git environment.
+- **Directory reclamation**: A background sweep reclaims inactive task directories whose `mtime` exceeds **7 days** (never following symlinks), while protecting active runners, in-flight cold starts, and `<sessionsDir>/.media`. When `session.closed` arrives (from session close, `/new`, or `main`-session rebind), the worker aborts active runs on that session, waits for tool execution to settle, releases MCP leases, and deletes `<sessionsDir>/<sessionId>`. Graceful worker shutdown (`SIGTERM`/`SIGINT`) aborts active runs, flushes buffered terminal events, and **preserves** task directories on disk.
 
 ### Media retention
 
-Downloaded originals live in `<sessionsDir>/.media`, keyed by channel namespace/message/file identity and excluded from task-directory reclamation. Closing a session or reclaiming its working directory does not delete those originals. A new worker can fetch the referenced source through the server proxy; caches remain local to each worker. An operator retiring a worker must retain its media cache when historical source availability matters.
+Images referenced in session turns (`ImageReference { messageId, fileKey }`) are fetched through the server's authorized `media.read` RPC (capped at `10 MiB` binary / `14 MiB` base64), saved with mode `0600` under the shared `<sessionsDir>/.media/<sha256(namespace:messageId:fileKey)>` cache, and excluded from the 7-day task-directory sweep. Only a downscaled JPEG copy (`≤ 2048×2048`, rotated per EXIF, quality `85`, `≤ 40` megapixels input) is passed as base64 `ImageContent` to the model, accompanied by `[Image original: <local-path>]` so local tools can inspect the untouched file if needed. Because `.media` is local to each worker, retiring a host requires preserving `<sessionsDir>/.media` if historical source images are no longer downloadable from the IM provider.
+
+## 3. Agent Loop, Tools, and Output Budgets
+
+### Concurrency Semaphore
+
+A single worker-wide `SlotSemaphore(maxSlots)` (`1–128`, default `1`) gates both `SessionRunner` turns and `TicketRunner` attempts. Queued slot waiters are cancellable via `AbortSignal` (so cancelling a queued turn or ticket frees it immediately without waiting for a slot), and slot releases wake waiting interactive `session` turns strictly ahead of `ticket` attempts.
+
+### Warm vs. Cold Runners
+
+- **Sessions** keep their in-memory runner warm across turns until idle past `sessionTtlMs` (default `1 hour`), closed, or restarted. Warm sessions retain their initial model configuration and MCP tool generation for stability; cold starts re-fetch canonical history via `session.snapshot` and re-render the system prompt.
+- **Tickets** instantiate a single-turn runner per dispatch and tear it down immediately upon completion.
+
+### Built-In Local Tools
+
+Every session and ticket provides four local workspace tools rooted at the task's working directory:
+
+1. **`read`**: Reads local text/image files from the worker filesystem.
+2. **`write`**: Creates or overwrites local files (creating parent directories as needed).
+3. **`edit`**: Applies exact string-replacement edits with diff feedback.
+4. **`bash`**: Executes shell commands in a child process with streaming output and abort propagation (`SIGTERM`/process tree cancellation on `run.abort`). On ticket runs, subprocesses receive `MEEPO_IDEMPOTENCY_KEY=<ticketId>-<attempt>` in their environment.
+
+### Tool Output Bounding
+
+Every local, server-backed, and MCP tool is wrapped by an output budget guard before results enter model context or wire events:
+
+- Payloads up to `64 KiB` UTF-8 pass through intact.
+- Results or thrown errors exceeding `64 KiB` write their full serialized JSON to `<taskDir>/.tool-output/<uuid>.json` (`0600`) and return an `8,000`-byte head/tail preview plus the local artifact path to the model and execution journal. `.tool-output/` follows its parent task directory's 7-day lifecycle and is not downloadable from the server.
+
+### Server-Backed Tools
+
+- **Memory tools** (`MemoryList`, `MemorySearch`, `MemoryRead`, `MemoryWrite`, `MemoryDelete`): Available identically in both sessions and tickets; proxy over `memory.call` RPC with the active `runId` so the server enforces lease validity and space ownership.
+- **Orchestration tools** (`CronCreate`, `CronList`, `CronDelete`, `TicketCreate`): Provided **only to interactive sessions** — tickets have no conversational session to wake up and cannot recursively spawn tickets or schedules.
+
+### MCP Tool Lifecycle and Hot Reload
+
+Worker owners configure external MCP servers in `worker.toml` / `.json` under `[mcp.<server>]` using either `command` + `args` + `env` (stdio) or `url` + `headers` (Streamable HTTP):
+
+- Server names must match `[a-zA-Z0-9_-]+`; discovered tools are exposed as `mcp__<server>__<normalizedToolName>` (colliding normalized names fail reload). Connection timeout defaults to `30s`; call timeout defaults to `timeoutSeconds ?? 60s` and propagates run `AbortSignal`. On ticket runs, `callTool` attaches `_meta: { meepoIdempotencyKey: "<ticketId>-<attempt>" }`.
+- **Reference-counted generations**: Watching `worker.toml` (2-second poll) reloads `mcp` and `modelDefaults` atomically. If any MCP server fails validation or connection, the new generation closes and the previous generation remains active. Newly started tickets and cold-started sessions acquire a lease on the latest generation; warm sessions hold their existing generation lease until evicted or closed, after which zero-reference old generations close their connections cleanly.
+
+## 4. Model Resolution and Context Compaction
 
 ### Model selection and reasoning effort
 
-The space selects a server model-registry entry. The agent stream uses `openai-completions`; a provider name identifies the configured endpoint and does not select a different wire API. Effective `thinkingLevel` is **space override → worker model default → model capability default**. New spaces/workers need not set it. Kimi entries in the current capability table (including K3) default to `max`; its named GPT entries default to `high`. Unknown model IDs currently fall back to K3 capabilities, so arbitrary model compatibility is not guaranteed.
+Spaces reference a `modelId` from the server's `ModelRegistry`, injected per dispatch alongside its endpoint and API key. Model calls use the OpenAI Chat Completions streaming wire protocol (`supportsDeveloperRole: false`), with `reasoningEffort` passed explicitly on every turn and compaction summary call. Effective effort resolves by precedence:
 
-Ordinary agent requests explicitly send `reasoningEffort`. A warm session retains the model/effort used to create its runner; a fresh ticket or cold session resolves current configuration. Compaction uses a separate summary-provider path and now forwards the configured thinking level. Compaction starts around 80% of the configured context window, retains a recent tail with intact tool pairs, and leaves the server event log unchanged; summary failure falls back to bounded recent history.
+```text
+Space model.thinkingLevel  ──►  Worker modelDefaults.thinkingLevel / MEEPO_THINKING_LEVEL  ──►  Model capability default
+```
 
-### Durable history and output budgets
+Known Kimi K2.8/K3 models default to `'max'` (`1,048,576` context window, `128,000` max output tokens; multimodal image input enabled by default for `kimi-k*` unless overridden by `ModelEntry.imageInput`); named GPT-5.6 entries default to `'high'` (`1,050,000` window). Unrecognized model IDs currently fall back to the K3 capability profile.
 
-Cold recovery reads 50-event pages. Above 256 KiB of buffered canonical history, it summarizes an old prefix and retains at least 40 recent relevant events, moving the split backward to keep tool call/result pairs together. Each prefix cache is recorded server-side with `coversThroughSeq` and a degradation flag; later cold starts resume from a compatible non-degraded prefix and original tail. A failed summary and every later summary derived from its excerpt stay degraded, with an explicit context-loss note, even if subsequent calls succeed. The next cold start retries from original events after the last successful prefix; warm in-memory context is not automatically rebuilt. Until a complete tool pair is available, recovery waits to compact that prefix; an orphan at the end remains explicitly unknown. History size is counted incrementally on append/removal. The 256 KiB threshold triggers compaction; it is not a hard memory limit. The accumulated relevant-event buffer is capped at 4 MiB of serialized history or 4,096 events. Exceeding either cap fails recovery explicitly (including when an unresolved tool prevents a safe split), without deleting raw history or inventing tool outcomes. The error directs users to inspect the Console and open a new session. These limits bound the accumulated buffer, not total process memory or the page already fetched. The first recovery of uncached historical data may still need multiple summary requests.
+### Two-Tier History Compaction
 
-Warm runners retain their local summary/tail and use token-threshold compaction. Canonical prefix caches are built during cold recovery rather than assigning invented event sequence numbers to warm Pi messages. A warm summary is not itself a canonical transcript entry. Both paths summarize in bounded chunks (≤32,000 input bytes per chunk, reduced further for a small model context), carry a bounded preceding summary and retain original server history. Failure records an explicit truncation note visible in the Console and model context; the warm fallback also applies a token budget, including an oversized single-message/tool-group escape hatch.
+Raw canonical events on the server are never deleted or overwritten; workers bound context size through two complementary paths that never split `tool_call` / `tool_result` pairs:
 
-All tool adapters bound returned output before it reaches model history. Oversize output is saved with mode `0600` under `<taskDir>/.tool-output/`, and the model/server see a bounded preview plus local path. These artifacts follow task-directory retention and are not downloadable from the server; bash's own full-output temporary file remains governed by its tool implementation.
+1. **Cold-start canonical prefix compaction (`loadDurableHistory`)**:
+   - Reads `session.snapshot` in `50`-event pages starting from the latest non-degraded server `CompactionCache` (if any).
+   - Tracks serialized byte size incrementally (omitting base64 image payloads from summary text). Once buffered relevant events exceed **`256 KiB`**, it selects a prefix leaving at least **40** recent events, shifting the cut earlier as needed so no `tool_call` is separated from its `tool_result` (and waiting for the next page if an open call might close later).
+   - Summarizes in chunks (`≤ min(32,000 bytes, contextWindow / 4)` per call, bounded to `16,000` bytes output) and records `{ coversThroughSeq, summary, degraded }` via `session.compaction`.
+   - **Degradation propagation**: If summarization fails, it falls back to a bounded `8,000`-byte excerpt prefixed with a Chinese truncation warning and marks `degraded = true`; every subsequent summary chained onto a degraded excerpt inherits `degraded = true` until a later cold start re-summarizes from raw events.
+   - **Hard safety ceiling**: If accumulated uncompacted events exceed **`4 MiB`** or **`4,096` events** (for example, an unresolved tool group preventing a safe split), cold recovery aborts explicitly without inventing tool outcomes or dropping history, instructing the user to inspect the Console and start a new session.
+2. **Warm in-memory compaction (`SessionCompactor`)**:
+   - Before each turn on a warm runner, estimates context tokens and triggers compaction above **80%** of `contextWindow`, retaining approximately the most recent **20%** of tokens with intact tool pairs.
+   - Warm summaries stay in runner memory rather than inventing canonical `seq` boundaries. If summarization fails on a warm runner, it emits a durable `context_note` (`system_note` in Console) and falls back to recent messages within the token budget (or a bounded `16,000`-byte excerpt if a single message/tool group exceeds the budget).

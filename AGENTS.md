@@ -6,66 +6,45 @@ To prevent diluting the context window with redundant or overly detailed busines
 
 1. **`AGENTS.md` (This File)**: STRICTLY for high-level coding constraints, directory structures, and critical rules (the "laws" for the coding agent). Must be kept concise.
 2. **`README.md`**: STRICTLY for human onboarding, local setup, and deployment instructions.
-3. **`specs/` Directory**: STRICTLY for detailed architectural designs, business logic, module descriptions, and domain behaviors. It is further divided into specific domains:
+3. **`specs/` Directory**: STRICTLY for detailed architectural designs, business logic, module descriptions, and domain behaviors (`specs/README.md` defines the glossary, reading map, and full authoring standard — read it before editing `specs/`). It is further divided into specific domains:
    - `specs/architecture/`: Evergreen system-level designs. Keep up-to-date when architecture changes.
    - `specs/features/`: Evergreen functional domain behaviors. Keep up-to-date when features evolve.
    - `specs/proposals/`: Point-in-time ADRs (Architecture Decision Records), refactoring plans, and design drafts. May be outdated — do not blindly trust. Always verify against current code. Evergreen docs must not cite proposals; hoist durable rules into the relevant evergreen doc.
 
-## Project Structure
+Evergreen specs must remain self-contained and implementation-independent: specify logical schemas, endpoints, state machines, and limits directly (never substitute `"see packages/..."` for a contract), preserve design rationale, rewrite affected sections cleanly in place within the same task as any contract change (no patch postscripts, internal helper names, or migration numbers), and isolate stage limits under `Current Implementation Notes`. Write `AGENTS.md`, `README.md`, and evergreen `specs/` in English; `specs/proposals/` may be written in the developer's preferred language.
+
+## Project Structure & Verification
 
 Meepo is a monorepo managed by [Moon](https://moonrepo.dev/) and [pnpm](https://pnpm.io/) workspaces.
 
 ```
 meepo/
   apps/
-    meepo-server/          # Central control plane: Feishu gateway, space/session manager, dispatcher, ticket queue
-    meepo-worker/          # Distributed execution runner: isolated per-task working directories, Pi runtime execution
-    meepo-console/         # Admin console (Vite + React)
+    meepo-server/          # Control plane: channel gateways, space/session/memory store, dispatcher, scheduler
+    meepo-worker/          # Execution data plane: isolated per-task directories, agent loop, local & MCP tools
+    meepo-console/         # Management & observation console (Vite + React SPA)
   packages/
-    core/                  # Shared domain entities (Space, Worker, Ticket, Session, Memory, Slot)
-    protocol/              # Wire envelopes, event schemas, RPC contracts, streaming frames
-    sdk/                   # Client SDK for programmatic worker interaction & extensions
-  specs/                   # Architecture, feature, and proposal docs
+    core/                  # Shared domain entity interfaces
+    protocol/              # Wire envelopes, RPC schemas, streaming events, payload bounds
+    sdk/                   # Reserved placeholder stub (do not place domain or client logic here)
+  specs/                   # Specification charter (specs/README.md), architecture, features, and proposals
 ```
 
-### Architecture References
-
-| Component / Subsystem | Role                                             | Spec                                         |
-| --------------------- | ------------------------------------------------ | -------------------------------------------- |
-| System Overview       | End-to-end architecture & topology               | `specs/architecture/system-overview.md`      |
-| Server Control Plane  | Gateway, Dispatcher, Memory & Session Store      | `specs/architecture/server-control-plane.md` |
-| Worker Data Plane     | Runner lifecycle, Slot concurrency, task dirs    | `specs/architecture/worker-data-plane.md`    |
-| Space & Chat Mapping  | Multi-chat to Space isolation model              | `specs/features/space-and-chat.md`           |
-| Interactive Session   | Real-time Thread routing & streaming             | `specs/features/interactive-session.md`      |
-| Ticket Pipeline       | Async task & batch run pipeline                  | `specs/features/ticket-pipeline.md`          |
-| Triggers & Scheduling | Unified Schedule/Ticket/Turn/Run execution model | `specs/features/triggers-and-scheduling.md`  |
-| Worker Protocol       | Wire contract, reliability semantics, versioning | `specs/architecture/worker-protocol.md`      |
-| Space Memory          | Entry model, retrieval, tools, API contract      | `specs/features/memory.md`                   |
-| Backend Layering      | Dependency & placement rules for heavy backends  | `specs/architecture/backend-layering.md`     |
+- Rebuild shared packages (`pnpm build`) before testing downstream apps; run `pnpm format` and `pnpm check` (lint + typecheck + test + spec hygiene) before finishing.
+- `pnpm build` runs `pnpm dedupe` — discard incidental `pnpm-lock.yaml` metadata diffs when dependencies are unchanged.
 
 ## Coding Style & Guard Rails
 
-### TypeScript
+### Architecture & Security Constraints
 
-- Strict TypeScript (`strict: true`, Node strip-only or modern bundler module resolution).
-- Formatting: Prettier (`.prettierrc.json`).
-- Linting: ESLint with `typescript-eslint`.
-- No `any` unless strictly justified at serialization boundaries.
-- No dynamic / inline imports (`import()`) in shared core packages unless lazy-loading provider SDKs.
-- Top-level named exports preferred.
+- **Server Owns Truth; Worker Owns Live State**: `meepo-server` is the SST for spaces, memory, canonical transcripts, tickets, schedules, and runs. Workers own live agents, task directories, MCP processes, and uncommitted files (stateless across tickets, sticky for sessions); never run task commands or manage git repos on the server.
+- **Hard Session Affinity**: `main` sessions follow `space.boundWorkerId` (offline queues and waits; explicit rebind interrupts and migrates them); `thread` sessions pin to their initial worker for life. Tickets are exempt and receive structured objective bundles (never raw chat logs) in fresh `<ticketsDir>/<id>/attempt-N` directories.
+- **Slot & Prompt Discipline**: Worker `SlotSemaphore` caps all local runs (interactive turns prioritized over tickets) in isolated per-task directories; `git worktree` rules belong only to the opt-in `coding` preset. Session identity/preset freezes at creation (`prompt_identity`), dynamic per-turn state (e.g. current time) rides in turn messages, and the cold-refreshed `Memory Map` stays at the very end of the system prompt to preserve KV-cache hits.
+- **Cross-Entity Atomicity (`Tx*` Ports)**: `store/memory/*` doubles do not enforce multi-entity transactions — commit cross-entity transitions via SQLite `Tx*` ports and verify with SQLite tests. Exception: `SqliteTicketRepository.save()` cascades run fencing and origin receipts on terminal tickets; never replace it with a row-only write.
+- **Auth & Secret Boundaries**: Read identity only from `Authenticator` request context (no account table); authorize existing resources against their **stored** `spaceId` and reject path/query/body `spaceId` conflicts (`admin` manages `Models`/`Channels` only). Channel secrets/tokens never leave the server (`media.read` proxies images), `DispatchQueue` omits raw `apiKey`s, IM tool pills hide args/results, and worker tool RPCs require an unexpired `running` `runId` lease without mixing `sessionId` and `ticketId`.
+- **Layering, Migrations & Protocol**: `transport → domain → store` one-way (`infra` dependency-free); consumer-defined ports in `domain/` wired via constructor injection in `bootstrap.ts`. SQLite migrations (`migrations.ts`) are append-only; breaking `/ws/worker` changes must bump `CURRENT_PROTOCOL_VERSION` in `@meepo/protocol`.
 
-### Architecture Constraints
+### TypeScript & Commits
 
-- **Server Owns Truth; Worker Owns Live State**: `meepo-server` is the SST for persistent configuration, space long-term memory, session transcripts, and tickets. Workers own inherently local state (agent process, workspace, uncommitted changes): stateless across ticket lifetimes, but sticky for sessions.
-- **Hard Session–Worker Affinity**: A session is pinned to one worker at creation and never migrates implicitly — main sessions follow the space's `boundWorkerId`, thread sessions their dispatch target. Worker offline means the session pauses; rebinding is a deliberate user action. Tickets are exempt.
-- **Slot Isolation**: A worker's slot defines its maximum concurrency limit. Concurrent executions MUST run in isolated working directories (one per task) to prevent file collisions. The rule to create a `git worktree` before modifying code is a prompt-level convention of the optional coding preset, not a code constraint.
-- **Clean Worker Context**: Tickets must receive structured objective bundles rather than uncurated conversational chat logs.
-- **Protocol Independence**: Payloads between server and worker must conform to `@meepo/protocol` contracts and serialize cleanly to JSON.
-- **Edge Authentication**: User identity comes from an edge SSO token via an `Authenticator` port (a local adapter serves development until SSO integration); identity is read from request context, never from request payloads. Authorization is per-space membership (one role per user per space); MEEPO keeps no account system.
-- **Layering**: `transport → domain → store` one-way; ports defined at the consumer; `domain/` never imports transport/infra frameworks; constructor injection only. Full rules: `specs/architecture/backend-layering.md`.
-
-## Commits
-
-- Follow [Conventional Commits](https://www.conventionalcommits.org/) format (`feat:`, `fix:`, `docs:`, `refactor:`, `chore:`).
-- Keep subject line concise and informative, focusing on architectural intent.
-- Do not commit directly unless explicitly instructed by the user.
+- Strict TypeScript (`strict: true`), Prettier + `typescript-eslint`, named exports, no `any` outside justified serialization boundaries, and no dynamic `import()` in shared core packages unless lazy-loading provider SDKs.
+- Conventional Commits (`feat:`, `fix:`, `docs:`, `refactor:`, `chore:`). Do not commit directly unless explicitly instructed by the user.

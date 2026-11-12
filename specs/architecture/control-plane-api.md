@@ -1,0 +1,126 @@
+# Control Plane API
+
+> **Scope**: Defines the external HTTP REST endpoints, request/response authorization gates, standard error contract, webhook ingestion rules, and Console live-streaming WebSocket protocol exposed by `meepo-server`. For the `/ws/worker` channel, see [Worker Protocol](worker-protocol.md).
+
+## 1. Transport Conventions and Error Contract
+
+- **Content Type**: All `POST`, `PUT`, and `PATCH` routes under `/api/*` require a JSON object body (`application/json`); `null`, primitives, and arrays are rejected with `400`. An empty body is normalized to `{}`.
+- **Authentication**: Every `/api/*` request resolves `UserIdentity` via the `Authenticator` port, except `POST /api/webhooks/:spaceId/tickets` when carrying an `Authorization: Bearer <webhook-token>` header. `GET /healthz` is unauthenticated.
+- **Space Consistency Gate**: Before invoking any handler on `/api/*`, the authorization hook collects every `spaceId` supplied across URL path parameters, query string, and JSON body:
+  1. Any blank or non-string `spaceId` returns `400` (`validation`).
+  2. Multiple distinct `spaceId` values in the same request return `400` (`Conflicting spaceId sources`).
+  3. When addressing an existing resource (`/api/sessions/:id`, `/api/tickets/:id`, `/api/schedules/:id`), the server loads its stored `spaceId`, rejects mismatches against any caller-supplied `spaceId` (`400`), and verifies caller membership against the stored `spaceId` (`401` if not a member).
+     _Rationale: Prevents confused-deputy attacks where a caller authorizes against a space they own in a query parameter while mutating a resource belonging to another space in the path or body._
+
+### Error Envelope and Status Mapping
+
+All failed HTTP requests return `{ "error": { "code": "<string>", "message": "<string>", "currentRevision"?: <number> } }`:
+
+| HTTP Status | `error.code`                                                                            | Meaning                                                         |
+| ----------- | --------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| `400`       | `validation`, `invalid_path`, `invalid_prefix`, `content_too_large`, `too_many_entries` | Malformed input, domain constraint violation, or space mismatch |
+| `401`       | `unauthorized`                                                                          | Missing/invalid credentials, non-member, or insufficient role   |
+| `404`       | `not_found`                                                                             | Target entity or route does not exist                           |
+| `409`       | `conflict`, `revision_conflict` (includes `currentRevision`)                            | Illegal state transition, webhook key mismatch, or stale write  |
+| `413`       | `payload_too_large`                                                                     | Request body exceeds route byte limit                           |
+| `429`       | `rate_limited` (includes `Retry-After` seconds header)                                  | Per-space webhook rate limit exceeded                           |
+| `500`       | `internal`                                                                              | Unexpected unhandled server failure                             |
+
+## 2. Spaces, Memberships, and Enrollments
+
+| Method & Path                                   | Auth Role     | Request / Query                                                                             | Response & Behavior                                                                                    |
+| ----------------------------------------------- | ------------- | ------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `GET /healthz`                                  | Public        | —                                                                                           | `{ status: 'ok', uptimeSeconds, timestamp }`.                                                          |
+| `GET /api/spaces`                               | Authenticated | —                                                                                           | `Space[]` where caller is `owner` or `operator` (`boundChatIds` projected from `ChannelRegistry`).     |
+| `POST /api/spaces`                              | Authenticated | `{ name, description?, repoUrl?, defaultBranch?, requiredTags?, timezone?, promptPreset? }` | Creates `Space` and adds caller as initial `owner`.                                                    |
+| `GET /api/spaces/:id`                           | Space member  | —                                                                                           | `Space`.                                                                                               |
+| `PATCH /api/spaces/:id`                         | Space member  | `{ description?, repoUrl?, defaultBranch?, requiredTags?, timezone?, promptPreset? }`       | Partial metadata update; returns updated `Space`.                                                      |
+| `DELETE /api/spaces/:id`                        | Space `owner` | —                                                                                           | Cascades space deletion and fences active runs; returns `{ deleted: true }`.                           |
+| `POST /api/spaces/:id/binding`                  | Space member  | `{ workerId }` (must be enrolled for `:id`)                                                 | Executes `TxRebind` (interrupts & migrates `main` sessions; leaves `thread`s pinned); returns `Space`. |
+| `PUT /api/spaces/:id/model`                     | Space member  | `{ model?: { modelId, thinkingLevel?: 'low' \| 'high' \| 'max' } }`                         | Sets or clears space model reference; returns `Space`.                                                 |
+| `GET /api/spaces/:id/channels`                  | Space member  | —                                                                                           | Public channel views (`appSecret` omitted) assigned to `:id`.                                          |
+| `PUT /api/spaces/:id/channels/:channelId/chats` | Space member  | `{ chatIds: string[] }`                                                                     | Replaces `boundChatIds` on `:channelId` (must belong to `:id`); returns `{ saved: true }`.             |
+| `GET /api/spaces/:id/usage`                     | Space member  | —                                                                                           | `{ runCount, reportedRunCount, inputTokens, outputTokens, costUsd, costReportedRunCount }`.            |
+| `POST /api/spaces/:id/webhook-token`            | Space member  | —                                                                                           | Issues/rotates space webhook secret; returns `{ token }` plaintext once.                               |
+| `DELETE /api/spaces/:id/webhook-token`          | Space member  | —                                                                                           | Revokes space webhook token; returns `{ revoked: true }`.                                              |
+| `GET /api/spaces/:id/members`                   | Space member  | —                                                                                           | `SpaceMember[]`.                                                                                       |
+| `POST /api/spaces/:id/members`                  | Space member  | `{ userId }`                                                                                | Adds `userId` with role `'operator'` (idempotent if already operator); returns `SpaceMember`.          |
+| `DELETE /api/spaces/:id/members/:userId`        | Space `owner` | —                                                                                           | Removes member (cannot remove sole owner); returns `{ removed: true }`.                                |
+| `POST /api/spaces/:id/owner`                    | Space `owner` | `{ userId }` (must already be a space member)                                               | Atomically promotes target to `owner` and demotes caller to `operator`; `{ transferred: true }`.       |
+| `GET /api/enrollments`                          | Space member  | `?spaceId=<id>` (required)                                                                  | Lists enrollment tokens covering `spaceId` (`token` hash redacted).                                    |
+| `POST /api/enrollments`                         | Member of all | `{ spaceIds: string[], label?, expiresAt? }`                                                | Caller must belong to every listed space; returns `WorkerEnrollmentToken` with plaintext `token` once. |
+| `POST /api/enrollments/:id/revoke`              | Member of any | —                                                                                           | Sets `revokedAt`, immediately invalidating future heartbeats/registrations; `{ revoked: true }`.       |
+
+## 3. Global Registries and Workers
+
+| Method & Path              | Auth Role      | Request / Query                                                                       | Response & Behavior                                                                                    |
+| -------------------------- | -------------- | ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `GET /api/model-options`   | Authenticated  | —                                                                                     | `{ id, model, provider, imageInput?, isDefault }[]` — credential-free list for space selectors.        |
+| `GET /api/models`          | Global `admin` | —                                                                                     | `{ id, provider, model, baseUrl, imageInput?, hasApiKey: true, isDefault }[]` (`apiKey` omitted).      |
+| `PUT /api/models`          | Global `admin` | `{ id, provider, model, baseUrl, apiKey?, imageInput?: boolean \| null, isDefault? }` | Upserts model entry; omitting `apiKey` on update preserves stored key; `imageInput: null` clears flag. |
+| `DELETE /api/models/:id`   | Global `admin` | —                                                                                     | Deletes model entry (`409` if currently `defaultModelId`); returns `{ deleted: true }`.                |
+| `GET /api/channels`        | Global `admin` | —                                                                                     | Lists all channels with `appSecret` omitted.                                                           |
+| `POST /api/channels`       | Global `admin` | `{ type: 'feishu', name, appId, appSecret, spaceId, allowedOpenIds?, boundChatIds? }` | `201`; registers channel (`appId` unique, `spaceId` must exist) and starts gateway connection.         |
+| `PATCH /api/channels/:id`  | Global `admin` | Partial channel fields (`appSecret` empty/omitted preserves stored secret)            | Updates channel and reconnects its gateway if credentials or routing changed.                          |
+| `DELETE /api/channels/:id` | Global `admin` | —                                                                                     | Stops gateway connection and removes channel; returns `{ deleted: true }`.                             |
+| `GET /api/workers`         | Authenticated  | `?spaceId=<id>` (optional)                                                            | `WorkerNode[]` filtered to workers serving at least one space the caller belongs to.                   |
+| `GET /api/workers/:id`     | Shared member  | —                                                                                     | `WorkerNode` (`401` unless worker's `spaceIds` intersects caller's memberships).                       |
+
+## 4. Sessions, Observation, and Console Live Stream
+
+| Method & Path                              | Auth Role    | Request / Query                  | Response & Behavior                                                                                      |
+| ------------------------------------------ | ------------ | -------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `POST /api/sessions`                       | Space member | `{ spaceId }`                    | Opens a non-IM `main` session (`chatId = 'console:<userId>'`); rejects IM `channelId`/anchor fields.     |
+| `GET /api/sessions`                        | Space member | `?spaceId=<id>`                  | `Session[]` for `spaceId` (returns `[]` if `spaceId` omitted).                                           |
+| `GET /api/sessions/:id`                    | Space member | —                                | `Session`.                                                                                               |
+| `GET /api/sessions/:id/snapshot`           | Space member | —                                | Full `SessionSnapshot` (without prefix compaction).                                                      |
+| `GET /api/sessions/:id/events`             | Space member | `?afterSeq=<n>` (default `0`)    | Up to `500` `CanonicalEvent`s with `seq > afterSeq` in ascending order.                                  |
+| `GET /api/sessions/:id/runs`               | Space member | —                                | `Run[]` belonging to session `:id`.                                                                      |
+| `POST /api/sessions/:id/turns`             | Space member | `{ prompt, delivery?: 'wait' }`  | Enqueues/dispatches a `user_message` turn (`400` if `delivery` is `urgent`/`if_idle` or `prompt` blank). |
+| `POST /api/sessions/:id/mailbox`           | Space member | `{ content }` (`1–32,000` chars) | Enqueues an attributed `system_note` (`[Console message from <displayName>]`) with `wait` delivery.      |
+| `POST /api/sessions/:id/runs/:runId/abort` | Space member | —                                | Interrupts run (`400` if run is outside `:id`); returns `{ interrupted: boolean }`.                      |
+| `POST /api/sessions/:id/close`             | Space member | —                                | Executes `TxClose` and notifies bound worker (`session.closed`); returns closed `Session`.               |
+| `POST /api/sessions/:id/stream-token`      | Space member | —                                | Issues a one-time stream grant `{ token }` expiring in `30s` (sweeps expired grants on issuance).        |
+
+### Console WebSocket Stream (`GET /ws/console/:token?afterSeq=<n>`)
+
+Browsers cannot reliably attach custom auth headers to standard WebSocket handshakes. Instead, the Console exchanges an authenticated `POST /api/sessions/:id/stream-token` call for a short-lived (`30s`), single-use random `token`, then opens `/ws/console/:token?afterSeq=<lastSeenSeq>`:
+
+1. The server atomically consumes `token` on connection; missing/expired tokens or invalid `afterSeq` close the socket with WebSocket code `1008`.
+2. Immediately and every `250 ms`, the server re-verifies that the granting `userId` is still a member of the session's space, queries `CanonicalEvent`s with `seq > cursor`, sends each event as a JSON text frame, and advances `cursor`.
+3. If space membership is revoked or the session disappears, the socket closes immediately with `1008`. On transient network drops, the client requests a fresh stream token and reconnects using its highest received `seq`.
+
+## 5. Tickets, Webhooks, Schedules, and Memory
+
+### Tickets & Webhooks
+
+| Method & Path                         | Auth Role                      | Request / Query                                                                                | Response & Behavior                                                                               |
+| ------------------------------------- | ------------------------------ | ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `POST /api/tickets`                   | Space member                   | `{ spaceId, title, objective, contextSummary?, requiredTags?, originSessionId?, idempotent? }` | Creates `pending` `Ticket` (`originSessionId`, if supplied, must belong to `spaceId`).            |
+| `GET /api/tickets`                    | Authenticated                  | `?spaceId=<id>` (optional)                                                                     | `Ticket[]` restricted to caller's member spaces.                                                  |
+| `GET /api/tickets/:id`                | Space member                   | —                                                                                              | `Ticket`.                                                                                         |
+| `GET /api/tickets/:id/runs`           | Space member                   | —                                                                                              | `(Run & { events: RunEvent[] })[]` ordered by attempt for replay in Console.                      |
+| `POST /api/tickets/:id/dispatch`      | Space member                   | —                                                                                              | Triggers immediate dispatch attempt of a `pending` ticket; returns `DispatchOutcome`.             |
+| `POST /api/tickets/:id/requeue`       | Space member                   | —                                                                                              | Manual retry from `manual_review` (`attempt < 3`) → `pending` with fresh `pendingSince`.          |
+| `POST /api/tickets/:id/abandon`       | Space member                   | —                                                                                              | Resolves `manual_review` → `failed` (`terminalReason = 'abandoned'`).                             |
+| `POST /api/tickets/:id/cancel`        | Space member                   | —                                                                                              | Cancels `pending \| claimed \| running \| manual_review` ticket (`409` if `completed \| failed`). |
+| `POST /api/webhooks/:spaceId/tickets` | Space Bearer token _or_ member | `{ title?, objective, contextSummary?, idempotent? }` + optional `Idempotency-Key` header      | Creates `pending` `Ticket` (`title` defaults to `'Webhook event'`; cannot set `originSessionId`). |
+
+**Webhook Ingestion Rules**:
+
+- If `Authorization` header is present on `/api/webhooks/:spaceId/tickets`, it is always validated as `Bearer <space-webhook-token>`; otherwise standard request identity + space membership applies. (When adding JWT Bearer SSO in the future, token format or route separation must disambiguate user JWTs from space webhook secrets.)
+- Limits: `128 KiB` body, `200`-char `title`, `32,000`-char `objective`/`contextSummary`, `60` requests/minute/space (`429` + `Retry-After`).
+- `Idempotency-Key`: `1–128` printable non-space ASCII characters (`[\x21-\x7e]`). Same key + identical SHA-256 normalized payload returns the existing `Ticket`; same key + altered payload returns `409`. Keys expire after 30 days.
+
+### Schedules & Memory
+
+- **Schedules**:
+  - `POST /api/schedules` (Space member): `{ spaceId, timing, action }` → `Schedule`.
+  - `GET /api/schedules?spaceId=` (Authenticated): `Schedule[]` restricted to caller's spaces.
+  - `POST /api/schedules/:id/cancel` (Space member): Sets `status = 'deleted'`; returns `Schedule`.
+- **Memory** (all require `spaceId` query parameter and Space membership; full semantics in [Space Memory](../features/memory.md)):
+  - `GET /api/memory?spaceId=&prefix=&limit=`
+  - `GET /api/memory/search?spaceId=&q=&prefix=&limit=`
+  - `GET /api/memory/<path>?spaceId=&offset=&limit=&tail=`
+  - `PUT /api/memory/<path>?spaceId=` (`{ description, content, keywords?, pinned?, expected_revision }`)
+  - `DELETE /api/memory/<path>?spaceId=&expected_revision=`

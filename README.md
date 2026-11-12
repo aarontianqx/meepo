@@ -2,11 +2,13 @@
 
 **M**ulti-worker **E**xecution **E**ngine for **P**roject-isolated **O**rchestration.
 
-Meepo connects Feishu conversations to distributed agent workers. The server owns spaces, memory, transcripts, tickets and schedules. Workers execute tools in isolated directories; the console manages and observes execution.
+Meepo connects instant-messaging conversations (currently Feishu) and external triggers to distributed, self-hosted agent workers. The control-plane server owns spaces, curated memory, session transcripts, tickets, and schedules; workers execute agents and tools inside isolated per-task directories; the web console manages configuration and observes live execution.
+
+For full architecture and behavioral specifications, start at [`specs/README.md`](specs/README.md).
 
 ## Local setup
 
-Requires Node.js 22+ and pnpm 11+. Moon is included in the workspace dependencies. SQLite is embedded; no database server or container is required.
+Requires Node.js 22+ and pnpm 11+. Moon is included in the workspace devDependencies, and SQLite is embedded (no external database server or container is required).
 
 ```bash
 pnpm install
@@ -14,7 +16,7 @@ pnpm build
 pnpm check
 ```
 
-The apps are `apps/meepo-server`, `apps/meepo-worker` and `apps/meepo-console`. Shared contracts live in `packages/core` and `packages/protocol`; detailed behavior lives in `specs/architecture` and `specs/features`.
+The monorepo contains three applications (`apps/meepo-server`, `apps/meepo-worker`, `apps/meepo-console`) and shared contract packages (`packages/core`, `packages/protocol`, plus reserved `packages/sdk`).
 
 ### 1. Start the server
 
@@ -28,37 +30,45 @@ MEEPO_MODEL_ID=<model-name> \
 node apps/meepo-server/dist/index.js
 ```
 
-Generate the encryption key with `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` and keep it in your private environment configuration. Retain the key with SQLite backups; changing it makes stored model/channel secrets unreadable. Production mode requires it. Development without it uses plaintext and logs a warning.
+Generate the master encryption key with:
 
-The server listens on `127.0.0.1:8780` by default and serves the built console. `MEEPO_HOST`, `MEEPO_PORT`, `MEEPO_DB_PATH` and `MEEPO_CONSOLE_DIST` override defaults. The default database is `~/.meepo/server/meepo.db`. Set `MEEPO_HOST` explicitly when workers on other machines need access through your trusted network/edge.
+```bash
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+```
 
-With `NODE_ENV=production`, startup rejects the current header authenticator unless `MEEPO_ALLOW_INSECURE_HEADER_AUTH=1` explicitly opts into an isolated deployment. This opt-in does not implement SSO or make client-supplied identity headers trustworthy.
+Store `MEEPO_SECRET_KEY` securely alongside SQLite backups — rotating or losing it renders encrypted model and channel credentials unreadable. Production mode (`NODE_ENV=production`) requires `MEEPO_SECRET_KEY`; development mode falls back to plaintext storage with a startup warning.
 
-The current development authenticator reads `x-meepo-user-id` / `x-meepo-user-name`, with `dev-user` as fallback. Set the console's User field to `aaron` in this example. Replace this adapter with verified edge SSO before exposing the service to untrusted users; global admin status grants access to Models/Channels, not membership in other users' spaces.
+The server listens on `127.0.0.1:8780` by default, stores state at `~/.meepo/server/meepo.db`, and serves the built console SPA when present. Override defaults with `MEEPO_HOST`, `MEEPO_PORT`, `MEEPO_DB_PATH`, `MEEPO_CONSOLE_DIST`, `MEEPO_HEARTBEAT_INTERVAL_SECONDS` (default `15`), and `MEEPO_WORKER_OFFLINE_AFTER_MS` (default `45000`). Set `MEEPO_HOST` explicitly only behind a trusted network or authenticated reverse proxy.
+
+For local development, the header authenticator reads `x-meepo-user-id` and `x-meepo-user-name` (defaulting to `dev-user`). In the console top bar, set **User** to `aaron` to match `MEEPO_ADMIN_USER_IDS`. Production mode refuses startup with header authentication unless `MEEPO_ALLOW_INSECURE_HEADER_AUTH=1` explicitly opts in for an isolated environment; replace this adapter with verified edge SSO before exposing the server to untrusted networks. Global admin status grants access to the **Models** and **Channels** registries only — never to private spaces.
 
 ### 2. Create a space and enroll a worker
 
-In the console, create a space, then issue a token from its detail page. The creator is the owner; other members have the operator role. A token's plaintext is shown once.
+Open `http://127.0.0.1:8780`, create a space (the creator becomes its `owner`), and issue an enrollment token from the space detail page. Token plaintext is displayed once.
 
 ```bash
 MEEPO_ENROLLMENT_TOKEN=<issued-token> node apps/meepo-worker/dist/index.js
 ```
 
-The first worker enrolled for a space becomes its default binding. The worker persists its identity under `~/.meepo/worker/worker-id`; keep that file across restarts. A token is bound to one worker identity. Rebinding a space interrupts its active main sessions and moves queued inputs; thread sessions retain their original worker.
+The first enrolled worker to register for an unbound space becomes its default `boundWorkerId`. Each worker generates and persists its stable identity at `~/.meepo/worker/worker-id`; preserve that file across restarts because an enrollment token binds permanently to the first `workerId` that uses it. Explicitly rebinding a space interrupts active main sessions and migrates their queued turns to the new worker, while existing thread sessions remain pinned to their original worker.
 
 ### 3. Connect Feishu
 
-As a global admin, create a Channel with the bot's application ID/secret and the target space ID. Add allowed group chat IDs on the space's Channels section or the global channel editor. An empty private-chat allowlist accepts any user who can message the bot.
+As a global admin, register a Feishu channel in **Channels** with its `appId`, `appSecret`, and target `spaceId`. Bind allowed group `chat_id`s from the space detail page or channel editor. An empty private-chat `allowedOpenIds` list admits any user able to message the bot.
 
-In the Feishu developer console, enable the bot, publish the required permissions, and use long connection delivery for `im.message.receive_v1` and `card.action.trigger`. The bot needs message receive/read/send/reply, image-resource download and CardKit create/update permissions. Add it to the test group. No public callback endpoint or logged-in Feishu browser is needed.
+In the Feishu Developer Console:
 
-A new group `@bot` message creates a thread; subsequent messages in an engaged thread do not require mentions. Private chats and group main windows support `/new` (group commands require `@bot`). Use the card Stop button or the console's run Stop action to interrupt execution.
+1. Enable the Bot capability.
+2. Grant message receive/read/send/reply, image resource download, and CardKit create/update permissions, then publish a version.
+3. Configure event delivery via **Long Connection** (WebSocket) for `im.message.receive_v1` and card action callback `card.action.trigger`. No public webhook URL is needed for Feishu events.
 
-Legacy `MEEPO_FEISHU_APP_ID`, `MEEPO_FEISHU_APP_SECRET`, `MEEPO_DEFAULT_SPACE_ID` are imported once into the channel registry when the named space exists. Subsequent credential edits belong in the registry. `MEEPO_MODELS` can similarly seed a JSON array of `{id,provider,model,baseUrl,apiKey,imageInput?}`; the persisted registry becomes authoritative after first boot.
+In a bound group, mentioning `@bot` in the main stream opens a dedicated thread session; subsequent replies inside an engaged thread require no mention, while replying to a main-stream message with `@bot` continues the group's main session. `/new` resets a private-chat or group-main session (group `/new` requires `@bot`). Use the streaming card's **停止** button or the console's **Stop** action to interrupt an active run.
+
+Seed environment variables (`MEEPO_FEISHU_APP_ID`, `MEEPO_FEISHU_APP_SECRET`, `MEEPO_DEFAULT_SPACE_ID` for a legacy channel; `MEEPO_MODELS` JSON array and `MEEPO_DEFAULT_MODEL_ID` for models) are imported once when empty; thereafter the database registries are authoritative.
 
 ## Worker configuration
 
-The default file is `~/.meepo/worker.toml`; override with `MEEPO_WORKER_CONFIG`. JSON files are also supported. Protect configuration containing credentials with mode `0600`.
+Workers read `~/.meepo/worker.toml` by default (override with `MEEPO_WORKER_CONFIG`; `.json` is also supported). Protect files containing MCP credentials with mode `0600`.
 
 ```toml
 serverUrl = "ws://127.0.0.1:8780/ws/worker"
@@ -85,35 +95,37 @@ timeoutSeconds = 60
 # Authorization = "Bearer <private-token>"
 ```
 
-Environment overrides: `MEEPO_SERVER_URL`, `MEEPO_ENROLLMENT_TOKEN`, `MEEPO_DATA_DIR`, `MEEPO_WORKER_ID`, `MEEPO_TAGS` (comma separated), `MEEPO_MAX_SLOTS`, `MEEPO_SESSIONS_DIR`, `MEEPO_TICKETS_DIR`, `MEEPO_SESSION_TTL_MS`, `MEEPO_THINKING_LEVEL`. An explicit worker ID must match the persisted identity. Space model thinking settings override worker defaults.
+Environment overrides take precedence: `MEEPO_SERVER_URL`, `MEEPO_ENROLLMENT_TOKEN`, `MEEPO_DATA_DIR`, `MEEPO_WORKER_ID` (must match persisted `worker-id` if already initialized), `MEEPO_TAGS` (comma-separated), `MEEPO_MAX_SLOTS` (`1–128`), `MEEPO_SESSIONS_DIR`, `MEEPO_TICKETS_DIR`, `MEEPO_SESSION_TTL_MS`, and `MEEPO_THINKING_LEVEL` (`low` | `high` | `max`).
 
-MCP and model defaults reload when the file changes. Failed reloads retain the previous generation. Warm sessions retain their model and tools; new tickets and cold sessions use the new configuration. Connection, identity, tags, paths, TTL and slot count require a worker restart. MCP supports stdio and Streamable HTTP; tools are named `mcp__<server>__<tool>`. Old connections close when their last warm session releases them.
+- **Hot reload**: Editing `mcp` or `modelDefaults` reloads atomically for subsequent tickets and cold-started sessions; failed reloads retain the previous generation. Warm sessions keep their existing model and MCP tool leases until evicted or closed. Connection, identity, paths, tags, TTL, and slot capacity require a worker restart.
+- **Local environment & retention**: Cold starts read `~/.agents/AGENTS.md` and skill frontmatter from `~/.agents/skills/*/SKILL.md`. Task directories live at `<sessionsDir>/<sessionId>` and `<ticketsDir>/<ticketId>/attempt-N`; inactive directories older than 7 days are reclaimed automatically, while downloaded image originals in `<sessionsDir>/.media` are retained independently across session cleanup. Oversized tool outputs are saved locally under `<taskDir>/.tool-output/` (`0600`) with a bounded preview sent to the model and server journal.
 
-Workers read `~/.agents/AGENTS.md` and skill descriptions under `~/.agents/skills/` at cold start. The general prompt has no compulsory git workflow; select the coding preset on a space to enable worktree guidance. Task directories are `<sessionsDir>/<sessionId>` and `<ticketsDir>/<ticketId>/attempt-N`. Ordinary worker restarts preserve them; closed/rebound sessions release their old local directory. Inactive task directories are reclaimed after seven days.
+## Console and HTTP APIs
 
-## Console and APIs
-
-The console provides Spaces, Workers, Tickets, Sessions, Schedules, Memory, Models and Channels. Memory writes use optimistic revisions; on conflict reload the current revision before editing. Session transcripts follow a resumable WebSocket stream, and mailbox messages queue behind current work. Ticket detail shows attempts, tool traces, usage and manual-review actions.
-
-All requests below use the caller's development identity; substitute the real edge authenticator when deployed.
+The console provides **Spaces**, **Workers**, **Tickets**, **Sessions**, **Schedules**, **Memory**, **Models**, and **Channels**. Examples below use the development header authenticator:
 
 ```bash
-curl -X POST localhost:8780/api/sessions \
+# Open a console/API main session
+curl -X POST http://127.0.0.1:8780/api/sessions \
   -H 'content-type: application/json' -H 'x-meepo-user-id: aaron' \
   -d '{"spaceId":"<space-id>"}'
 
-curl -X POST localhost:8780/api/sessions/<session-id>/turns \
+# Enqueue a session turn
+curl -X POST http://127.0.0.1:8780/api/sessions/<session-id>/turns \
   -H 'content-type: application/json' -H 'x-meepo-user-id: aaron' \
-  -d '{"prompt":"hello","delivery":"wait"}'
+  -d '{"prompt":"Summarize open work","delivery":"wait"}'
 
-curl -X POST localhost:8780/api/webhooks/<space-id>/tickets \
-  -H 'content-type: application/json' -H 'x-meepo-user-id: aaron' \
-  -d '{"title":"External event","objective":"Summarize this event","contextSummary":"...","idempotent":true}'
+# Trigger an asynchronous ticket via space webhook
+curl -X POST http://127.0.0.1:8780/api/webhooks/<space-id>/tickets \
+  -H 'content-type: application/json' \
+  -H 'authorization: Bearer <space-webhook-token>' \
+  -H 'idempotency-key: deploy-2026-11-12-01' \
+  -d '{"title":"Post-deploy check","objective":"Verify health metrics","idempotent":true}'
 ```
 
-Issue or rotate a space webhook token from its detail page (or `POST /api/spaces/:id/webhook-token`). External systems use `Authorization: Bearer <token>` at `POST /api/webhooks/:spaceId/tickets`; tokens are hashed and restricted to that space. `DELETE /api/spaces/:id/webhook-token` revokes access. Space members may also call the route with their authenticated identity. Webhook input creates a ticket; it cannot select another origin session or identity. Pending tickets dispatch automatically. For schedules use `POST /api/schedules` with `{spaceId,timing,action}`: `timing` is `{kind:"at",at:<epoch-ms>}` or `{kind:"cron",expression:"0 3 * * *",timezone:"Asia/Shanghai"}`; `action` is `create_ticket` with an objective or `resume_session` with a session ID and prompt.
+Webhook tokens are issued, rotated, or revoked per space (`POST` / `DELETE /api/spaces/:id/webhook-token`). Optional `Idempotency-Key` headers (`1–128` printable non-space ASCII characters) deduplicate identical payloads for 30 days and return `409` if reused with a different payload; webhook traffic is capped at `128 KiB` and `60` requests/minute/space. See [`specs/architecture/control-plane-api.md`](specs/architecture/control-plane-api.md) for the complete API contract.
 
-## Development and operation
+## Development and operations
 
 ```bash
 pnpm --filter meepo-server dev
@@ -123,18 +135,10 @@ pnpm check
 pnpm build
 ```
 
-Build shared packages before starting development processes. The console dev server proxies `/api` and `/ws`. Use a single server instance: SQLite and Feishu connection ownership currently assume one control plane. Back up SQLite using its backup API or stop the server before copying the database and WAL. Migrations run automatically on startup without clearing existing records. Enrollment tokens are hashed; channel/model secrets are encrypted; queued dispatches contain references rather than credentials. Use TLS for worker connections crossing trusted local boundaries.
+- **Single control-plane instance**: Embedded SQLite and per-channel Feishu WebSocket connections assume a single `meepo-server` process. Back up SQLite via the SQLite backup API or after stopping the server (copying WAL files safely).
+- **Upgrades**: SQLite schema migrations apply automatically on startup without wiping data; always back up the database before upgrading. Server and worker lockstep on wire protocol version **3** — rebuild and upgrade both together, as mismatched workers are rejected at registration.
+- **Security boundaries**: Channel secrets and tenant tokens never leave `meepo-server` (Feishu images are proxied via authorized `media.read` RPCs). Model API keys are encrypted at rest on the server and injected over the worker WebSocket per dispatch — use `wss://` (TLS) whenever workers connect across network boundaries, and enroll only workers whose host operators are trusted with the space's model credentials.
 
 ## License
 
 MIT
-
-Downloaded image originals are cached under `<sessionsDir>/.media` independently of the seven-day task-directory cleanup. Preserve that directory when retaining historical media on a worker.
-
-## Protocol upgrades and webhook retries
-
-Server and worker currently use protocol **3**; update and rebuild both together. Old worker versions are rejected at registration. SQLite migrations apply on startup (schema 18 adds indexes, webhook request deduplication and compaction caches); back up the database before upgrading.
-
-Webhook callers may supply `Idempotency-Key` (1–128 non-space printable ASCII characters) to `POST /api/webhooks/:spaceId/tickets`. Reusing a key with the same normalized payload returns the original ticket; a changed payload returns 409. Keys are scoped to the space and retained with server data. Without a key, each request creates a ticket. Limits: 128 KiB request body, 200-character title, 32,000-character objective/context summary, and 60 requests/minute/space (429 with `Retry-After`; the rate counter resets on server restart).
-
-Feishu image downloads are proxied through the server. Workers receive only authorized image bytes and metadata, never the channel app secret or tenant token. Workers still receive model API keys to make model requests, so enrolling a worker trusts its owner with those keys. Large tool results are retained locally under the task's `.tool-output/` directory with a bounded preview in the model context and server trace.

@@ -464,13 +464,13 @@ function composeSystemPromptContribution(space: Space): string {
 }
 
 function mergeQueued(queued: QueuedDispatch[]): Omit<TurnDispatchEnvelope, 'model'> {
-  const latest = queued[0].envelope;
-  if (queued.length === 1) return latest;
+  const first = queued[0].envelope;
+  if (queued.length === 1) return first;
   const mergedPrompt = queued
     .map((item, index) => `[queued message ${index + 1}]\n${item.envelope.prompt}`)
     .join('\n\n');
   return {
-    ...latest,
+    ...first,
     prompt: mergedPrompt,
     images: queued.flatMap((q) => q.envelope.images ?? []),
     delivery: 'wait',

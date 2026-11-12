@@ -1,64 +1,58 @@
 # Feature: Space and Chat Mapping
 
-## 1. Concept Definition
+> **Scope**: Defines the multi-tenant `Space → Channel → Window` hierarchy, inbound chat-to-space routing rules, authorization roles, worker enrollment and binding semantics, and space configuration defaults.
 
-- **Space**: A business space — the user-defined boundary for a piece of work or a team (a private assistant, a public group helper, or a whole team's domain). A Space owns:
-  - Its **memory** (an entry set with `path`/`description`/`keywords`/`content`/`revision`, indexed in the prompt and read on demand).
-  - Its **channels**: one or more bot apps from the ChannelRegistry (only Feishu is currently accepted; other channel types require an extension).
-  - Its **worker placement policy** (required tags, preferred machines).
-  - Its **model reference** (`modelId` from the model registry + optional thinking level).
-  - Its **bound windows**: the chat windows (groups, private chats) across its channels where the bot responds.
-- **Channel**: a single bot application (`{ type, appId, appSecret }`) registered in the ChannelRegistry, bound to **exactly one** space. A space may bind multiple channels (e.g. a Feishu bot now, a Telegram bot later). Channel ≠ chat window: one channel (bot) may join many windows.
-- **Window**: a chat window under a channel — a private chat, a group, or a thread. Windows on any of the space's channels share the space's context (memory, worker environment).
-- **Window routing**: a private chat resolves to the channel's space (a channel binds exactly one space; an optional `allowedOpenIds` whitelist restricts who may talk — empty means anyone). A group chat must be bound as a `{channelId, chatId}` pair; unbound chats stay silent.
+## 1. Hierarchy: Space, Channel, and Window
 
-## 2. Multi-Chat to Space Relationship
+Meepo separates **tenant domain boundaries** from **IM bot applications** and **conversation windows**:
 
-A Space supports a **1-to-N** relationship with chat windows across its bound channels:
-
-```
-[Space: payment-team]
-  ├── Channel: payment-bot (feishu app)
-  ├── Memory: payment gateway specs & idempotency rules (entry set)
-  ├── Bound Windows:
-  │     ├── [Dev Chat] payment-engineers (internal discussion, code reviews)
-  │     ├── [Support Chat] payment-ops (on-call alerts, merchant inquiries)
-  │     └── [PM Chat] payment-roadmap (feature specifications)
+```text
+[Space: payment-team]  (memory, model ref, prompt preset, boundWorkerId, requiredTags)
+  ├── Channel: payment-feishu-bot  (type='feishu', appId, appSecret, allowedOpenIds, boundChatIds)
+  │     ├── Window: p2p chat with Alice          ──► Main Session
+  │     ├── Window: group chat "payment-devs"    ──► Group Main Session + Thread Sessions
+  │     └── Window: group chat "payment-oncall"  ──► Group Main Session + Thread Sessions
+  └── Channel: (future Slack / Telegram bot)     ──► Windows sharing the same Space memory & workers
 ```
 
-### Behavioral Rules
+- **Space**: A user-defined business or personal boundary (a private assistant, a project team, or a support domain). Context, curated memory, transcripts, tickets, and schedules are strictly isolated per Space and never cross space boundaries. Meepo defines no separate "Assistant Persona" database entity — bot persona and domain conventions live in the Space's description, prompt preset, and curated Memory entries.
+- **Channel**: One IM bot application (`{ id, type, name, appId, appSecret, spaceId, allowedOpenIds, boundChatIds }`) registered in the global `ChannelRegistry` and assigned to **exactly one Space**. A Space may own multiple Channels (for example, multiple bots or future IM providers), each maintaining its own independent event connection and deduplication namespace (`channelId`).
+- **Window**: A conversation endpoint under a Channel (`windowId = {channelId}:{chatId}:{subId}`) — a private 1:1 chat, a group's main message stream, or a group thread. Every window routed through a Space's channels shares that Space's memory index, model selection, and enrolled worker pool, while receiving source-window metadata (`chatLabel`) so the agent can adapt tone and context appropriately.
 
-1. **Context Sharing**: When `@bot` is invoked in any bound chat, the assistant is primed with the shared Space system prompt and memory index.
-2. **Channel Awareness**: The assistant knows the source chat metadata (e.g., whether it is answering in the customer support group or dev group), adapting tone and technical depth accordingly.
-3. **Cross-Space Isolation**: Context, sessions, and memory never leak across different Spaces.
+_Rationale: Modeling `Channel` between `Space` and `Window` decouples bot credentials from group chats — two bots in the same IM group can belong to different Spaces and be gated independently via `(channelId, chatId)`, while private chats resolve deterministically through their receiving Channel's `spaceId` without requiring per-user pre-binding._
 
-## 3. Identity, Membership & Worker Placement
+## 2. Window Routing and Trusted Conversation Boundary
 
-- Identity comes from the Authenticator port. The current local adapter reads `x-meepo-user-id`; edge SSO/JWT verification is planned. MEEPO maintains no account system.
-- **Space membership** is the only authorization data MEEPO owns: a `(spaceId, userId) → role` table, unique per user per space. Roles are `owner` and `operator` — both may administer the space. A separate **admin** role exists only for global, non-space configuration and sees no private spaces.
-- Workers join a Space through enrollment tokens issued by a member — a worker cannot serve a Space without a token covering it. Tokens carry `{ id, spaceIds[], createdAt, expiresAt? (default none), revokedAt? }`: they may be revoked at any time (replacement enrollment = issue new + revoke old), are validated at registration and on every heartbeat (rejection carries a clear reason), and are managed from the console's space page.
-- **Worker–Space relationship**: a worker primarily _belongs to_ the space that enrolled it (one worker per space, container-friendly); when environments are compatible, a worker may enroll into multiple spaces.
-- Each Space has a worker binding (`boundWorkerId`, configured in the console): it defaults to the first enrolled worker that registers for the space, and determines where the space's main sessions run. Changing the binding is a deliberate user action — main sessions follow the binding, while existing thread sessions stay pinned to their original worker.
-- Within the enrolled set, the Space's `requiredTags` further filter which workers may pick up its work (e.g. `[macos, private]`).
-- **Trusted conversation boundary**: group conversation is open to anyone admitted by the bound `{channelId, chatId}` pair; private chats use the channel space and optional `allowedOpenIds` instead. Console membership is not required to converse. Server API isolation does not sandbox a shared worker’s filesystem, tools or credentials. Configuration and direct console memory edits require space membership; agent memory writes belong to the trusted conversation boundary.
+1. **Private chats (`p2p`)**: Route automatically to the receiving Channel's `spaceId`. If `channel.allowedOpenIds` is non-empty, only listed user `open_id`s are answered; an empty allowlist (`[]`) admits any user permitted by the IM platform to message the bot.
+2. **Group chats (`group`)**: Route to `channel.spaceId` **only** when `chat_id` appears in `channel.boundChatIds` (managed by space members via `PUT /api/spaces/:id/channels/:channelId/chats`). Messages in unbound groups are ignored silently. `ChannelRegistry` is the sole routing authority; `space.boundChatIds` is a read-only display union across the space's channels.
+3. **Conversation vs. administration boundary**: Anyone admitted to a bound window may converse with the bot, trigger sessions, and exercise the agent's full tool set (including agent-driven `MemoryWrite`, `CronCreate`, and `TicketCreate`) without holding Console membership. Conversely, configuring a Space, editing Memory directly in the Console, managing bindings/tokens, or cancelling tickets requires explicit Space membership.
 
-Group binding mutations use `PUT /api/spaces/:spaceId/channels/:channelId/chats` with `{chatIds}`. ChannelRegistry is the routing authority; space-level `boundChatIds` returned for display is a projection. There is no channel-less group binding API.
+## 3. Roles, Worker Enrollment, and Space Binding
 
-An enrollment token binds to one worker ID on first use; another token cannot claim that same ID. Replacing the token does not currently support retaining the old worker identity. A new enrollment/identity requires explicit rebind for main sessions; existing thread affinity is not migrated automatically.
+### Authorization Roles
 
-## 4. Configuration semantics
+Meepo maintains no user account table; authorization maps authenticated `userId`s directly to roles:
 
-The TypeScript entities remain the field-level schema; these are the configuration rules that affect routing and execution:
+- **Space `owner`**: Full control over the space, plus exclusive authority to delete the space, remove members, and transfer ownership.
+- **Space `operator`**: Full operational administration of the space (settings, model selection, group chat bindings, memory CRUD, enrollment/webhook token lifecycle, worker rebinding, session/ticket/schedule controls).
+- **Global `admin`** (bootstrapped via `MEEPO_ADMIN_USER_IDS`): Manages only the global `Models` and `Channels` registries. Global admin status grants **no** access to private spaces unless the admin is also a member of that space.
 
-| Configuration                           | Meaning / default                                                                                                                                     |
-| --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Space `timezone`                        | Schedule default; new spaces default to `UTC`.                                                                                                        |
-| Space `promptPreset`                    | `general` by default; `coding` adds optional worktree guidance. Frozen in an existing session's identity.                                             |
-| Space `model.modelId` / `thinkingLevel` | Registry reference plus optional `low/high/max`; absent selection uses the server model default. Effort resolution is specified in worker data plane. |
-| Space `boundWorkerId` / `requiredTags`  | Main-session affinity and eligible-worker filter; no implicit offline migration.                                                                      |
-| Channel `spaceId` / `appId`             | One application assigned to exactly one space; global admin manages the registry.                                                                     |
-| Channel `allowedOpenIds`                | Private-chat allowlist; empty admits any user able to message the bot.                                                                                |
-| Channel `boundChatIds`                  | Allowed group chats; space members manage bindings on channels belonging to their space.                                                              |
-| Space `boundChatIds`                    | Compatibility/display projection; ChannelRegistry owns routing.                                                                                       |
+### Worker Enrollment and Placement
 
-Console automation coverage currently consists of server API regressions and recorded browser acceptance; there is no Console component/browser test suite in CI yet.
+- **Token-scoped enrollment**: Any space member may issue a `WorkerEnrollmentToken` covering one or more spaces they belong to. A worker can serve only spaces listed on its active, unrevoked, unexpired enrollment token (verified at registration and on every heartbeat).
+- **1:1 token-to-worker binding**: An enrollment token binds permanently to the first `workerId` that registers with it. Rotating a compromised token requires issuing a new token and revoking the old one (establishing a new worker identity if re-enrolled).
+- **Dedicated vs. shared workers**: The primary deployment pattern is one dedicated worker (or container) per space; enrolling a single worker across multiple spaces is supported when environments are compatible, with the explicit understanding that shared workers share local filesystems, environment credentials, and MCP servers across those spaces.
+- **Default binding and explicit rebind**: Each Space holds `boundWorkerId`, automatically initialized when the first enrolled worker registers for an unbound space. Main sessions (`private` and `group-main`) always run on `boundWorkerId`; switching `boundWorkerId` is an explicit member action (`POST /api/spaces/:id/binding`) that migrates main sessions while leaving existing `thread` sessions pinned to their original worker. Within the space's enrolled workers, `space.requiredTags` filters eligible workers for thread placement and ticket dispatch.
+
+## 4. Configuration Reference
+
+| Setting                                    | Default / Scope  | Behavioral Effect                                                                                                       |
+| ------------------------------------------ | ---------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `Space.timezone`                           | `'UTC'`          | Default IANA timezone for `cron` schedules created in this space.                                                       |
+| `Space.promptPreset`                       | `'general'`      | `'coding'` appends isolated `git worktree` rules to new sessions/tickets; frozen once a session's identity is recorded. |
+| `Space.model` (`modelId`, `thinkingLevel`) | Server default   | Selects `ModelRegistry` entry and optional `'low' \| 'high' \| 'max'` effort override.                                  |
+| `Space.repoUrl` / `defaultBranch`          | `''` / `'main'`  | Optional repository hint included in prompt identity; never triggers automatic cloning.                                 |
+| `Space.boundWorkerId`                      | First registered | Hosts all `main` sessions of the space; never changes implicitly when offline.                                          |
+| `Space.requiredTags`                       | `[]`             | Tag filter required on workers for thread placement and ticket dispatch (combined with `ticket.requiredTags`).          |
+| `Channel.allowedOpenIds`                   | `[]` (open)      | Restricts `p2p` private-chat access to listed `open_id`s when non-empty.                                                |
+| `Channel.boundChatIds`                     | `[]` (none)      | Authoritative allowlist of group `chat_id`s routed through this channel.                                                |

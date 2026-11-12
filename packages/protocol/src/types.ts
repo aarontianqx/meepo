@@ -29,9 +29,9 @@ export interface WorkerRegisterPayload {
   /** Stable worker identifier, generated and persisted by the worker itself */
   workerId: string;
   /**
-   * Enrollment token issued by a space owner via the console / server API.
-   * The server resolves it to the account and the set of spaces this worker
-   * is allowed to serve — workers never enumerate space IDs themselves.
+   * Enrollment token issued by a space member via the console / server API.
+   * The server resolves it to the set of spaces this worker is authorized to
+   * serve and binds it to `workerId` on first registration.
    */
   enrollmentToken: string;
   hostname: string;

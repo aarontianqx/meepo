@@ -129,7 +129,7 @@ export class FeishuGateway {
     this.dedup.add(msg.messageId);
   }
 
-  /** Handles `card.action.trigger`: only the session's origin user may abort its run. */
+  /** Handles `card.action.trigger`: only the run's initiating users may abort it. */
   async handleCardAction(event: FeishuCardActionEvent): Promise<void> {
     try {
       const value = event.action?.value;

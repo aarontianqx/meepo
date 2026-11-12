@@ -1,119 +1,72 @@
-# Feature: Triggers & Scheduling
+# Feature: Triggers and Scheduling
 
-## 1. The Unified Model
+> **Scope**: Defines Meepo's unified execution domain (`Schedule → Ticket | Turn → Run`), `at` and `cron` timing rules, jitter/coalescing/staleness bounds, atomic fire commitment, `Run` state transitions, and the context-continuity boundary governing agent scheduling tools.
 
-MEEPO's execution domain answers exactly three questions:
+## 1. The Unified Execution Model
 
-```
-Schedule ──fires──▶ Ticket | Turn ──executed as──▶ Run
-```
+Meepo models all deferred, recurring, interactive, and asynchronous work with five orthogonal nouns:
 
-| Noun         | Question                     | Definition                                                                                               |
-| ------------ | ---------------------------- | -------------------------------------------------------------------------------------------------------- |
-| **Schedule** | When does work get produced? | The single scheduling entity: `timing` (`at` or `cron`) + `action` (`create_ticket` or `resume_session`) |
-| **Ticket**   | What work? (independent)     | A self-contained objective bundle, executed in a fresh context; queueable, re-assignable, retryable      |
-| **Turn**     | What work? (in-session)      | One continuation of an existing session, inheriting its context, pinned to its bound worker              |
-| **Run**      | Who ran it, to what state?   | One execution attempt of a Ticket or a Turn                                                              |
-| **Session**  | In which context?            | The window-bound conversation container (`main` / `thread`)                                              |
-
-## 2. Schedule
-
-```typescript
-interface Schedule {
-  id: string;
-  spaceId: string;
-  timing: { kind: 'at'; at: number } | { kind: 'cron'; expression: string; timezone?: string };
-  action:
-    | {
-        kind: 'create_ticket';
-        objective: string;
-        contextSummary?: string;
-        requiredTags?: string[];
-        originSessionId?: string;
-      }
-    | { kind: 'resume_session'; sessionId: string; prompt: string };
-  status: 'active' | 'done' | 'deleted';
-  createdByUserId: string;
-  createdAt: number;
-  lastFiredAt?: number;
-}
+```text
+Schedule (when) ──fires──► Ticket (independent work) | Turn (in-session work) ──executed as──► Run (attempt)
 ```
 
-- **`create_ticket`**: at fire time a new Ticket is materialized and dispatched. No staleness constraint.
-- **`resume_session`**: at fire time a Turn is dispatched into the bound session, in the existing context. A recurring resume schedule older than 7 days fires one final time marked `stale`, then becomes `done` — forgotten automation must never run forever.
+| Entity       | Question Answered              | Responsibility                                                                                              |
+| ------------ | ------------------------------ | ----------------------------------------------------------------------------------------------------------- |
+| **Schedule** | _When_ is work produced?       | Durable server timer pairing `timing` (`at` or `cron`) with `action` (`create_ticket` or `resume_session`). |
+| **Ticket**   | _What_ independent work?       | Self-contained objective executed in a fresh workspace on any eligible worker; retryable up to 3 attempts.  |
+| **Turn**     | _What_ in-session work?        | One continuation (`turnRef = {sessionId, sourceId}`) of an existing Session on its pinned worker.           |
+| **Session**  | _In which_ persistent context? | Window-bound conversation container (`main` or `thread`) owning the canonical event transcript.             |
+| **Run**      | _Who_ ran it, to _what_ end?   | Single execution attempt of a Ticket or Turn, owning lease, sequenced events, usage, and settlement.        |
 
-### Boundary Rules
+_Rationale: Unifying reminders, cron wakeups, interactive chat turns, and async tickets under `Schedule → Ticket | Turn → Run` eliminates parallel job schedulers and ensures lease fencing, usage accounting, and event deduplication work identically across every trigger._
 
-- `at` is an epoch-millisecond instant; `cron` uses a strictly five-field expression and `timing.timezone`, with DST handled by Croner. Stored timestamps are UTC.
-- An `at` schedule fires once and becomes `done`; if the server was down at the fire time, it catches up exactly once at the next tick. Coalescing does not apply to `at`.
-- Jitter is a deterministic per-schedule offset, at most 10% of the period and at most 15 minutes.
-- `/new` cascade-deletes the session's `resume_session` schedules; `create_ticket` schedules are unaffected.
-- The default timezone is the space's configured timezone, or UTC when unset.
-- Agent-created schedules derive `createdByUserId` from the first persisted run initiator; machine turns use `agent`. Console-created schedules use authenticated request identity.
-- Intended prompt policy: interactive ambiguity should be clarified with the user; unattended ambiguity should default to a self-contained ticket with stated assumptions. Current tool descriptions explain context continuity, but do not yet explicitly encode the unattended fallback; this remains a prompt-policy gap, not a server-enforced rule.
-- Machine turns (schedule fires, ticket receipts) may also call `CronCreate` — recursion is allowed but bounded: at most 50 active resume schedules per session, and the 7-day stale rule above still applies. Renewal is explicit creation of a new schedule after the final stale fire; there is no implicit TTL extension.
+## 2. Schedule Semantics and Timing Rules
 
-### Reliability Semantics
+### Timing Variants
 
-- **Atomic creation**: a schedule fire and the creation of its work item commit in one transaction — a crash can neither lose the fire nor leave an unidentifiable duplicate. External side effects are never exactly-once by construction.
-- **Busy sessions**: a fire due during an active turn is held and delivered at the next idle moment — never injected mid-turn.
-- **Coalescing**: multiple missed fires collapse into one, annotated with a `coalescedCount`.
-- **Jitter**: deterministic per-schedule offset spreads recurring fires.
-- **At-least-once**: when no worker is available, the fire queues server-side (coalescing) rather than dropping.
+- **One-shot (`{ kind: 'at', at: <epoch-ms> }`)**: Fires once as soon as `now >= at`, transitions `status` from `'active'` to `'done'`, and sets `lastFiredAt = now`. If the server was offline at `at`, it catches up **once** on the next scheduler tick (`coalescedCount = 1`). Jitter does not apply to `at`.
+- **Recurring (`{ kind: 'cron', expression: '<5-field>', timezone?: '<IANA>' }`)**: Strictly 5-field cron expression (`minute hour day-of-month month day-of-week`) evaluated in `timing.timezone` (defaulting to `space.timezone`, then `'UTC'`), with daylight-saving transitions handled according to IANA rules. Stored timestamps remain UTC.
 
-## 3. Ticket
+### Action Variants and Staleness Cutoff
 
-A Ticket is a self-contained objective, dispatched to any enrolled, tag-matched worker with capacity. Each execution attempt has its own run and directory. Model-call retry, tool outcomes and ticket-attempt retry are separate layers: the harness does not blindly retry failed tools; ticket retry follows persisted evidence and explicit idempotency.
+- **`create_ticket`**: Materializes a fresh `pending` `Ticket` (`title` derived from the first 80 chars of `objective`, inheriting `requiredTags ?? space.requiredTags` and optional `originSessionId`). Runs indefinitely until cancelled (`deleted`).
+- **`resume_session`**: Enqueues a `wait` `Turn` (`<schedule-fire ...>`) into `sessionId`.
+  - **7-day staleness guard**: When a recurring `resume_session` schedule fires more than **7 days** after `createdAt` (`now - createdAt > 7 × 86,400,000`), that delivery fires one final time with `stale="true"` and atomically transitions the schedule to `'done'`. If continued automation is still desired, the woken agent must explicitly call `CronCreate` to register a new 7-day schedule.
+  - **Session lifecycle coupling**: Closing a session or running `/new` cascade-deletes (`status = 'deleted'`) all `resume_session` schedules targeting that session (and any fire encountering an already-closed session deletes the schedule without dispatching). `create_ticket` schedules are unaffected by `/new`, even when carrying `originSessionId`.
+  - **Per-session cap**: At most **50** active `resume_session` schedules may exist per session, bounding recursive `CronCreate` calls from machine turns.
 
-The complete [ticket state machine](ticket-pipeline.md) owns cancellation, manual_review resolution, the three-attempt limit, `pendingSince` timeout and origin receipts. Lease renewal and event rejection are defined in the [worker protocol](../architecture/worker-protocol.md).
+### Jitter, Coalescing, and Atomic Fires
 
-## 4. Turn
+- **Deterministic jitter**: Every `cron` schedule adds a deterministic offset derived from `hash(scheduleId) % floor(min(0.1 × periodMs, 15 minutes))` to its ideal fire instants, spreading synchronized schedules (such as `0 9 * * *`) across workers without losing predictability.
+- **Missed-fire coalescing**: All jittered fire instants falling in `(lastFiredAt ?? createdAt, now]` collapse into a **single** fire carrying `coalescedCount` (bounded at `10,000` iterations).
+- **Atomic commitment (`TxFire`)**: Advancing `Schedule.lastFiredAt`/`status`, recording `ScheduleFire`, and inserting the resulting `Ticket` or queued `Turn` commit in one database transaction. When the target session is busy or its bound worker is offline, the `Turn` queues durably (`wait`) rather than dropping or interrupting mid-turn.
+- **Attribution**: Schedules created via Console HTTP record the caller's `userId` as `createdByUserId`; schedules created by agent tools record `Run.initiatorIds[0]` (or `'agent'` when created during a machine turn).
 
-A Turn is one continuation of a session. User messages, console injections, ticket receipts and schedule fires (`resume_session`) materialize as Turns. These producers all use `wait`; `urgent` and `if_idle` are reserved protocol modes. The current webhook endpoint creates tickets, not session turns. A Turn always routes to the session's bound worker and runs in the session's context.
+## 3. Run State Machine
 
-## 5. Run
+Every dispatch of a Turn or Ticket creates a `Run`:
 
-Every dispatch of a Ticket or a Turn to a worker creates a **Run**:
+| From                                | Event / Transition                                       | To           | `terminalReason` & Notes                                                                        |
+| ----------------------------------- | -------------------------------------------------------- | ------------ | ----------------------------------------------------------------------------------------------- |
+| `queued`                            | Sent to online worker (`turn.dispatch` / `TxMergeQueue`) | `dispatched` | `leaseExpiresAt` armed (`now + 45s`)                                                            |
+| `queued`                            | Absorbed into earlier queued turn before/during flush    | `merged`     | `mergedIntoRunId` points to surviving `Run`                                                     |
+| `queued`                            | `if_idle` turn arrives while session is busy             | `dropped`    | Reserved delivery mode                                                                          |
+| `dispatched`                        | Worker emits `run_started` (`TxAppend`)                  | `running`    | `startedAt` set                                                                                 |
+| `dispatched`                        | Lease expires or reconcile misses turn before start      | `failed`     | `worker_lost` (tickets may spawn a new `Run` on next attempt)                                   |
+| `running`                           | Worker emits `run_completed`                             | `completed`  | `usage` and `resultSummary` persisted                                                           |
+| `running`                           | Worker emits `run_failed` (model/tool error, timeout)    | `failed`     | `error`, `timeout`, `aborted`, or `interrupted`                                                 |
+| `running`                           | Heartbeat lease expires (`TxExpire`)                     | `failed`     | `lease_lost`                                                                                    |
+| `queued` / `dispatched` / `running` | Session Stop, `/new`, session close, or `main` rebind    | `failed`     | `interrupted` (`TxRebind` migrates never-started queued/dispatched `main` inputs to new worker) |
+| `queued` / `dispatched` / `running` | Ticket cancelled (`POST /api/tickets/:id/cancel`)        | `failed`     | `cancelled`                                                                                     |
 
-```typescript
-interface Run {
-  id: string;
-  work:
-    | { kind: 'ticket'; ticketId: string }
-    | { kind: 'turn'; turnRef: { sessionId: string; sourceId: string } };
-  attempt: number;
-  workerId?: string;
-  leaseExpiresAt?: number;
-  status: 'queued' | 'dispatched' | 'running' | 'completed' | 'failed' | 'merged' | 'dropped';
-  terminalReason?: string;
-  usage?: { inputTokens: number; outputTokens: number; costUsd?: number };
-  createdAt: number;
-  startedAt?: number;
-  completedAt?: number;
-}
-```
+`completed`, `failed`, `merged`, and `dropped` are terminal; late events on terminal runs are rejected.
 
-Stream events, heartbeat `activeRunIds`, and execution state all hang off the Run. Every run ends with exactly one terminal state: turn-level `done` maps to `completed`; `interrupted` / `cancelled` / `error` map to `failed(reason)`. Runs pre-created for messages that are later merged close as `merged`; an `if_idle` delivery dropped on a busy session leaves a `dropped` record.
+## 4. Agent Orchestration Tools and Selection Criterion
 
-### Run State Transitions
+Interactive sessions expose four server-backed orchestration tools (withheld from tickets):
 
-| From                                | Event                                              | To                                                                                              |
-| ----------------------------------- | -------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| `queued`                            | dispatched to a worker                             | `dispatched`                                                                                    |
-| `queued`                            | merged before dispatch                             | `merged` (`mergedIntoRunId` set)                                                                |
-| `queued`                            | `if_idle` drop on a busy session                   | `dropped`                                                                                       |
-| `dispatched`                        | `run_started`                                      | `running`                                                                                       |
-| `dispatched`                        | lease lost before start                            | `failed(worker_lost)`; ticket retry may create a new run within its attempt limit               |
-| `running`                           | turn completes                                     | `completed`                                                                                     |
-| `running`                           | interrupted / cancelled / error                    | `failed(reason)`                                                                                |
-| `queued` / `dispatched` / `running` | applicable interrupt (Stop, close, rebind, `/new`) | `failed(interrupted)`; rebind migrates queued/dispatched main inputs instead of cancelling them |
-| `queued` / `dispatched` / `running` | eligible ticket cancellation                       | `failed(cancelled)`; ticket becomes cancelled                                                   |
+- **`CronCreate` / `CronList` / `CronDelete`**: Manage `resume_session` schedules for the **current session** ("wake _this_ conversation later with full transcript and local session directory intact").
+- **`TicketCreate`**: Creates an independent `Ticket` immediately (when `timing` is omitted) or registers a `create_ticket` `Schedule` (when `timing` is provided), linking `originSessionId` back to the calling session for completion receipts.
 
-## 6. Agent-Facing Tools
-
-The agent's scheduling tools map to the two action kinds, plus management of the session's own schedules:
-
-- **`CronCreate` / `CronList` / `CronDelete`** — schedule, inspect, and cancel wakeups for the **current session** (`resume_session`): "continue this conversation later, with full context."
-- **`TicketCreate`** — creates an **independent** task (`create_ticket`), immediately or on a timing rule: "runs in a fresh context with no access to this conversation."
-
-The boundary is context continuity, never timing. Session and ticket tool sets are identical except for orchestration tools: sessions get `CronCreate` / `CronList` / `CronDelete` and `TicketCreate`; tickets get none — a ticket has no session to resume and cannot spawn further work.
+**Decision boundary — Context Continuity, Not Timing**:
+Whether work runs now or on a schedule does _not_ choose the tool; **context dependency** does. If an agent that has never seen the current conversation can execute the task from a self-contained `objective` + `contextSummary` (such as daily health checks, standalone PR tasks, or batch audits), `TicketCreate` is appropriate. If the followup relies on ongoing dialogue history, conversational pronouns, or uncommitted files inside `<sessionsDir>/<sessionId>`, `CronCreate` (`resume_session`) is required.

@@ -83,7 +83,7 @@ export class SpaceService {
     return spaces.filter((space): space is Space => space !== undefined);
   }
 
-  /** Sets (or clears) the space's server-held model credentials. */
+  /** Sets (or clears) the space's model registry reference and effort override. */
   async updateModel(spaceId: string, model: Space['model'], userId: string): Promise<Space> {
     await this.memberships.requireOperator(spaceId, userId);
     const space = await this.getSpace(spaceId);

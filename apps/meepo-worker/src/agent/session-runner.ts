@@ -202,21 +202,21 @@ export interface QueuedTurn {
 /**
  * Merge queued `wait` turns into a single turn: several chat messages that
  * arrived while the agent was busy are answered together. Each prompt keeps
- * its `[author]` prefix (if any) and is annotated with its position; the
- * merged turn takes the last runId, which identifies all stream events.
+ * its speaker metadata and is annotated with its position; the merged turn
+ * takes the first runId, which identifies all stream events.
  */
 export function mergeQueuedTurns(turns: QueuedTurn[]): QueuedTurn | undefined {
   if (turns.length === 0) return undefined;
   if (turns.length === 1) return turns[0];
-  const last = turns[0];
+  const first = turns[0];
   const prompt = turns
     .map((turn, index) => `[${index + 1}/${turns.length}] ${turn.prompt}`)
     .join('\n\n');
   return {
-    runId: last.runId,
+    runId: first.runId,
     prompt,
     images: turns.flatMap((t) => t.images ?? []),
-    timeoutSeconds: last.timeoutSeconds,
+    timeoutSeconds: first.timeoutSeconds,
   };
 }
 
