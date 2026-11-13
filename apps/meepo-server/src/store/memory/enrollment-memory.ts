@@ -29,4 +29,9 @@ export class MemoryEnrollmentTokenRepository
     const all = await this.list();
     return all.filter((row) => row.spaceIds.includes(spaceId));
   }
+
+  async listByIssuer(userId: string): Promise<WorkerEnrollmentToken[]> {
+    const all = await this.list();
+    return all.filter((row) => row.issuedByUserId === userId);
+  }
 }

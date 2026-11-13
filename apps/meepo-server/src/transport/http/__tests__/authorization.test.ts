@@ -1,3 +1,4 @@
+import { CURRENT_PROTOCOL_VERSION } from '@meepo/protocol';
 import { WorkerConnectionHub } from '../../ws/worker-connection-hub.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { bootstrap, type ServerRuntime } from '../../../bootstrap.js';
@@ -255,6 +256,109 @@ describe('HTTP v2 ownership boundaries', () => {
         (await runtime.app.inject({ method, url, payload, headers: headers(user) })).statusCode
       ).toBe(400);
     }
+  });
+
+  it('lets only the token issuer extend a running worker to another space they operate', async () => {
+    const post = (url: string, user: string, payload?: object) =>
+      runtime.app.inject({ method: 'POST', url, headers: headers(user), payload });
+    const created = async (user: string, name: string) =>
+      (await post('/api/spaces', user, { name })).json<{ id: string }>().id;
+    const second = await created('owner', 'Second');
+    const foreign = await created('outsider', 'Foreign');
+    await runtime.services.membershipService.addMember(spaceId, 'peer', 'owner');
+    const issued = (await post('/api/enrollments', 'owner', { spaceIds: [spaceId] })).json<{
+      id: string;
+      token: string;
+    }>();
+    await runtime.services.workerService.register({
+      protocolVersion: CURRENT_PROTOCOL_VERSION,
+      workerId: 'w1',
+      enrollmentToken: issued.token,
+      hostname: 'host',
+      os: 'linux',
+      arch: 'x64',
+      tags: [],
+      capacity: { maxSlots: 1 },
+      version: 'test',
+    });
+    const url = `/api/enrollments/${issued.id}/spaces`;
+
+    // A peer operating the worker's current space cannot lend the owner's machine out.
+    expect((await post(url, 'peer', { spaceId: second })).statusCode).toBe(401);
+    // The issuer cannot add a space they do not operate.
+    expect((await post(url, 'owner', { spaceId: foreign })).statusCode).toBe(401);
+    expect((await post(url, 'owner', {})).statusCode).toBe(400);
+
+    const granted = await post(url, 'owner', { spaceId: second });
+    expect(granted.statusCode).toBe(200);
+    expect(granted.json()).toMatchObject({ id: issued.id, spaceIds: [spaceId, second] });
+    expect(granted.json()).not.toHaveProperty('token');
+    expect((await runtime.services.workerService.getWorker('w1')).spaceIds).toEqual([
+      spaceId,
+      second,
+    ]);
+    expect((await runtime.services.spaceService.getSpace(second)).boundWorkerId).toBe('w1');
+    // Granting twice changes nothing.
+    expect((await post(url, 'owner', { spaceId: second })).json().spaceIds).toEqual([
+      spaceId,
+      second,
+    ]);
+
+    const mine = await runtime.app.inject({ url: '/api/enrollments', headers: headers('owner') });
+    expect(mine.json<Array<{ id: string }>>().map((t) => t.id)).toEqual([issued.id]);
+    const peers = await runtime.app.inject({ url: '/api/enrollments', headers: headers('peer') });
+    expect(peers.json()).toEqual([]);
+  });
+
+  it('stops extending a worker once its issuer left a space it serves or the token expired', async () => {
+    const post = (url: string, user: string, payload?: object) =>
+      runtime.app.inject({ method: 'POST', url, headers: headers(user), payload });
+    const register = async (workerId: string, token: string) =>
+      runtime.services.workerService.register({
+        protocolVersion: CURRENT_PROTOCOL_VERSION,
+        workerId,
+        enrollmentToken: token,
+        hostname: 'host',
+        os: 'linux',
+        arch: 'x64',
+        tags: [],
+        capacity: { maxSlots: 1 },
+        version: 'test',
+      });
+    await runtime.services.membershipService.addMember(spaceId, 'peer', 'owner');
+    const own = (await post('/api/spaces', 'peer', { name: 'Peer own' })).json<{ id: string }>().id;
+    const issued = (await post('/api/enrollments', 'peer', { spaceIds: [spaceId] })).json<{
+      id: string;
+      token: string;
+    }>();
+    await register('w-left', issued.token);
+    await runtime.services.membershipService.removeMember(spaceId, 'peer', 'owner');
+
+    // The issuer no longer operates the space the worker serves: no control, and no listing.
+    expect(
+      (await post(`/api/enrollments/${issued.id}/spaces`, 'peer', { spaceId: own })).statusCode
+    ).toBe(401);
+    const listed = await runtime.app.inject({
+      url: '/api/enrollments',
+      headers: headers('peer'),
+    });
+    expect(listed.json()).toEqual([]);
+    expect((await runtime.services.workerService.getWorker('w-left')).spaceIds).toEqual([spaceId]);
+
+    const brief = (
+      await post('/api/enrollments', 'owner', {
+        spaceIds: [spaceId],
+        expiresAt: Date.now() + 60_000,
+      })
+    ).json<{ id: string; token: string }>();
+    await register('w-expiring', brief.token);
+    const second = (await post('/api/spaces', 'owner', { name: 'Second' })).json<{ id: string }>()
+      .id;
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 120_000);
+    expect(
+      (await post(`/api/enrollments/${brief.id}/spaces`, 'owner', { spaceId: second })).statusCode
+    ).toBe(400);
+    expect((await runtime.services.spaceService.getSpace(second)).boundWorkerId).toBeUndefined();
   });
 
   it('webhook ignores forged ownership fields and requires membership', async () => {

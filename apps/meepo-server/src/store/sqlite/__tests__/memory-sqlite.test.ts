@@ -38,6 +38,14 @@ describe('space memory contracts', () => {
     );
     expect(() => memory.delete('a', value.path, 1)).toThrow('revision changed');
   });
+  it('reports revision 0 for a deleted entry so editors can offer to recreate it', () => {
+    memory.write('a', value, actor);
+    memory.delete('a', value.path, 1);
+    expect(() => memory.write('a', { ...value, expected_revision: 1 }, actor)).toThrow(
+      expect.objectContaining({ currentRevision: 0 })
+    );
+    expect(memory.write('a', value, actor).revision).toBe(3);
+  });
   it('validates paths and windows, preserves keywords and keeps UTF-8 whole', () => {
     memory.write('a', value, actor);
     memory.write('a', { ...value, keywords: undefined, expected_revision: 1 }, actor);

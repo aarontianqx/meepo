@@ -18,8 +18,16 @@ export function registerMembershipRoutes(app: FastifyInstance, services: Service
     return services.membershipService.addMember(req.params.id, body.userId, identityOf(req).userId);
   });
 
-  app.get<{ Querystring: { spaceId: string } }>('/api/enrollments', async (req) =>
-    services.enrollmentService.list(req.query.spaceId, identityOf(req).userId)
+  // With `spaceId`: tokens covering that space. Without: every token the caller issued.
+  app.get<{ Querystring: { spaceId?: string } }>('/api/enrollments', async (req) =>
+    req.query.spaceId
+      ? services.enrollmentService.list(req.query.spaceId, identityOf(req).userId)
+      : services.enrollmentService.listIssuedBy(identityOf(req).userId)
+  );
+  app.post<{ Params: { id: string }; Body: { spaceId: string } }>(
+    '/api/enrollments/:id/spaces',
+    async (req) =>
+      services.workerService.addSpace(req.params.id, req.body.spaceId, identityOf(req).userId)
   );
   app.post<{ Params: { id: string } }>('/api/enrollments/:id/revoke', async (req) => {
     await services.enrollmentService.revoke(req.params.id, identityOf(req).userId);

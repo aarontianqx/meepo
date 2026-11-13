@@ -40,7 +40,7 @@ Store `MEEPO_SECRET_KEY` securely alongside SQLite backups — rotating or losin
 
 The server listens on `127.0.0.1:8780` by default, stores state at `~/.meepo/server/meepo.db`, and serves the built console SPA when present. Override defaults with `MEEPO_HOST`, `MEEPO_PORT`, `MEEPO_DB_PATH`, `MEEPO_CONSOLE_DIST`, `MEEPO_HEARTBEAT_INTERVAL_SECONDS` (default `15`), and `MEEPO_WORKER_OFFLINE_AFTER_MS` (default `45000`). Set `MEEPO_HOST` explicitly only behind a trusted network or authenticated reverse proxy.
 
-For local development, the header authenticator reads `x-meepo-user-id` and `x-meepo-user-name` (defaulting to `dev-user`). In the console top bar, set **User** to `aaron` to match `MEEPO_ADMIN_USER_IDS`. Production mode refuses startup with header authentication unless `MEEPO_ALLOW_INSECURE_HEADER_AUTH=1` explicitly opts in for an isolated environment; replace this adapter with verified edge SSO before exposing the server to untrusted networks. Global admin status grants access to the **Models** and **Channels** registries only — never to private spaces.
+For local development, the header authenticator reads `x-meepo-user-id` and `x-meepo-user-name` (defaulting to `dev-user`). In the console user menu (bottom of the sidebar), set **User** to `aaron` to match `MEEPO_ADMIN_USER_IDS`. Production mode refuses startup with header authentication unless `MEEPO_ALLOW_INSECURE_HEADER_AUTH=1` explicitly opts in for an isolated environment; replace this adapter with verified edge SSO before exposing the server to untrusted networks. Global admin status grants access to the **Models** and **Channels** registries only — never to private spaces.
 
 ### 2. Create a space and enroll a worker
 
@@ -102,7 +102,7 @@ Environment overrides take precedence: `MEEPO_SERVER_URL`, `MEEPO_ENROLLMENT_TOK
 
 ## Console and HTTP APIs
 
-The console provides **Spaces**, **Workers**, **Tickets**, **Sessions**, **Schedules**, **Memory**, **Models**, and **Channels**. Examples below use the development header authenticator:
+The console is organised around the current space: **Overview**, **Conversations**, **Tickets**, **Schedules**, **Memory**, **Workers**, and **Settings**, plus platform-level **All spaces** and **All workers**, and **Models** and **Channels** for global admins. A first-run checklist on Overview walks through connecting a worker and a chat. See [`specs/features/console.md`](specs/features/console.md). Examples below use the development header authenticator:
 
 ```bash
 # Open a console/API main session

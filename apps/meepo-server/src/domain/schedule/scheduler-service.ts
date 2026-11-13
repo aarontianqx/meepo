@@ -126,6 +126,11 @@ export class SchedulerService {
     return fires;
   }
 
+  /** Next time an active schedule will fire (jitter included); null once done or deleted. */
+  nextFireAt(schedule: Schedule): number | null {
+    return schedule.status === 'active' ? nextFireOf(schedule) : null;
+  }
+
   toView(schedule: Schedule): ScheduleView {
     return {
       id: schedule.id,
@@ -133,7 +138,7 @@ export class SchedulerService {
       timing: schedule.timing,
       prompt: schedule.action.kind === 'resume_session' ? schedule.action.prompt : undefined,
       objective: schedule.action.kind === 'create_ticket' ? schedule.action.objective : undefined,
-      nextFireAt: schedule.status === 'active' ? nextFireOf(schedule) : null,
+      nextFireAt: this.nextFireAt(schedule),
       createdAt: schedule.createdAt,
       lastFiredAt: schedule.lastFiredAt,
     };

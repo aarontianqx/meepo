@@ -1,0 +1,25 @@
+/** Query-cache keys; shared so the sidebar and pages hit the same entries. */
+
+export const keys = {
+  me: 'me',
+  health: 'health',
+  spaces: 'spaces',
+  tickets: (spaceId: string) => `tickets:${spaceId}`,
+  ticket: (id: string) => `ticket:${id}`,
+  ticketRuns: (id: string) => `ticket-runs:${id}`,
+  sessions: (spaceId: string) => `sessions:${spaceId}`,
+  session: (id: string) => `session:${id}`,
+  sessionRuns: (id: string) => `session-runs:${id}`,
+  schedules: (spaceId: string) => `schedules:${spaceId}`,
+  workers: (spaceId: string) => `workers:${spaceId}`,
+  allWorkers: 'workers:all',
+  enrollments: (spaceId: string) => `enrollments:${spaceId}`,
+  myEnrollments: 'enrollments:mine',
+  members: (spaceId: string) => `members:${spaceId}`,
+  usage: (spaceId: string) => `usage:${spaceId}`,
+  spaceChannels: (spaceId: string) => `space-channels:${spaceId}`,
+  memory: (spaceId: string) => `memory:${spaceId}`,
+  modelOptions: 'model-options',
+  models: 'models',
+  channels: 'channels',
+} as const;

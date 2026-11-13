@@ -20,6 +20,7 @@ export interface CreateSpaceInput {
 
 export interface UpdateSpaceInput {
   promptPreset?: Space['promptPreset'];
+  name?: string;
   description?: string;
   repoUrl?: string;
   defaultBranch?: string;
@@ -108,6 +109,11 @@ export class SpaceService {
     await this.memberships.requireOperator(spaceId, userId);
     const space = await this.getSpace(spaceId);
     validatePatch(patch);
+    if (patch.name !== undefined) {
+      if (typeof patch.name !== 'string' || !patch.name.trim())
+        throw validation('Space name must not be empty');
+      space.name = patch.name.trim();
+    }
     if (patch.promptPreset !== undefined) {
       if (!['general', 'coding'].includes(patch.promptPreset))
         throw validation('Unknown prompt preset');

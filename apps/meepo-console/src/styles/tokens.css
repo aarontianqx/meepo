@@ -1,0 +1,95 @@
+/* Design tokens. `data-theme` is always set by the theme controller (system preference resolved in JS). */
+
+:root {
+  --font-sans:
+    'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB',
+    'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif;
+  --font-mono:
+    ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+
+  --radius-sm: 6px;
+  --radius: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+
+  --sidebar-w: 248px;
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+
+  color-scheme: light;
+  --bg: #f1f2f5;
+  --sheet: #ffffff;
+  --surface: #ffffff;
+  --surface-2: #f7f8fa;
+  --surface-3: #eff1f4;
+  --line: #e6e8ed;
+  --line-strong: #d3d8e0;
+  --text: #11151c;
+  --text-2: #475060;
+  --text-3: #778194;
+  --text-inverse: #ffffff;
+
+  --accent: #4f46e5;
+  --accent-hover: #4338ca;
+  --accent-soft: #eeeeff;
+  --accent-line: #cdcaf9;
+  --accent-text: #3b32c4;
+
+  --ok: #128a4a;
+  --ok-soft: #e5f6ec;
+  --ok-line: #b9e4cb;
+  --warn: #9a5700;
+  --warn-soft: #fdf1d8;
+  --warn-line: #f2d596;
+  --danger: #c42b2b;
+  --danger-soft: #fdeaea;
+  --danger-line: #f3bcbc;
+  --info: #0a67c2;
+  --info-soft: #e5f0fc;
+  --info-line: #b8d6f5;
+
+  --shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.06);
+  --shadow-md: 0 6px 20px rgba(16, 24, 40, 0.1);
+  --shadow-lg: 0 20px 60px rgba(16, 24, 40, 0.22);
+  --overlay: rgba(15, 18, 25, 0.42);
+  --focus: 0 0 0 3px rgba(79, 70, 229, 0.28);
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --bg: #0a0b0e;
+  --sheet: #111317;
+  --surface: #15181d;
+  --surface-2: #1a1e24;
+  --surface-3: #21262d;
+  --line: #242932;
+  --line-strong: #323946;
+  --text: #e9ebf0;
+  --text-2: #aab2c0;
+  --text-3: #7c8697;
+  --text-inverse: #0a0b0e;
+
+  --accent: #8b85ff;
+  --accent-hover: #a29eff;
+  --accent-soft: #211f4a;
+  --accent-line: #3c3a82;
+  --accent-text: #b7b3ff;
+
+  --ok: #43d08f;
+  --ok-soft: #10281d;
+  --ok-line: #1d5238;
+  --warn: #f0b34b;
+  --warn-soft: #2d2208;
+  --warn-line: #5c4412;
+  --danger: #ff7b7b;
+  --danger-soft: #301516;
+  --danger-line: #66292b;
+  --info: #62aaf5;
+  --info-soft: #0f2238;
+  --info-line: #1f4a78;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.5);
+  --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.5);
+  --shadow-lg: 0 24px 70px rgba(0, 0, 0, 0.7);
+  --overlay: rgba(0, 0, 0, 0.62);
+  --focus: 0 0 0 3px rgba(139, 133, 255, 0.35);
+}

@@ -1,93 +1,130 @@
-import { MemoryPage } from './pages/MemoryPage';
-import { SessionsPage, SchedulesPage } from './pages/ObservationPages';
-import { ModelsPage, ChannelsPage } from './pages/RegistryPages';
-import { useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
-import { api, getUserId, setUserId } from './api/client';
-import { usePolling } from './hooks/usePolling';
-import { SpaceDetailPage } from './pages/SpaceDetailPage';
-import { SpacesPage } from './pages/SpacesPage';
-import { TicketsPage } from './pages/TicketsPage';
-import { WorkersPage } from './pages/WorkersPage';
+import { ApiError, errorMessage, getUserId, setUserId } from './api/client';
+import { api } from './api/endpoints';
+import { clearQueries } from './api/query';
+import type { Me } from './api/types';
+import { MeProvider } from './app/context';
+import { Shell } from './app/Shell';
+import { Button } from './ui/Button';
+import { Field, Input } from './ui/Form';
+import { Icon } from './ui/Icon';
+import { Callout } from './ui/Misc';
+import { ConfirmProvider } from './ui/Modal';
+import { ToastProvider } from './ui/Toast';
 
-type Route =
-  | { page: 'spaces' }
-  | { page: 'space'; spaceId: string }
-  | { page: 'workers' }
-  | { page: 'tickets' | 'sessions' | 'schedules' | 'memory' | 'models' | 'channels' };
-
-const NAV_ITEMS: Array<{ page: Route['page']; label: string }> = [
-  { page: 'spaces', label: 'Spaces' },
-  { page: 'workers', label: 'Workers' },
-  { page: 'tickets', label: 'Tickets' },
-  { page: 'sessions', label: 'Sessions' },
-  { page: 'schedules', label: 'Schedules' },
-  { page: 'memory', label: 'Memory' },
-  { page: 'models', label: 'Models' },
-  { page: 'channels', label: 'Channels' },
-];
+type GateState =
+  | { kind: 'loading' }
+  | { kind: 'ready'; me: Me }
+  | { kind: 'signin'; message?: string }
+  | { kind: 'error'; message: string };
 
 export function App(): React.JSX.Element {
-  const [route, setRoute] = useState<Route>({ page: 'spaces' });
-  const [userId, setUserIdState] = useState(getUserId());
-  const health = usePolling(() => api.health(), 10_000);
+  // Bumping the generation remounts the whole tree so nothing keeps the previous identity.
+  const [generation, setGeneration] = useState(0);
+  const switchUser = useCallback(() => setGeneration((n) => n + 1), []);
+  return (
+    <ToastProvider>
+      <ConfirmProvider>
+        <IdentityGate key={generation} onSwitchUser={switchUser} />
+      </ConfirmProvider>
+    </ToastProvider>
+  );
+}
 
-  const activeNav = route.page === 'space' ? 'spaces' : route.page;
-  // Remount content when the acting user changes so every page refetches with new identity.
-  const contentKey = `${userId}:${route.page}:${route.page === 'space' ? route.spaceId : ''}`;
+/** Resolves who the server thinks we are before showing anything else. */
+function IdentityGate({ onSwitchUser }: { onSwitchUser: () => void }): React.JSX.Element {
+  const [state, setState] = useState<GateState>({ kind: 'loading' });
+
+  // Always ask the server first: it may already know the caller (default dev user, SSO proxy).
+  // The id form only appears when the server rejects the current identity.
+  const load = useCallback(() => {
+    setState({ kind: 'loading' });
+    api.me().then(
+      (me) => setState({ kind: 'ready', me }),
+      (error: unknown) =>
+        setState(
+          error instanceof ApiError && error.status === 401
+            ? { kind: 'signin', message: error.message }
+            : { kind: 'error', message: errorMessage(error) }
+        )
+    );
+  }, []);
+
+  useEffect(load, [load]);
+
+  if (state.kind === 'ready')
+    return (
+      <MeProvider value={state.me}>
+        <Shell onSwitchUser={onSwitchUser} />
+      </MeProvider>
+    );
 
   return (
-    <div>
-      <header className='topbar'>
-        <span className='brand'>MEEPO Console</span>
-        <span>
-          <span className={`health-dot ${health.data ? 'health-ok' : 'health-down'}`} />
-          {health.data
-            ? `server ok (uptime ${health.data.uptimeSeconds}s)`
-            : (health.error ?? 'connecting...')}
+    <div className='gate'>
+      <div className='gate-card'>
+        <span className='brand-mark brand-mark-lg' aria-hidden='true'>
+          <Icon name='bot' size={22} strokeWidth={2.1} />
         </span>
-        <span className='spacer' />
-        <span className='user-field'>
-          <label htmlFor='meepo-user'>User</label>
-          <input
-            id='meepo-user'
-            value={userId}
-            onChange={(e) => {
-              setUserId(e.target.value);
-              setUserIdState(e.target.value.trim());
+        <h1>Meepo Console</h1>
+        {state.kind === 'loading' ? (
+          <p className='muted' aria-busy='true'>
+            Connecting…
+          </p>
+        ) : state.kind === 'error' ? (
+          <>
+            <Callout tone='danger' title='Cannot reach the server'>
+              {state.message}
+            </Callout>
+            <Button variant='primary' onClick={load}>
+              Retry
+            </Button>
+          </>
+        ) : (
+          <SignIn
+            message={state.message}
+            onSubmit={(userId) => {
+              setUserId(userId);
+              clearQueries();
+              onSwitchUser();
             }}
-            placeholder='x-meepo-user-id'
           />
-        </span>
-      </header>
-      <div className='layout'>
-        <nav className='sidenav'>
-          {NAV_ITEMS.map((item) => (
-            <button
-              key={item.page}
-              className={activeNav === item.page ? 'active' : ''}
-              onClick={() => setRoute({ page: item.page } as Route)}
-            >
-              {item.label}
-            </button>
-          ))}
-        </nav>
-        <main className='content' key={contentKey}>
-          {route.page === 'spaces' ? (
-            <SpacesPage onOpenSpace={(spaceId) => setRoute({ page: 'space', spaceId })} />
-          ) : null}
-          {route.page === 'space' ? (
-            <SpaceDetailPage spaceId={route.spaceId} onBack={() => setRoute({ page: 'spaces' })} />
-          ) : null}
-          {route.page === 'workers' ? <WorkersPage /> : null}
-          {route.page === 'tickets' ? <TicketsPage /> : null}
-          {route.page === 'sessions' && <SessionsPage />}
-          {route.page === 'schedules' && <SchedulesPage />}
-          {route.page === 'memory' && <MemoryPage />}
-          {route.page === 'models' && <ModelsPage />}
-          {route.page === 'channels' && <ChannelsPage />}
-        </main>
+        )}
       </div>
     </div>
+  );
+}
+
+function SignIn({
+  message,
+  onSubmit,
+}: {
+  message?: string;
+  onSubmit: (userId: string) => void;
+}): React.JSX.Element {
+  const [userId, setUserIdDraft] = useState(getUserId());
+  return (
+    <form
+      className='stack'
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (userId.trim()) onSubmit(userId.trim());
+      }}
+    >
+      <p className='muted'>Choose who you are acting as. Development servers trust this id.</p>
+      {message ? <Callout tone='warn'>{message}</Callout> : null}
+      <Field label='User id'>
+        <Input
+          mono
+          value={userId}
+          onChange={(e) => setUserIdDraft(e.target.value)}
+          placeholder='User ID'
+          autoFocus
+        />
+      </Field>
+      <Button type='submit' variant='primary' disabled={!userId.trim()}>
+        Continue
+      </Button>
+    </form>
   );
 }

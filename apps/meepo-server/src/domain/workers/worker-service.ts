@@ -1,4 +1,4 @@
-import type { WorkerNode } from '@meepo/core';
+import type { WorkerEnrollmentToken, WorkerNode } from '@meepo/core';
 import type {
   WorkerHeartbeatPayload,
   WorkerRegisterPayload,
@@ -63,6 +63,31 @@ export class WorkerService {
 
   get leaseDurationMs(): number {
     return this.config.heartbeatIntervalSeconds * 3_000;
+  }
+
+  /**
+   * Adds a space to the token a running worker enrolled with, so it serves that space at once
+   * without restarting. A space left unbound gets this worker as its primary.
+   */
+  async addSpace(
+    enrollmentId: string,
+    spaceId: string,
+    userId: string
+  ): Promise<Omit<WorkerEnrollmentToken, 'token'>> {
+    const { token: _token, ...record } = await this.enrollmentService.grantSpace(
+      enrollmentId,
+      spaceId,
+      userId
+    );
+    const worker = record.workerId ? await this.workers.getById(record.workerId) : undefined;
+    if (worker) {
+      if (!worker.spaceIds.includes(spaceId)) {
+        worker.spaceIds = [...worker.spaceIds, spaceId];
+        await this.workers.save(worker);
+      }
+      await this.spaceService.bindWorkerIfUnbound(spaceId, worker.id);
+    }
+    return record;
   }
 
   async assertAuthorized(workerId: string): Promise<void> {

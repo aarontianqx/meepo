@@ -1,5 +1,7 @@
 import type { InboundInbox } from '../../domain/im/inbound-inbox.js';
 import { createHash } from 'node:crypto';
+
+import { formatQuotedMessage } from '@meepo/protocol';
 import type { DispatchService } from '../../domain/dispatch/dispatch-service.js';
 import {
   decideInbound,
@@ -265,7 +267,10 @@ export class FeishuGateway {
     if (msg.parentId) {
       const quoted = await this.deps.client.getMessage?.(msg.parentId);
       if (quoted && quoted.chatId === msg.chatId)
-        prompt = `<quoted_message>\n${JSON.stringify({ sender: quoted.sender, body: quoted.text.slice(0, 12000) })}\n</quoted_message>\n${prompt}`;
+        prompt = formatQuotedMessage(
+          { sender: quoted.sender, body: quoted.text.slice(0, 12000) },
+          prompt
+        );
     }
     await this.deps.dispatchService.dispatchSessionTurn({
       sessionId,

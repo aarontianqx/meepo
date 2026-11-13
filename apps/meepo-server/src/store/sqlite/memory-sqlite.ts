@@ -99,9 +99,14 @@ export class SqliteMemoryRepository implements MemoryRepository {
       const row = this.db
         .prepare('SELECT * FROM memory_entries WHERE space_id = ? AND path = ?')
         .get(value.spaceId, value.path) as Row | undefined;
-      // Create-only may recreate a tombstone, but stale positive revisions never do.
+      // Create-only may recreate a tombstone, but stale positive revisions never do. A tombstone
+      // reports revision 0 ("does not exist"), the value a caller must pass to recreate it.
       if (expected === 0 ? row && !row.deleted : !row || row.deleted || row.revision !== expected)
-        throw new MemoryError('revision_conflict', 'Memory revision changed', row?.revision ?? 0);
+        throw new MemoryError(
+          'revision_conflict',
+          'Memory revision changed',
+          row && !row.deleted ? row.revision : 0
+        );
       const { count } = this.db
         .prepare('SELECT COUNT(*) AS count FROM memory_entries WHERE space_id = ? AND deleted = 0')
         .get(value.spaceId) as { count: number };

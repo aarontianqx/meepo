@@ -76,6 +76,19 @@ describe('SqliteEnrollmentTokenRepository', () => {
     expect(bySpace.map((token) => token.id).sort()).toEqual(['token-1', 'token-2']);
     expect(await repo.listBySpace('space-unknown')).toEqual([]);
   });
+
+  it('lists tokens by issuer across spaces', async () => {
+    await repo.save(makeToken());
+    await repo.save(makeToken({ id: 'token-2', token: 'secret-2', spaceIds: ['space-2'] }));
+    await repo.save(makeToken({ id: 'token-3', token: 'secret-3', issuedByUserId: 'user-2' }));
+
+    expect((await repo.listByIssuer('user-1')).map((token) => token.id).sort()).toEqual([
+      'token-1',
+      'token-2',
+    ]);
+    expect(await repo.listByIssuer('nobody')).toEqual([]);
+  });
+
   it('binds token and worker identity in both directions, even after revocation', async () => {
     await repo.save(makeToken());
     await repo.save(makeToken({ id: 'token-2', token: 'secret-2', spaceIds: ['other'] }));

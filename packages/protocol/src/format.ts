@@ -18,6 +18,36 @@ export function formatUserMessage(
   return `<message ${attrs.join(' ')}>\n${content}\n</message>`;
 }
 
+/** A parent message the user replied to, as shown to the agent and the console. */
+export interface QuotedMessage {
+  sender: string;
+  body: string;
+}
+
+/** Prepends the quoted parent to the user's text: `<quoted_message>{json}</quoted_message>`. */
+export function formatQuotedMessage(quote: QuotedMessage, text: string): string {
+  return `<quoted_message>\n${JSON.stringify(quote)}\n</quoted_message>\n${text}`;
+}
+
+const QUOTED_PREFIX = /^<quoted_message>\n(.*)\n<\/quoted_message>\n([\s\S]*)$/;
+
+/**
+ * Splits content built by `formatQuotedMessage` back into quote and text. Content without a
+ * well-formed quote prefix is returned unchanged, so stored transcripts never fail to render.
+ */
+export function splitQuotedMessage(content: string): { quote?: QuotedMessage; text: string } {
+  const match = QUOTED_PREFIX.exec(content);
+  if (!match) return { text: content };
+  try {
+    const parsed = JSON.parse(match[1]) as Partial<QuotedMessage>;
+    if (typeof parsed.sender !== 'string' || typeof parsed.body !== 'string')
+      return { text: content };
+    return { quote: { sender: parsed.sender, body: parsed.body }, text: match[2] };
+  } catch {
+    return { text: content };
+  }
+}
+
 export function escapeAttr(value: string): string {
   return value
     .replace(/&/g, '&amp;')

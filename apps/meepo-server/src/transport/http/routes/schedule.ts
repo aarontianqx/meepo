@@ -24,9 +24,13 @@ export function registerScheduleRoutes(app: FastifyInstance, services: ServiceCo
         (m) => m.spaceId
       )
     );
-    return (await services.schedulerService.listSchedules(req.query.spaceId)).filter((x) =>
+    const visible = (await services.schedulerService.listSchedules(req.query.spaceId)).filter((x) =>
       allowed.has(x.spaceId)
     );
+    return visible.map((schedule) => ({
+      ...schedule,
+      nextFireAt: services.schedulerService.nextFireAt(schedule),
+    }));
   });
 
   app.post<{ Params: ScheduleParams }>('/api/schedules/:id/cancel', async (req) =>

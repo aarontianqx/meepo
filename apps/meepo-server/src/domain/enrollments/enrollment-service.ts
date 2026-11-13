@@ -64,6 +64,41 @@ export class EnrollmentService {
     return (await this.tokens.listBySpace(spaceId)).map(({ token: _token, ...entry }) => entry);
   }
 
+  /**
+   * Tokens the caller issued and still administers: the workers they run and may share. A token
+   * covering a space the caller has since left is hidden, as it can no longer be managed.
+   */
+  async listIssuedBy(userId: string): Promise<Omit<WorkerEnrollmentToken, 'token'>[]> {
+    const member = new Set((await this.memberships.listMemberships(userId)).map((m) => m.spaceId));
+    return (await this.tokens.listByIssuer(userId))
+      .filter((entry) => entry.spaceIds.every((id) => member.has(id)))
+      .map(({ token: _token, ...entry }) => entry);
+  }
+
+  /**
+   * Lets the token's worker serve one more space. Only the person who issued the token (the
+   * owner of that machine) may do this, and only while they still operate every space the
+   * worker serves (as for revoking) and the target space: someone removed from a space must
+   * not be able to hand its machine to other spaces.
+   */
+  async grantSpace(id: string, spaceId: string, userId: string): Promise<WorkerEnrollmentToken> {
+    if (typeof spaceId !== 'string' || !spaceId.trim()) throw validation('spaceId is required');
+    const token = await this.tokens.getById(id);
+    if (!token) throw validation('Unknown enrollment token');
+    if (token.issuedByUserId !== userId)
+      throw unauthorized('Only the person who issued this token can add spaces to its worker');
+    if (token.revokedAt !== undefined) throw validation('Enrollment token was revoked');
+    if (token.expiresAt !== undefined && token.expiresAt <= Date.now())
+      throw validation('Enrollment token has expired');
+    for (const covered of token.spaceIds) await this.memberships.requireOperator(covered, userId);
+    if (!(await this.spaces.getById(spaceId))) throw validation(`Unknown space: ${spaceId}`);
+    await this.memberships.requireOperator(spaceId, userId);
+    if (token.spaceIds.includes(spaceId)) return token;
+    token.spaceIds = [...token.spaceIds, spaceId];
+    await this.tokens.save(token);
+    return token;
+  }
+
   async revoke(id: string, userId: string): Promise<void> {
     const token = await this.tokens.getById(id);
     if (!token) throw validation('Unknown enrollment token');

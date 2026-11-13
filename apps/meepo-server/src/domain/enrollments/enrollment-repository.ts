@@ -7,4 +7,5 @@ export interface EnrollmentTokenRepository {
   save(token: WorkerEnrollmentToken): Promise<void>;
   getByToken(token: string): Promise<WorkerEnrollmentToken | undefined>;
   listBySpace(spaceId: string): Promise<WorkerEnrollmentToken[]>;
+  listByIssuer(userId: string): Promise<WorkerEnrollmentToken[]>;
 }

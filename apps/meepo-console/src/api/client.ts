@@ -1,11 +1,4 @@
-import type {
-  Space,
-  SpaceMember,
-  SpaceModelRef,
-  Ticket,
-  WorkerEnrollmentToken,
-  WorkerNode,
-} from '@meepo/core';
+/** HTTP transport for the control-plane API: identity header, error envelope, JSON parsing. */
 
 const USER_STORAGE_KEY = 'meepo.userId';
 
@@ -15,31 +8,37 @@ export function getUserId(): string {
   return currentUserId;
 }
 
+/** Persists the acting user (development header authenticator). */
 export function setUserId(userId: string): void {
   currentUserId = userId.trim();
   localStorage.setItem(USER_STORAGE_KEY, currentUserId);
 }
 
 export class ApiError extends Error {
-  constructor(
-    readonly status: number,
-    readonly code: string,
-    message: string
-  ) {
+  readonly status: number;
+  readonly code: string;
+  readonly currentRevision?: number;
+
+  constructor(status: number, code: string, message: string, currentRevision?: number) {
     super(message);
     this.name = 'ApiError';
+    this.status = status;
+    this.code = code;
+    this.currentRevision = currentRevision;
   }
 }
 
 interface ErrorPayload {
-  error?: { code?: string; message?: string };
+  error?: { code?: string; message?: string; currentRevision?: number };
 }
 
 export async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(path, {
     method,
     headers: {
-      'x-meepo-user-id': currentUserId,
+      // Without a locally chosen identity send none: the server (or an SSO proxy in front of it)
+      // decides who the caller is, and GET /api/me reports the result.
+      ...(currentUserId ? { 'x-meepo-user-id': currentUserId } : {}),
       ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
     },
     ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
@@ -47,91 +46,27 @@ export async function request<T>(method: string, path: string, body?: unknown): 
   if (!res.ok) {
     let code = `http_${res.status}`;
     let message = `${method} ${path} failed with status ${res.status}`;
+    let currentRevision: number | undefined;
     try {
       const payload = (await res.json()) as ErrorPayload;
       code = payload.error?.code ?? code;
       message = payload.error?.message ?? message;
+      currentRevision = payload.error?.currentRevision;
     } catch {
       // error body was not JSON; keep defaults
     }
-    throw new ApiError(res.status, code, message);
+    throw new ApiError(res.status, code, message, currentRevision);
   }
   try {
     return (await res.json()) as T;
   } catch {
-    throw new ApiError(res.status, 'bad_response', `${method} ${path} returned non-JSON body`);
+    throw new ApiError(res.status, 'bad_response', `${method} ${path} returned a non-JSON body`);
   }
 }
 
-export interface HealthStatus {
-  status: string;
-  uptimeSeconds: number;
-  timestamp: number;
+/** Human-friendly message for any thrown value. */
+export function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
-export interface CreateSpaceInput {
-  name: string;
-  repoUrl: string;
-  description?: string;
-  defaultBranch?: string;
-  requiredTags?: string[];
-  timezone?: string;
-}
-
-export interface IssueEnrollmentInput {
-  spaceIds: string[];
-  label?: string;
-  expiresAt?: number;
-}
-
-export interface CreateTicketInput {
-  spaceId: string;
-  title: string;
-  objective: string;
-  contextSummary?: string;
-  requiredTags?: string[];
-}
-
-export interface ModelRegistryEntry {
-  id: string;
-  provider: string;
-  baseUrl: string;
-  model: string;
-  isDefault: boolean;
-}
-
-export const api = {
-  health: () => request<HealthStatus>('GET', '/healthz'),
-
-  listSpaces: () => request<Space[]>('GET', '/api/spaces'),
-  createSpace: (input: CreateSpaceInput) => request<Space>('POST', '/api/spaces', input),
-  getSpace: (spaceId: string) =>
-    request<Space>('GET', `/api/spaces/${encodeURIComponent(spaceId)}`),
-  switchBinding: (spaceId: string, workerId: string) =>
-    request<Space>('POST', `/api/spaces/${encodeURIComponent(spaceId)}/binding`, { workerId }),
-  updateSpaceModel: (spaceId: string, model: SpaceModelRef | undefined) =>
-    request<Space>('PUT', `/api/spaces/${encodeURIComponent(spaceId)}/model`, { model }),
-
-  listModels: () => request<ModelRegistryEntry[]>('GET', '/api/model-options'),
-
-  listMembers: (spaceId: string) =>
-    request<SpaceMember[]>('GET', `/api/spaces/${encodeURIComponent(spaceId)}/members`),
-  addMember: (spaceId: string, userId: string) =>
-    request<SpaceMember>('POST', `/api/spaces/${encodeURIComponent(spaceId)}/members`, { userId }),
-
-  issueEnrollment: (input: IssueEnrollmentInput) =>
-    request<WorkerEnrollmentToken>('POST', '/api/enrollments', input),
-
-  listWorkers: (spaceId?: string) =>
-    request<WorkerNode[]>(
-      'GET',
-      spaceId ? `/api/workers?spaceId=${encodeURIComponent(spaceId)}` : '/api/workers'
-    ),
-
-  listTickets: (spaceId?: string) =>
-    request<Ticket[]>(
-      'GET',
-      spaceId ? `/api/tickets?spaceId=${encodeURIComponent(spaceId)}` : '/api/tickets'
-    ),
-  createTicket: (input: CreateTicketInput) => request<Ticket>('POST', '/api/tickets', input),
-};
+export const enc = encodeURIComponent;

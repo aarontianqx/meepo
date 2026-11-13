@@ -108,6 +108,7 @@ Global catalog of OpenAI-completions-compatible model endpoints:
 
 - Fields: `id`, `spaceIds` (non-empty `string[]`), `issuedByUserId`, `label?`, `token` (stored only as `'sha256:<hex>'`; plaintext returned once upon creation), `workerId?`, `expiresAt?`, `revokedAt?`, `createdAt`, `lastUsedAt?`.
 - **1:1 Identity Binding**: On first registration, an unrevoked, unexpired token binds permanently to `workerId`. Presenting that token with a different `workerId`, or presenting a different token for an already-bound `workerId`, is rejected.
+- **Growing `spaceIds`**: The issuer may append a space they operate to an unrevoked, unexpired token while they still operate every space it covers; the bound worker serves the new space at once. Spaces are never removed from a token this way.
 
 ### Webhook Credentials & Deduplication
 

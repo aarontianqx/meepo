@@ -20,6 +20,7 @@ import './auth.js';
 import { registerChannelRoutes } from './routes/channels.js';
 import { registerHealthRoutes } from './routes/health.js';
 import { registerMembershipRoutes } from './routes/memberships.js';
+import { registerMeRoutes } from './routes/me.js';
 import { registerModelRoutes } from './routes/models.js';
 import { registerScheduleRoutes } from './routes/schedule.js';
 import { registerSessionRoutes } from './routes/sessions.js';
@@ -91,6 +92,7 @@ export async function buildHttpServer(options: HttpServerOptions): Promise<Fasti
   });
   registerAuthorization(app, options.services, options.config.adminUserIds ?? []);
   registerHealthRoutes(app);
+  registerMeRoutes(app, options.config.adminUserIds ?? []);
   if (options.services.runRepository) registerObservationRoutes(app, options.services);
   if (options.services.memoryService) registerMemoryRoutes(app, options.services);
   if (options.services.channelService)

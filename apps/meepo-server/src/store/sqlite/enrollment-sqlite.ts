@@ -94,6 +94,13 @@ export class SqliteEnrollmentTokenRepository implements EnrollmentTokenRepositor
       .all(spaceId) as EnrollmentTokenRow[];
     return rows.map(rowToToken);
   }
+
+  async listByIssuer(userId: string): Promise<WorkerEnrollmentToken[]> {
+    const rows = this.db
+      .prepare('SELECT * FROM enrollment_tokens WHERE issued_by_user_id = ?')
+      .all(userId) as EnrollmentTokenRow[];
+    return rows.map(rowToToken);
+  }
 }
 
 function hashToken(token: string): string {

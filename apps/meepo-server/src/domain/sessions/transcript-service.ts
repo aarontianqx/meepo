@@ -103,6 +103,19 @@ export class TranscriptService {
     return (await this.events.listBySession(sessionId, { type, limit: 1 }))[0];
   }
 
+  /** The message that opened the session: its first turn, else its first user-authored import. */
+  async openingMessage(sessionId: string): Promise<TranscriptMessage | undefined> {
+    const turn = (
+      await this.events.listBySession(sessionId, { type: 'user_message', limit: 1 })
+    )[0];
+    if (turn) return turn.payload as TranscriptMessage;
+    const imported = await this.events.listBySession(sessionId, {
+      type: MESSAGE_EVENT_TYPE,
+      limit: 20,
+    });
+    return imported.map((e) => e.payload as TranscriptMessage).find((m) => m.role === 'user');
+  }
+
   async appendEvent(sessionId: string, type: string, payload: unknown): Promise<CanonicalEvent> {
     return this.events.append(sessionId, type, payload);
   }
