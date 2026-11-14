@@ -74,16 +74,36 @@ export type DispatchSource =
 /** Delivery semantics the server requests for a turn */
 export type DeliveryMode = 'urgent' | 'wait' | 'if_idle';
 
-/** Model credentials held per space by the server and injected per dispatch */
+/** Thinking strength levels a reasoning model can be asked to use, weakest first */
+export const REASONING_EFFORTS = ['low', 'high', 'max'] as const;
+
+export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
+
+/**
+ * Smallest context window the worker can compact for: a summary chunk is a quarter of the window
+ * and must hold at least 1,024 bytes.
+ */
+export const MIN_CONTEXT_WINDOW = 4096;
+
+/** Model credentials and capabilities held by the server and injected per dispatch */
 export interface ModelConfig {
-  imageInput?: boolean;
+  /** Whether the model accepts image content parts */
+  imageInput: boolean;
   /** pi-ai compatible provider identifier, e.g. "openai-completions" */
   provider: string;
   baseUrl: string;
   apiKey: string;
   model: string;
-  /** Thinking strength for this space's runs; endpoint default when absent */
-  thinkingLevel?: 'low' | 'high' | 'max';
+  /** Context window in tokens; compaction thresholds derive from it */
+  contextWindow: number;
+  /** Per-response output token cap (below `contextWindow`) */
+  maxTokens: number;
+  /** Supported thinking strengths; empty for a non-reasoning model */
+  reasoningEfforts: ReasoningEffort[];
+  /** Used when `thinkingLevel` is absent or unsupported; present whenever `reasoningEfforts` is not empty */
+  defaultEffort?: ReasoningEffort;
+  /** Thinking strength for this space's runs; `defaultEffort` when absent */
+  thinkingLevel?: ReasoningEffort;
 }
 
 /** Turn dispatch: a turn inside an existing (or newly created) session context */

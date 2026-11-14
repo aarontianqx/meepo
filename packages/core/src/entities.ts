@@ -11,9 +11,12 @@ export interface UserIdentity {
 
 export type SpaceRole = 'owner' | 'operator';
 
-/** A space's model selection: a registry reference plus an optional effort override */
+/**
+ * A space's model selection: an optional registry reference plus an optional effort override.
+ * Without `modelId` the space follows the registry default model.
+ */
 export interface SpaceModelRef {
-  modelId: string;
+  modelId?: string;
   thinkingLevel?: 'low' | 'high' | 'max';
 }
 

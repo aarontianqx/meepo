@@ -25,6 +25,11 @@ const model: ModelConfig = {
   baseUrl: 'https://gw.internal/v1',
   apiKey: 'sk-test',
   model: 'qwen3-coder',
+  contextWindow: 1_048_576,
+  maxTokens: 128_000,
+  reasoningEfforts: ['low', 'high', 'max'],
+  defaultEffort: 'max',
+  imageInput: false,
 };
 
 function entry(
@@ -258,6 +263,67 @@ describe('SessionManager runner creation', () => {
     expect(existsSync(workDir)).toBe(true);
     const toolNames = (captured[0].initialState?.tools ?? []).map((tool) => tool.name);
     expect(toolNames).toEqual(expect.arrayContaining(['read', 'bash', 'edit', 'write']));
+  });
+
+  it('handles images by the model the warm runner started with, not the latest envelope', async () => {
+    const prompts: string[] = [];
+    const { manager } = setup({
+      createAgent: () => ({
+        subscribe: () => () => {},
+        prompt: (input: string) => {
+          prompts.push(input);
+          return Promise.resolve();
+        },
+        steer: () => {},
+        abort: () => {},
+        state: { messages: [] },
+      }),
+    });
+    await manager.handleDispatch(envelope());
+    await manager.handleDispatch(
+      envelope({
+        runId: 'run-2',
+        images: [{ messageId: 'm', fileKey: 'img' }],
+        model: { ...model, imageInput: true },
+      })
+    );
+    // The runner was built for a text-only model: the image is replaced by a note, never downloaded.
+    expect(prompts.at(-1)).toContain('当前模型不支持图像输入');
+  });
+
+  it('does not evict an idle runner while a dispatch for it is still preparing', async () => {
+    let clock = 0;
+    let releaseDir!: () => void;
+    let holdDir = false;
+    const { manager } = setup({
+      now: () => clock,
+      ensureSessionDir: async () => {
+        if (holdDir) await new Promise<void>((resolve) => (releaseDir = resolve));
+        return '/tmp/sweep-race';
+      },
+      createAgent: () => ({
+        subscribe: () => () => {},
+        prompt: () => Promise.resolve(),
+        steer: () => {},
+        abort: () => {},
+        state: { messages: [] },
+      }),
+    });
+    await manager.handleDispatch(envelope({ sessionId: 'sweep-race' }));
+    clock = 120_000; // past sessionTtlMs, so the runner is idle-expired
+
+    holdDir = true;
+    const second = manager.handleDispatch(envelope({ sessionId: 'sweep-race', runId: 'run-2' }));
+    await vi.waitFor(() => expect(releaseDir).toBeDefined());
+    manager.sweep();
+    expect(manager.runnerForSession('sweep-race')).toBeDefined();
+
+    holdDir = false;
+    releaseDir();
+    await second;
+    clock = 240_000;
+    manager.sweep();
+    expect(manager.runnerForSession('sweep-race')).toBeUndefined();
   });
 
   it('reuses the runner (and directory) for subsequent dispatches', async () => {

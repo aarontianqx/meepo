@@ -21,5 +21,6 @@ export const keys = {
   memory: (spaceId: string) => `memory:${spaceId}`,
   modelOptions: 'model-options',
   models: 'models',
+  providers: 'providers',
   channels: 'channels',
 } as const;

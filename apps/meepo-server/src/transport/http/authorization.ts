@@ -3,6 +3,9 @@ import type { ServiceContainer } from '../../service-container.js';
 import { identityOf } from './auth.js';
 import { unauthorized, validation } from '../../domain/errors.js';
 
+/** Platform registries only global administrators may read or write. */
+const ADMIN_PREFIXES = ['/api/channels', '/api/models', '/api/providers'];
+
 /** Resolve resource ownership from stored entities, never a client-supplied owner. */
 export function registerAuthorization(
   app: FastifyInstance,
@@ -33,7 +36,7 @@ export function registerAuthorization(
       return;
     }
     const userId = identityOf(req).userId;
-    if (path.startsWith('/api/channels') || path.startsWith('/api/models')) {
+    if (ADMIN_PREFIXES.some((prefix) => path.startsWith(prefix))) {
       if (!admins.includes(userId)) throw unauthorized('Global administrator required');
       return;
     }

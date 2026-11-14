@@ -5,7 +5,7 @@ import { ReplyOutbox } from './transport/feishu/reply-outbox.js';
 import { SqliteMessageOutbox } from './store/sqlite/message-outbox-sqlite.js';
 import { SqliteCardOutbox } from './store/sqlite/card-outbox-sqlite.js';
 import { ModelService } from './domain/models/model-service.js';
-import { SqliteModelRepository } from './store/sqlite/model-sqlite.js';
+import { SqliteModelRepository, SqliteModelUsage } from './store/sqlite/model-sqlite.js';
 import { PromptService } from './domain/prompts/prompt-service.js';
 import { MemoryService } from './domain/memory/memory-service.js';
 import { SqliteMemoryRepository } from './store/sqlite/memory-sqlite.js';
@@ -85,7 +85,11 @@ export async function bootstrap(config: ServerConfig = loadConfig()): Promise<Se
   const enrollmentTokens = new SqliteEnrollmentTokenRepository(db);
   const spaceRepository = new SqliteSpaceRepository(db);
   const codec = new SecretCodec(config.secretKey, config.production);
-  const modelService = new ModelService(config.models, new SqliteModelRepository(db, codec));
+  const modelService = new ModelService(
+    config.models,
+    new SqliteModelRepository(db, codec),
+    new SqliteModelUsage(db)
+  );
   const channelService = new ChannelService(
     new SqliteChannelRepository(db, codec),
     spaceRepository

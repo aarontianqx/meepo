@@ -8,6 +8,11 @@ const model: ModelConfig = {
   model: 'test',
   apiKey: 'unused',
   baseUrl: 'http://localhost',
+  contextWindow: 1_048_576,
+  maxTokens: 128_000,
+  reasoningEfforts: ['low', 'high', 'max'],
+  defaultEffort: 'max',
+  imageInput: false,
 };
 const event = (seq: number, type: string, payload: unknown): CanonicalEvent => ({
   seq,

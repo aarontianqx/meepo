@@ -6,7 +6,7 @@
 
 ```text
 Global Scope (Admin-Managed)
-  ├── ModelRegistry (ModelEntry[])
+  ├── ModelRegistry (Provider[] ──1:N──► ModelEntry[])
   └── ChannelRegistry (Channel[] ──N:1──► Space)
 
 Space Scope (Tenant-Isolated)
@@ -40,22 +40,22 @@ Meepo stores no user account table. Every authenticated HTTP request resolves a 
 
 A **Space** is the sovereign unit of isolation:
 
-| Field            | Type                     | Constraints & Semantics                                                                                       |
-| ---------------- | ------------------------ | ------------------------------------------------------------------------------------------------------------- |
-| `id`             | `string`                 | Primary key.                                                                                                  |
-| `name`           | `string`                 | Required, non-empty trimmed display name.                                                                     |
-| `description`    | `string?`                | Optional summary injected into space identity prompts.                                                        |
-| `timezone`       | `string`                 | Valid IANA timezone (defaults to `'UTC'`); default for cron schedules in this space.                          |
-| `promptPreset`   | `'general' \| 'coding'?` | Defaults to `'general'`. `'coding'` appends isolated `git worktree` rules to new sessions/tickets.            |
-| `boundWorkerId`  | `string?`                | Enrolled worker hosting this space's `main` sessions. Auto-set when the first enrolled worker registers.      |
-| `requiredTags`   | `string[]`               | Worker capability tags required for placement in this space (defaults to `[]`).                               |
-| `model`          | `SpaceModelRef?`         | `{ modelId: string, thinkingLevel?: 'low' \| 'high' \| 'max' }`. Falls back to server default model if unset. |
-| `repoUrl`        | `string`                 | Optional repository hint surfaced in prompt context (defaults to `''`); never auto-cloned by Meepo.           |
-| `defaultBranch`  | `string`                 | Branch hint paired with `repoUrl` (defaults to `'main'`).                                                     |
-| `boundChatIds`   | `string[]`               | Read-only compatibility projection aggregating `boundChatIds` across the space's Channels.                    |
-| `longTermMemory` | `string`                 | _Legacy compatibility field_ (`''` on new spaces); structured `MemoryEntry` records are authoritative.        |
-| `createdAt`      | `integer`                | Creation timestamp.                                                                                           |
-| `updatedAt`      | `integer`                | Last metadata mutation timestamp.                                                                             |
+| Field            | Type                     | Constraints & Semantics                                                                                                                                                                                                                                          |
+| ---------------- | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `id`             | `string`                 | Primary key.                                                                                                                                                                                                                                                     |
+| `name`           | `string`                 | Required, non-empty trimmed display name.                                                                                                                                                                                                                        |
+| `description`    | `string?`                | Optional summary injected into space identity prompts.                                                                                                                                                                                                           |
+| `timezone`       | `string`                 | Valid IANA timezone (defaults to `'UTC'`); default for cron schedules in this space.                                                                                                                                                                             |
+| `promptPreset`   | `'general' \| 'coding'?` | Defaults to `'general'`. `'coding'` appends isolated `git worktree` rules to new sessions/tickets.                                                                                                                                                               |
+| `boundWorkerId`  | `string?`                | Enrolled worker hosting this space's `main` sessions. Auto-set when the first enrolled worker registers.                                                                                                                                                         |
+| `requiredTags`   | `string[]`               | Worker capability tags required for placement in this space (defaults to `[]`).                                                                                                                                                                                  |
+| `model`          | `SpaceModelRef?`         | `{ modelId?: string, thinkingLevel?: 'low' \| 'high' \| 'max' }`, with at least one field set. A missing `modelId` follows the registry default model; `thinkingLevel` applies to whichever model is in effect. Falls back to the server default model if unset. |
+| `repoUrl`        | `string`                 | Optional repository hint surfaced in prompt context (defaults to `''`); never auto-cloned by Meepo.                                                                                                                                                              |
+| `defaultBranch`  | `string`                 | Branch hint paired with `repoUrl` (defaults to `'main'`).                                                                                                                                                                                                        |
+| `boundChatIds`   | `string[]`               | Read-only compatibility projection aggregating `boundChatIds` across the space's Channels.                                                                                                                                                                       |
+| `longTermMemory` | `string`                 | _Legacy compatibility field_ (`''` on new spaces); structured `MemoryEntry` records are authoritative.                                                                                                                                                           |
+| `createdAt`      | `integer`                | Creation timestamp.                                                                                                                                                                                                                                              |
+| `updatedAt`      | `integer`                | Last metadata mutation timestamp.                                                                                                                                                                                                                                |
 
 **SpaceMember** (`unique (spaceId, userId)`):
 
@@ -78,15 +78,24 @@ Each **Channel** represents one IM bot credential bound to a single Space:
 | `boundChatIds`   | `string[]` | Authoritative set of group `chat_id`s routed to `spaceId` through this channel.      |
 | `updatedAt`      | `integer`  | Last update timestamp.                                                               |
 
-### ModelRegistry & ModelEntry
+### ModelRegistry, Provider & ModelEntry
 
-Global catalog of OpenAI-completions-compatible model endpoints:
+Global catalog of OpenAI-completions-compatible upstream services and the models they host. It is persisted as one encrypted document.
 
-- `ModelRegistry`: `{ defaultModelId?: string, entries: ModelEntry[] }`. Deleting the active `defaultModelId` entry is rejected with conflict until another default is selected.
+- `ModelRegistry`: `{ providers: Provider[], entries: ModelEntry[], defaultModelId?: string }`. Three deletions are rejected with conflict: the active `defaultModelId` entry while other models exist (until another default is selected; the last remaining model may be deleted and leaves no default), any model a Space explicitly selects through `Space.model.modelId`, and any provider that still has models. Deleting an unknown model is not found. A Space without an explicit model follows `defaultModelId`.
+- `Provider`:
+  - `id` (`string`, primary key), `name` (`string`, unique, display only), `baseUrl` (`http:` or `https:` URL).
+  - `kind` (`string`, e.g. `'openai-completions'`): The client-compatibility identifier sent to workers as the model's provider. It is not a label: the model client enables vendor-specific request handling for some values, so changing it can change request behavior.
+  - `apiKey` (`string`): Encrypted at rest (AES-256-GCM); never returned in HTTP responses (`GET /api/providers` returns `hasApiKey: true`; model lists omit `baseUrl` and `apiKey` entirely). Injected transiently into worker dispatch envelopes.
 - `ModelEntry`:
-  - `id` (`string`, primary key), `provider` (`string`, e.g. `'openai-completions'`), `model` (`string`, upstream model identifier), `baseUrl` (`http:` or `https:` URL).
-  - `apiKey` (`string`): Encrypted at rest (AES-256-GCM); never returned in HTTP responses (`GET /api/models` returns `hasApiKey: true`; `GET /api/model-options` omits `baseUrl` and `apiKey` entirely). Injected transiently into worker dispatch envelopes.
-  - `imageInput` (`boolean?`): Whether multimodal image inputs are supported (when omitted, inferred by worker capability rules).
+  - `id` (`string`, primary key): The stable reference used by `Space.model.modelId`.
+  - `providerId` (`string`): The owning `Provider`; `model` (`string`, upstream model identifier).
+  - Capabilities, all required and authoritative once stored: `contextWindow` (integer tokens, at least `4096`: the worker compacts in chunks of a quarter of the window and a chunk needs 1,024 bytes), `maxTokens` (positive integer, below `contextWindow`), `reasoningEfforts` (unique subset of `'low' | 'high' | 'max'`; empty means a non-reasoning model), `defaultEffort` (required exactly when `reasoningEfforts` is non-empty, and one of them), and `imageInput` (`boolean`: whether the model accepts image content).
+  - A new entry that omits capabilities is filled from a name-based suggestion (`kimi-k*`: `1,048,576` / `128,000` / low, high, max / default `max` / images; `gpt-5.6*`: `1,050,000` / `128,000` / low, high, max / default `high` / images; anything else: `128,000` / `16,384` / non-reasoning / no images). The suggestion applies only when an entry is written; it is never consulted at run time, and an edit that omits a field keeps the stored value.
+
+Resolving a model id yields the `ModelConfig` sent to workers: the provider's `kind`, `baseUrl` and `apiKey`, plus the entry's `model`, `imageInput` and capabilities. The Space's `thinkingLevel` is carried only when the entry's `reasoningEfforts` contains it.
+
+_Rationale: Credentials change with the upstream service and models change with its catalog, so keys live once per provider (rotation touches one record and models never carry secrets) while `ModelEntry.id` stays the Space-facing key. `kind` is stored apart from the display `name` because renaming a provider must never alter request behavior. Capabilities are stored data rather than a worker-side lookup by model name so that a new or private model is correct the moment it is registered, with no worker release and no silent guess about an unknown name._
 
 ## 3. Workers, Enrollment, and Webhooks
 

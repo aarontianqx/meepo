@@ -1,6 +1,7 @@
 /** Wire shapes returned by the control-plane API that are not shared entities. */
 
 import type { Schedule, Session } from '@meepo/core';
+import type { ReasoningEffort } from '@meepo/protocol';
 
 export interface Me {
   userId: string;
@@ -23,33 +24,49 @@ export interface SpaceUsage {
   costReportedRunCount: number;
 }
 
-/** Credential-free model listing used by space selectors. */
-export interface ModelOption {
+/** A registry model with its provider's name; never carries credentials or the base URL. */
+export interface ModelEntry {
   id: string;
+  providerId: string;
+  providerName: string;
   model: string;
-  provider: string;
-  imageInput?: boolean;
+  contextWindow: number;
+  maxTokens: number;
+  /** Supported thinking strengths; empty for a non-reasoning model. */
+  reasoningEfforts: ReasoningEffort[];
+  defaultEffort?: ReasoningEffort;
+  imageInput: boolean;
   isDefault: boolean;
 }
 
-/** Admin view of a registry entry; the API key is never returned. */
-export interface ModelEntry {
+/** Admin view of a provider; the API key is never returned. */
+export interface Provider {
   id: string;
-  provider: string;
-  model: string;
+  name: string;
+  kind: string;
   baseUrl: string;
-  imageInput?: boolean;
   hasApiKey: boolean;
-  isDefault: boolean;
+  modelCount: number;
+}
+
+export interface ProviderInput {
+  id: string;
+  name: string;
+  kind: string;
+  baseUrl: string;
+  apiKey?: string;
 }
 
 export interface ModelInput {
   id: string;
-  provider: string;
+  providerId: string;
   model: string;
-  baseUrl: string;
-  apiKey?: string;
-  imageInput?: boolean | null;
+  /** Capabilities left out are suggested from the model name (create) or kept (update). */
+  contextWindow?: number;
+  maxTokens?: number;
+  reasoningEfforts?: ReasoningEffort[];
+  defaultEffort?: ReasoningEffort;
+  imageInput?: boolean;
   isDefault?: boolean;
 }
 

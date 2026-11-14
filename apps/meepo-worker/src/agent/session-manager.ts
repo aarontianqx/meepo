@@ -175,11 +175,14 @@ export class SessionManager {
     if ((this.generations.get(envelope.sessionId) ?? 0) !== generation)
       throw new Error('Session closed during startup');
     this.runToSession.set(envelope.runId, envelope.sessionId);
+    // A warm runner keeps the model it started with, so images follow that model, not this
+    // envelope. Read it before the next await: an idle sweep may evict the session after that.
+    const { imageInput } = this.models.get(envelope.sessionId)!;
     const media = await loadImages(
       envelope.images ?? [],
       await this.ensureSessionDir(envelope.sessionId),
       this.mediaSource(envelope),
-      createModel(envelope.model).input.includes('image'),
+      imageInput,
       join(this.deps.sessionsDir, '.media')
     );
     if ((this.generations.get(envelope.sessionId) ?? 0) !== generation)
@@ -249,6 +252,9 @@ export class SessionManager {
   sweep(): void {
     const now = this.deps.now?.() ?? Date.now();
     for (const [sessionId, runner] of this.runners) {
+      // A dispatch in flight (media download, directory setup) has not reached the runner yet, so
+      // `busy` is still false; evicting now would run the turn on a released runner.
+      if (this.dispatchChains.has(sessionId)) continue;
       if (!runner.busy && now - runner.idleSince >= this.deps.sessionTtlMs) {
         this.runners.delete(sessionId);
         this.toolReleases.get(sessionId)?.();

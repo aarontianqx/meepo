@@ -1,4 +1,5 @@
 import type { Space, SpaceModelRef } from '@meepo/core';
+import { REASONING_EFFORTS } from '@meepo/protocol';
 import { useState } from 'react';
 
 import { api } from '../../api/endpoints';
@@ -6,12 +7,11 @@ import { keys } from '../../api/keys';
 import { setQueryData, useQuery } from '../../api/query';
 import { useMe, useSpace } from '../../app/context';
 import { navigate } from '../../app/router';
+import { formatTokens, groupByProvider, levelFor, type Level } from '../../lib/models';
 import { Button } from '../../ui/Button';
 import { Field, Segmented, Select } from '../../ui/Form';
 import { Callout, ErrorState, ListSkeleton } from '../../ui/Misc';
 import { useAction } from '../../ui/useAction';
-
-type Level = NonNullable<SpaceModelRef['thinkingLevel']> | 'default';
 
 const PRESETS = [
   { value: 'general', label: 'General assistant' },
@@ -46,25 +46,38 @@ function ModelCard(): React.JSX.Element {
   const { run, pending } = useAction();
   const options = useQuery(keys.modelOptions, api.modelOptions);
   const [modelId, setModelId] = useState(space.model?.modelId ?? '');
-  const [level, setLevel] = useState<Level>(space.model?.thinkingLevel ?? 'default');
+  const [wanted, setLevel] = useState<Level>(space.model?.thinkingLevel ?? 'default');
 
   if (options.error && !options.data)
     return <ErrorState message={options.error} onRetry={() => void options.refresh()} />;
   if (!options.data) return <ListSkeleton rows={3} />;
 
   const fallback = options.data.find((o) => o.isDefault);
+  // The model whose capabilities apply: the picked one, else the platform default.
+  const selected = modelId ? options.data.find((o) => o.id === modelId) : fallback;
+  const unknown = modelId !== '' && !selected;
+  // A level the model does not support is never kept: the server would ignore it.
+  const level = selected ? levelFor(wanted, selected) : wanted;
   const dirty =
     modelId !== (space.model?.modelId ?? '') || level !== (space.model?.thinkingLevel ?? 'default');
-  const unknown = modelId !== '' && !options.data.some((o) => o.id === modelId);
 
   const save = async (): Promise<void> => {
-    const model: SpaceModelRef | undefined = modelId
-      ? { modelId, ...(level === 'default' ? {} : { thinkingLevel: level }) }
-      : undefined;
+    // Nothing to store when the space follows the platform default model at its default effort.
+    const model: SpaceModelRef | undefined =
+      modelId || level !== 'default'
+        ? {
+            ...(modelId ? { modelId } : {}),
+            ...(level === 'default' ? {} : { thinkingLevel: level }),
+          }
+        : undefined;
     const updated = await run(() => api.updateSpaceModel(space.id, model), {
       success: 'Model saved',
     });
-    if (updated) replaceSpace(updated);
+    if (updated) {
+      replaceSpace(updated);
+      // Keep the control in step with what was stored (an unsupported level was cleared).
+      setLevel(level);
+    }
   };
 
   return (
@@ -78,7 +91,8 @@ function ModelCard(): React.JSX.Element {
       <div>
         <h3 className='card-title'>Model</h3>
         <p className='muted'>
-          Which model answers in this space. Changes apply from the next turn.
+          Which model answers in this space. A conversation that is still active keeps the model it
+          started with; new ones, and ones that have been idle for a while, use the new choice.
         </p>
       </div>
       {options.data.length === 0 ? (
@@ -100,30 +114,49 @@ function ModelCard(): React.JSX.Element {
         <Select value={modelId} onChange={(e) => setModelId(e.target.value)}>
           <option value=''>Platform default{fallback ? ` (${fallback.model})` : ''}</option>
           {unknown ? <option value={modelId}>{modelId} (no longer registered)</option> : null}
-          {options.data.map((o) => (
-            <option key={o.id} value={o.id}>
-              {o.model} · {o.provider}
-              {o.isDefault ? ' · default' : ''}
-            </option>
+          {groupByProvider(options.data).map((group) => (
+            <optgroup key={group.providerId} label={group.providerName}>
+              {group.models.map((o) => (
+                <option key={o.id} value={o.id}>
+                  {o.id === o.model ? o.id : `${o.id} · ${o.model}`}
+                  {` · ${formatTokens(o.contextWindow)}`}
+                  {o.isDefault ? ' · default' : ''}
+                </option>
+              ))}
+            </optgroup>
           ))}
         </Select>
       </Field>
       <div className='field'>
         <span className='field-label'>Thinking effort</span>
-        <Segmented<Level>
-          label='Thinking effort'
-          value={level}
-          onChange={setLevel}
-          options={[
-            { value: 'default', label: 'Model default' },
-            { value: 'low', label: 'Low' },
-            { value: 'high', label: 'High' },
-            { value: 'max', label: 'Max' },
-          ]}
-        />
-        <span className='field-hint'>
-          Higher effort answers better on hard problems but is slower and costs more.
-        </span>
+        {selected && selected.reasoningEfforts.length === 0 ? (
+          <span className='field-hint'>
+            {selected.model} does not support thinking effort; it answers without extended
+            reasoning.
+          </span>
+        ) : (
+          <>
+            <Segmented<Level>
+              label='Thinking effort'
+              value={level}
+              onChange={setLevel}
+              options={[
+                {
+                  value: 'default',
+                  label: selected?.defaultEffort
+                    ? `Model default (${selected.defaultEffort})`
+                    : 'Model default',
+                },
+                ...REASONING_EFFORTS.filter(
+                  (e) => !selected || selected.reasoningEfforts.includes(e)
+                ).map((e) => ({ value: e, label: e[0].toUpperCase() + e.slice(1) })),
+              ]}
+            />
+            <span className='field-hint'>
+              Higher effort answers better on hard problems but is slower and costs more.
+            </span>
+          </>
+        )}
       </div>
       {unknown ? (
         <Callout tone='warn' title='This model was removed from the registry'>

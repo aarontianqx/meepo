@@ -21,6 +21,11 @@ const model: ModelConfig = {
   baseUrl: 'https://gw.internal/v1',
   apiKey: 'sk-test',
   model: 'qwen3-coder',
+  contextWindow: 1_048_576,
+  maxTokens: 128_000,
+  reasoningEfforts: ['low', 'high', 'max'],
+  defaultEffort: 'max',
+  imageInput: false,
 };
 
 class StubAgent implements RunnerAgent {

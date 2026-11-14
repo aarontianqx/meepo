@@ -153,6 +153,68 @@ describe('HTTP v2 ownership boundaries', () => {
       (await runtime.app.inject({ url: '/api/spaces', headers: headers('admin') })).json()
     ).toEqual([]);
   });
+  it('keeps providers and model references behind the global administrator', async () => {
+    const call = (method: 'GET' | 'PUT' | 'DELETE', url: string, user: string, payload?: object) =>
+      runtime.app.inject({ method, url, headers: headers(user), payload });
+    const secret = 'sk-never-returned';
+    const provider = {
+      id: 'p',
+      name: 'P',
+      kind: 'openai-completions',
+      baseUrl: 'https://x.test/v1',
+    };
+    for (const [method, url, payload] of [
+      ['GET', '/api/providers', undefined],
+      ['PUT', '/api/providers', { ...provider, apiKey: secret }],
+      ['DELETE', '/api/providers/p', undefined],
+      ['PUT', '/api/models', { id: 'm', providerId: 'p', model: 'm' }],
+      ['DELETE', '/api/models/m', undefined],
+    ] as const)
+      expect((await call(method, url, 'owner', payload)).statusCode).toBe(401);
+
+    expect(
+      (await call('PUT', '/api/providers', 'admin', { ...provider, apiKey: secret })).statusCode
+    ).toBe(200);
+    for (const id of ['m', 'n'])
+      expect(
+        (await call('PUT', '/api/models', 'admin', { id, providerId: 'p', model: id })).statusCode
+      ).toBe(200);
+    for (const url of ['/api/providers', '/api/models', '/api/model-options'])
+      expect((await call('GET', url, 'admin')).body).not.toContain(secret);
+    const options = await call('GET', '/api/model-options', 'owner');
+    expect(options.statusCode).toBe(200);
+    expect(options.body).not.toContain(secret);
+    expect(options.json()).toEqual([
+      expect.objectContaining({
+        id: 'm',
+        providerName: 'P',
+        isDefault: true,
+        contextWindow: 128_000,
+        reasoningEfforts: [],
+      }),
+      expect.objectContaining({ id: 'n', providerName: 'P', isDefault: false }),
+    ]);
+
+    expect(
+      (
+        await call('PUT', '/api/models', 'admin', {
+          id: 'm',
+          providerId: 'p',
+          model: 'm',
+          contextWindow: 1000,
+          maxTokens: 2000,
+        })
+      ).statusCode
+    ).toBe(400);
+    expect(
+      (await call('PUT', `/api/spaces/${spaceId}/model`, 'owner', { model: { modelId: 'n' } }))
+        .statusCode
+    ).toBe(200);
+    expect((await call('DELETE', '/api/models/n', 'admin')).statusCode).toBe(409);
+    expect((await call('DELETE', '/api/providers/p', 'admin')).statusCode).toBe(409);
+    expect((await call('PUT', `/api/spaces/${spaceId}/model`, 'owner', {})).statusCode).toBe(200);
+    expect((await call('DELETE', '/api/models/n', 'admin')).statusCode).toBe(200);
+  });
   it('aggregates only the requested space usage and requires membership', async () => {
     const session = await runtime.services.sessionService.getOrCreateByThread({
       spaceId,
@@ -250,12 +312,29 @@ describe('HTTP v2 ownership boundaries', () => {
         { model: { modelId: 'm', thinkingLevel: 'invalid' } },
         'owner',
       ],
+      ['PUT', `/api/spaces/${spaceId}/model`, { model: {} }, 'owner'],
+      ['PUT', `/api/spaces/${spaceId}/model`, { model: { modelId: '  ' } }, 'owner'],
       ['PUT', '/api/models', { id: [] }, 'admin'],
     ] as const) {
       expect(
         (await runtime.app.inject({ method, url, payload, headers: headers(user) })).statusCode
       ).toBe(400);
     }
+  });
+
+  it('keeps a thinking level on a space that follows the platform default model', async () => {
+    const put = (model?: object) =>
+      runtime.app.inject({
+        method: 'PUT',
+        url: `/api/spaces/${spaceId}/model`,
+        headers: headers('owner'),
+        payload: { model },
+      });
+    const levelOnly = await put({ thinkingLevel: 'high' });
+    expect(levelOnly.statusCode).toBe(200);
+    expect(levelOnly.json<{ model: object }>().model).toEqual({ thinkingLevel: 'high' });
+    const cleared = await put();
+    expect(cleared.json<{ model?: object }>().model).toBeUndefined();
   });
 
   it('lets only the token issuer extend a running worker to another space they operate', async () => {

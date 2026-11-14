@@ -51,6 +51,16 @@ describe('SqliteSpaceRepository', () => {
     expect(await repo.getById(space.id)).toEqual(space);
   });
 
+  it('round-trips a model reference, with or without a model id', async () => {
+    await repo.save(makeSpace({ id: 'a', model: { modelId: 'k3', thinkingLevel: 'high' } }));
+    await repo.save(makeSpace({ id: 'b', model: { thinkingLevel: 'low' } }));
+    await repo.save(makeSpace({ id: 'c' }));
+
+    expect((await repo.getById('a'))?.model).toEqual({ modelId: 'k3', thinkingLevel: 'high' });
+    expect((await repo.getById('b'))?.model).toEqual({ thinkingLevel: 'low' });
+    expect((await repo.getById('c'))?.model).toBeUndefined();
+  });
+
   it('returns undefined for a missing id', async () => {
     expect(await repo.getById('missing')).toBeUndefined();
   });

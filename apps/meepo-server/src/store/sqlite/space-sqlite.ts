@@ -32,9 +32,9 @@ function rowToSpace(row: SpaceRow): Space {
     boundWorkerId: row.bound_worker_id ?? undefined,
     timezone: row.timezone,
     model:
-      row.model_id != null
+      row.model_id != null || row.model_thinking_level != null
         ? {
-            modelId: row.model_id,
+            modelId: row.model_id ?? undefined,
             thinkingLevel: (row.model_thinking_level ?? undefined) as
               'low' | 'high' | 'max' | undefined,
           }

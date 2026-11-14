@@ -30,7 +30,7 @@ A single worker-wide `SlotSemaphore(maxSlots)` (`1–128`, default `1`) gates bo
 
 ### Warm vs. Cold Runners
 
-- **Sessions** keep their in-memory runner warm across turns until idle past `sessionTtlMs` (default `1 hour`), closed, or restarted. Warm sessions retain their initial model configuration and MCP tool generation for stability; cold starts re-fetch canonical history via `session.snapshot` and re-render the system prompt.
+- **Sessions** keep their in-memory runner warm across turns until idle past `sessionTtlMs` (default `1 hour`; a session with a dispatch still being prepared is never evicted), closed, or restarted. Warm sessions retain their initial model configuration (endpoint, API key and capabilities, including image input) and MCP tool generation for stability; cold starts re-fetch canonical history via `session.snapshot` and re-render the system prompt.
 - **Tickets** instantiate a single-turn runner per dispatch and tear it down immediately upon completion.
 
 ### Built-In Local Tools
@@ -66,13 +66,15 @@ Worker owners configure external MCP servers in `worker.toml` / `.json` under `[
 
 ### Model selection and reasoning effort
 
-Spaces reference a `modelId` from the server's `ModelRegistry`, injected per dispatch alongside its endpoint and API key. Model calls use the OpenAI Chat Completions streaming wire protocol (`supportsDeveloperRole: false`), with `reasoningEffort` passed explicitly on every turn and compaction summary call. Effective effort resolves by precedence:
+Spaces reference a `modelId` from the server's `ModelRegistry`, injected per dispatch alongside its endpoint, API key and capabilities (`contextWindow`, `maxTokens`, `reasoningEfforts`, `defaultEffort`, `imageInput`). Model calls use the OpenAI Chat Completions streaming wire protocol (`supportsDeveloperRole: false`), with `reasoningEffort` passed explicitly on every turn of a reasoning model (none is sent for a model whose `reasoningEfforts` is empty); compaction summary calls request reasoning only when a supported level was chosen. Effective effort resolves by precedence:
 
 ```text
-Space model.thinkingLevel  ──►  Worker modelDefaults.thinkingLevel / MEEPO_THINKING_LEVEL  ──►  Model capability default
+Space model.thinkingLevel  ──►  Worker modelDefaults.thinkingLevel / MEEPO_THINKING_LEVEL  ──►  Entry defaultEffort
 ```
 
-Known Kimi K2.8/K3 models default to `'max'` (`1,048,576` context window, `128,000` max output tokens; multimodal image input enabled by default for `kimi-k*` unless overridden by `ModelEntry.imageInput`); named GPT-5.6 entries default to `'high'` (`1,050,000` window). Unrecognized model IDs currently fall back to the K3 capability profile.
+A requested level the model does not list in `reasoningEfforts` is ignored and the entry's `defaultEffort` applies.
+
+The worker holds no capability table: window, output limit and reasoning support are exactly what the dispatched entry declares (the server fills them in when the entry is created). Image input is likewise exactly the entry's `imageInput`: when it is `false`, attached images are replaced by a short note instead of being sent.
 
 ### Two-Tier History Compaction
 

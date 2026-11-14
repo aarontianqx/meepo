@@ -16,12 +16,22 @@ import { MemoryWorkerRepository } from '../../../store/memory/worker-memory.js';
 import { TranscriptService } from '../../sessions/transcript-service.js';
 import type { WorkerSender } from '../worker-sender.js';
 
-const MODEL_ENTRY = {
-  id: 'm',
-  provider: 'openai-completions',
-  baseUrl: 'https://x',
-  apiKey: 'k',
-  model: 'm',
+const MODEL_REGISTRY = {
+  providers: [
+    { id: 'p', name: 'x', kind: 'openai-completions', baseUrl: 'https://x', apiKey: 'k' },
+  ],
+  entries: [
+    {
+      id: 'm',
+      providerId: 'p',
+      model: 'm',
+      contextWindow: 128_000,
+      maxTokens: 16_384,
+      reasoningEfforts: [],
+      imageInput: false,
+    },
+  ],
+  defaultModelId: 'm',
 };
 const MODEL = { modelId: 'm' };
 
@@ -125,10 +135,7 @@ describe('DispatchService', () => {
       queue,
       sender,
       transcripts,
-      {
-        entries: [MODEL_ENTRY],
-        defaultModelId: 'm',
-      }
+      MODEL_REGISTRY
     );
   });
 
@@ -259,7 +266,7 @@ describe('DispatchService', () => {
       queue,
       sender,
       new TranscriptService(new MemorySessionEventRepository(), sessions),
-      { entries: [MODEL_ENTRY], defaultModelId: 'm' },
+      MODEL_REGISTRY,
       committer
     );
     expect(await service.dispatchTicket('t1')).toMatchObject({ dispatched: true, workerId: 'w2' });
@@ -331,6 +338,33 @@ describe('DispatchService', () => {
     expect((await tickets.getById('t1'))?.status).toBe('claimed');
   });
 
+  it('applies a thinking level to the registry default model when the space picks no model', async () => {
+    await spaces.save({ ...makeSpace('sp1', 'w1'), model: { thinkingLevel: 'high' } });
+    await workers.save(makeWorker('w1', ['sp1']));
+    await sessions.save(makeSession('se1', 'sp1', 'main'));
+    sender.connected.add('w1');
+    const reasoning = new DispatchService(
+      sessions,
+      spaces,
+      workers,
+      tickets,
+      runs,
+      queue,
+      sender,
+      new TranscriptService(new MemorySessionEventRepository(), sessions),
+      {
+        ...MODEL_REGISTRY,
+        entries: [
+          { ...MODEL_REGISTRY.entries[0], reasoningEfforts: ['low', 'high'], defaultEffort: 'low' },
+        ],
+      }
+    );
+    await reasoning.dispatchSessionTurn({ sessionId: 'se1', ...turn });
+    expect(sender.sent[0].frame).toMatchObject({
+      payload: { model: { model: 'm', thinkingLevel: 'high', defaultEffort: 'low' } },
+    });
+  });
+
   it('rejects dispatch when no model is configured', async () => {
     await spaces.save({ ...makeSpace('sp1', 'w1'), model: undefined });
     await workers.save(makeWorker('w1', ['sp1']));
@@ -345,7 +379,7 @@ describe('DispatchService', () => {
       queue,
       sender,
       new TranscriptService(new MemorySessionEventRepository(), sessions),
-      { entries: [] }
+      { providers: [], entries: [] }
     );
     await expect(noModel.dispatchSessionTurn({ sessionId: 'se1', ...turn })).rejects.toThrow(
       DomainError

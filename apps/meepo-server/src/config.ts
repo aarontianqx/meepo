@@ -1,8 +1,10 @@
-import type { ModelEntry, ModelRegistry } from './domain/models/model-registry.js';
+import { registryFromSeed, type ModelSeedEntry } from './domain/models/model-seed.js';
+import type { ModelRegistry } from './domain/models/model-registry.js';
 export {
   resolveModel,
   type ModelEntry,
   type ModelRegistry,
+  type Provider,
 } from './domain/models/model-registry.js';
 export interface ServerConfig {
   adminUserIds?: string[];
@@ -53,26 +55,29 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
 function loadModelRegistry(env: NodeJS.ProcessEnv): ModelRegistry {
   if (env.MEEPO_MODELS) {
     try {
-      const entries = JSON.parse(env.MEEPO_MODELS) as ModelEntry[];
+      const entries = JSON.parse(env.MEEPO_MODELS) as ModelSeedEntry[];
       if (
         Array.isArray(entries) &&
         entries.every((e) => e.id && e.provider && e.baseUrl && e.apiKey && e.model)
       ) {
-        return { entries, defaultModelId: env.MEEPO_DEFAULT_MODEL_ID ?? entries[0]?.id };
+        return registryFromSeed({
+          entries,
+          defaultModelId: env.MEEPO_DEFAULT_MODEL_ID ?? entries[0]?.id,
+        });
       }
     } catch {
       // fall through to legacy single-model env
     }
   }
   const legacy = loadLegacyModel(env);
-  return {
+  return registryFromSeed({
     entries: legacy ? [legacy] : [],
     defaultModelId: legacy?.id,
-  };
+  });
 }
 
 /** Legacy single-model env (MEEPO_MODEL_PROVIDER/BASE_URL/API_KEY/ID), kept for compatibility. */
-function loadLegacyModel(env: NodeJS.ProcessEnv): ModelEntry | undefined {
+function loadLegacyModel(env: NodeJS.ProcessEnv): ModelSeedEntry | undefined {
   const { MEEPO_MODEL_PROVIDER, MEEPO_MODEL_BASE_URL, MEEPO_MODEL_API_KEY, MEEPO_MODEL_ID } = env;
   if (!MEEPO_MODEL_PROVIDER || !MEEPO_MODEL_BASE_URL || !MEEPO_MODEL_API_KEY || !MEEPO_MODEL_ID) {
     return undefined;

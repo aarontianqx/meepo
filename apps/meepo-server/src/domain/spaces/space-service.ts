@@ -2,6 +2,7 @@ import type { SessionBindingPort } from '../sessions/session-lifecycle.js';
 import { randomUUID } from 'node:crypto';
 
 import type { Space } from '@meepo/core';
+import { REASONING_EFFORTS } from '@meepo/protocol';
 
 import { notFound, validation } from '../errors.js';
 import type { MembershipService } from '../memberships/membership-service.js';
@@ -88,15 +89,7 @@ export class SpaceService {
   async updateModel(spaceId: string, model: Space['model'], userId: string): Promise<Space> {
     await this.memberships.requireOperator(spaceId, userId);
     const space = await this.getSpace(spaceId);
-    if (
-      model !== undefined &&
-      (!model ||
-        typeof model !== 'object' ||
-        typeof model.modelId !== 'string' ||
-        !model.modelId.trim() ||
-        (model.thinkingLevel !== undefined &&
-          !['low', 'high', 'max'].includes(model.thinkingLevel)))
-    )
+    if (model !== undefined && !isValidModelRef(model))
       throw validation('Invalid model reference or thinking level');
     space.model = model;
     space.updatedAt = Date.now();
@@ -158,6 +151,18 @@ export class SpaceService {
     space.updatedAt = Date.now();
     await this.spaces.save(space);
   }
+}
+
+/** HTTP body check: at least one of a non-blank `modelId` and a known `thinkingLevel`. */
+function isValidModelRef(model: unknown): model is NonNullable<Space['model']> {
+  if (!model || typeof model !== 'object') return false;
+  const { modelId, thinkingLevel } = model as Record<string, unknown>;
+  const idOk = modelId === undefined || (typeof modelId === 'string' && modelId.trim() !== '');
+  const levelOk =
+    thinkingLevel === undefined ||
+    (typeof thinkingLevel === 'string' &&
+      (REASONING_EFFORTS as readonly string[]).includes(thinkingLevel));
+  return idOk && levelOk && (modelId !== undefined || thinkingLevel !== undefined);
 }
 
 function validatePatch(input: UpdateSpaceInput): void {

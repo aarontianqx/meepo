@@ -28,7 +28,8 @@ import type {
   Me,
   ModelEntry,
   ModelInput,
-  ModelOption,
+  Provider,
+  ProviderInput,
   ScheduleItem,
   SessionItem,
   SpaceUsage,
@@ -186,7 +187,10 @@ export const api = {
     ),
 
   // Global registries (admin)
-  modelOptions: () => request<ModelOption[]>('GET', '/api/model-options'),
+  modelOptions: () => request<ModelEntry[]>('GET', '/api/model-options'),
+  listProviders: () => request<Provider[]>('GET', '/api/providers'),
+  saveProvider: (input: ProviderInput) => request<Provider>('PUT', '/api/providers', input),
+  deleteProvider: (id: string) => request<{ deleted: true }>('DELETE', `/api/providers/${enc(id)}`),
   listModels: () => request<ModelEntry[]>('GET', '/api/models'),
   saveModel: (input: ModelInput) => request<ModelEntry>('PUT', '/api/models', input),
   deleteModel: (id: string) => request<{ deleted: true }>('DELETE', `/api/models/${enc(id)}`),

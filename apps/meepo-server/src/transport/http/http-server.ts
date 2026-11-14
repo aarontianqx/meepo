@@ -100,7 +100,7 @@ export async function buildHttpServer(options: HttpServerOptions): Promise<Fasti
   registerMembershipRoutes(app, options.services);
   registerSpaceRoutes(app, options.services);
   registerWorkerRoutes(app, options.services);
-  registerModelRoutes(app, options.config.models, options.services.modelService);
+  if (options.services.modelService) registerModelRoutes(app, options.services.modelService);
   registerTicketRoutes(app, options.services);
   registerSessionRoutes(app, options.services);
   registerScheduleRoutes(app, options.services);

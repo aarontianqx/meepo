@@ -188,13 +188,18 @@ describe('FeishuGateway', () => {
       sender,
       transcriptService,
       {
+        providers: [
+          { id: 'p', name: 'x', kind: 'openai-completions', baseUrl: 'https://x', apiKey: 'k' },
+        ],
         entries: [
           {
             id: 'm',
-            provider: 'openai-completions',
-            baseUrl: 'https://x',
-            apiKey: 'k',
+            providerId: 'p',
             model: 'm',
+            contextWindow: 128_000,
+            maxTokens: 16_384,
+            reasoningEfforts: [],
+            imageInput: false,
           },
         ],
         defaultModelId: 'm',

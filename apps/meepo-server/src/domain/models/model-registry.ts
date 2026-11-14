@@ -1,16 +1,29 @@
 import type { ModelConfig } from '@meepo/protocol';
-/** One globally available model: credentials plus the wire-protocol discriminator. */
-export interface ModelEntry {
-  imageInput?: boolean;
+
+import type { ModelCapabilities } from './model-capabilities.js';
+
+/** One upstream service: credentials shared by every model hosted there. */
+export interface Provider {
   id: string;
-  provider: string;
+  /** Display name only. */
+  name: string;
+  /** Client-compatibility identifier handed to workers as `ModelConfig.provider`; it changes request behavior. */
+  kind: string;
   baseUrl: string;
   apiKey: string;
+}
+
+/** One globally available model; Spaces reference it by `id`. */
+export interface ModelEntry extends ModelCapabilities {
+  id: string;
+  providerId: string;
+  /** Upstream model name. */
   model: string;
 }
 
-/** Registry of globally available models, resolved from server config. */
+/** Registry of globally available providers and models, resolved from server config. */
 export interface ModelRegistry {
+  providers: Provider[];
   entries: ModelEntry[];
   defaultModelId?: string;
 }
@@ -22,13 +35,20 @@ export function resolveModel(
   thinkingLevel?: ModelConfig['thinkingLevel']
 ): ModelConfig | undefined {
   const entry = registry.entries.find((e) => e.id === modelId);
-  if (!entry) return undefined;
+  const provider = registry.providers.find((p) => p.id === entry?.providerId);
+  if (!entry || !provider) return undefined;
   return {
     imageInput: entry.imageInput,
-    provider: entry.provider,
-    baseUrl: entry.baseUrl,
-    apiKey: entry.apiKey,
+    provider: provider.kind,
+    baseUrl: provider.baseUrl,
+    apiKey: provider.apiKey,
     model: entry.model,
-    thinkingLevel,
+    contextWindow: entry.contextWindow,
+    maxTokens: entry.maxTokens,
+    reasoningEfforts: entry.reasoningEfforts,
+    defaultEffort: entry.defaultEffort,
+    // A strength the model does not support is dropped so the worker uses the model's default.
+    thinkingLevel:
+      thinkingLevel && entry.reasoningEfforts.includes(thinkingLevel) ? thinkingLevel : undefined,
   };
 }

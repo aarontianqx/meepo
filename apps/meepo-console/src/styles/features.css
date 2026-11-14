@@ -1351,8 +1351,14 @@ mark {
 
   .worker-row,
   .admin-row,
-  .sched-row {
+  .sched-row,
+  .provider-head {
     flex-wrap: wrap;
+  }
+
+  .provider-head > .row {
+    flex-basis: 100%;
+    justify-content: flex-end;
   }
 
   .worker-load {

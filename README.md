@@ -64,7 +64,7 @@ In the Feishu Developer Console:
 
 In a bound group, mentioning `@bot` in the main stream opens a dedicated thread session; subsequent replies inside an engaged thread require no mention, while replying to a main-stream message with `@bot` continues the group's main session. `/new` resets a private-chat or group-main session (group `/new` requires `@bot`). Use the streaming card's **停止** button or the console's **Stop** action to interrupt an active run.
 
-Seed environment variables (`MEEPO_FEISHU_APP_ID`, `MEEPO_FEISHU_APP_SECRET`, `MEEPO_DEFAULT_SPACE_ID` for a legacy channel; `MEEPO_MODELS` JSON array and `MEEPO_DEFAULT_MODEL_ID` for models) are imported once when empty; thereafter the database registries are authoritative.
+Seed environment variables (`MEEPO_FEISHU_APP_ID`, `MEEPO_FEISHU_APP_SECRET`, `MEEPO_DEFAULT_SPACE_ID` for a legacy channel; `MEEPO_MODELS` JSON array and `MEEPO_DEFAULT_MODEL_ID` for models) are imported once when empty; thereafter the database registries are authoritative. Model seed entries keep a flat form (`id`, `provider`, `baseUrl`, `apiKey`, `model`); entries that share `baseUrl`, `apiKey` and `provider` are grouped under one provider. An optional `imageInput` is kept; context window, output limit, thinking efforts and (when omitted) image support are suggested from the model name and can be edited in the Console.
 
 ## Worker configuration
 
