@@ -66,8 +66,9 @@ for (const file of files) {
   }
 
   const linkRe = /\[[^\]]+\]\(([^)]+)\)/g;
+  const linkScan = clean.replace(/(`+)[^`\n]*?\1/g, 'code');
   let match;
-  while ((match = linkRe.exec(clean)) !== null) {
+  while ((match = linkRe.exec(linkScan)) !== null) {
     const href = match[1].trim();
     if (/^(https?:|mailto:)/.test(href)) continue;
 
