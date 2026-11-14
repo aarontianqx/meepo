@@ -19,7 +19,7 @@ import {
 } from '@meepo/protocol';
 
 import type { DispatchCommitter } from './dispatch-committer.js';
-import { conflict, notFound, validation } from '../errors.js';
+import { conflict, notFound, NoOnlineWorkerError, validation } from '../errors.js';
 import { resolveModel, type ModelRegistry } from '../models/model-registry.js';
 import type { RunRepository } from '../runs/run-repository.js';
 import type { SessionRepository } from '../sessions/session-repository.js';
@@ -399,7 +399,7 @@ export class DispatchService {
       // Binding is placement, not capacity: any online, enrolled, tag-matched
       // worker is eligible; the turn queues at the worker.
       workerId = await this.pickSessionWorker(space);
-      if (!workerId) throw validation(`No online worker enrolled for space ${space.id}`);
+      if (!workerId) throw new NoOnlineWorkerError(space.id);
     }
     const expected = { ...session };
     session.boundWorkerId = workerId;

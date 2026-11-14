@@ -15,23 +15,32 @@ import { MemorySessionRepository } from '../../../store/memory/session-memory.js
 import { MemorySpaceRepository } from '../../../store/memory/space-memory.js';
 import { MemoryTicketRepository } from '../../../store/memory/ticket-memory.js';
 import { MemoryWorkerRepository } from '../../../store/memory/worker-memory.js';
-import type { FeishuClient, ReplyResult } from '../feishu-client.js';
-import { FeishuGateway } from '../feishu-gateway.js';
+import { NoOnlineWorkerError } from '../../../domain/errors.js';
+import type { FeishuClient, FeishuMessageEvent, ReplyResult } from '../feishu-client.js';
+import { FeishuGateway, normalizeMessage } from '../feishu-gateway.js';
 
 const BOT = 'ou_bot';
 const MODEL = { modelId: 'm' };
 
 class FakeFeishuClient implements FeishuClient {
   failNextReply = false;
-  readonly replies: { messageId: string; text: string; opts?: { replyInThread?: boolean } }[] = [];
+  readonly replies: {
+    messageId: string;
+    text: string;
+    opts?: { replyInThread?: boolean; uuid?: string };
+  }[] = [];
+  findReplyCalls = 0;
   /** thread_id handed back for reply_in_thread prewarms */
   prewarmThreadId = 'omt_prewarm';
   threadHistory: import('../feishu-client.js').ThreadHistoryMessage[] = [];
+  readonly messages = new Map<string, { sender: string; text: string; chatId: string }>();
+  readonly userNames = new Map<string, string>();
+  recentMessages: FeishuMessageEvent[] = [];
 
   async replyText(
     messageId: string,
     text: string,
-    opts?: { replyInThread?: boolean }
+    opts?: { replyInThread?: boolean; uuid?: string }
   ): Promise<ReplyResult> {
     if (this.failNextReply) {
       this.failNextReply = false;
@@ -57,6 +66,25 @@ class FakeFeishuClient implements FeishuClient {
 
   async getChatName(): Promise<string> {
     return 'oc_group';
+  }
+
+  async getMessage(messageId: string) {
+    return this.messages.get(messageId);
+  }
+
+  async listRecentMessages(): Promise<FeishuMessageEvent[]> {
+    return this.recentMessages;
+  }
+
+  async getUserName(openId: string): Promise<string> {
+    return this.userNames.get(openId) ?? openId;
+  }
+
+  async findReply(): Promise<ReplyResult | undefined> {
+    this.findReplyCalls++;
+    return this.replies.some((reply) => reply.text === '正在处理，请稍候…')
+      ? { messageId: 'om_reply', threadId: this.prewarmThreadId }
+      : undefined;
   }
 }
 
@@ -129,10 +157,12 @@ describe('FeishuGateway', () => {
   let gateway: FeishuGateway;
   let sessionService: SessionService;
   let runs: MemoryRunRepository;
+  let errors: unknown[];
   const inbox = new Map<string, InboundMessage>();
 
   beforeEach(async () => {
     inbox.clear();
+    errors = [];
     const spaces = new MemorySpaceRepository();
     const sessions = new MemorySessionRepository();
     const sessionEvents = new MemorySessionEventRepository();
@@ -190,6 +220,7 @@ describe('FeishuGateway', () => {
       runs,
       botOpenId: BOT,
       defaultSpaceId: 'sp_default',
+      onError: (error) => errors.push(error),
     });
   });
 
@@ -381,5 +412,266 @@ describe('FeishuGateway', () => {
     await gateway.handleInbound(message);
     expect(sender.dispatches()).toHaveLength(1);
     expect(client.replies).toHaveLength(1);
+  });
+
+  it('attributes turns to the resolved display name and keeps the open_id', async () => {
+    client.userNames.set('ou_user', 'Alice');
+    await gateway.handleInbound(makeMsg({ mentionedOpenIds: [BOT], text: 'hi' }));
+    expect(sender.dispatches()[0].prompt).toContain('sender="Alice" open_id="ou_user"');
+  });
+
+  it('quotes an explicit reply target', async () => {
+    client.messages.set('om_target', { sender: 'Bob', text: 'original words', chatId: 'oc_group' });
+    await gateway.handleInbound(
+      makeMsg({ mentionedOpenIds: [BOT], rootId: 'om_target', parentId: 'om_target', text: 'ok' })
+    );
+    expect(sender.dispatches()[0].prompt).toContain('original words');
+  });
+
+  it('answers unsupported message types in private chats with a notice instead of a turn', async () => {
+    await gateway.handleInbound(
+      makeMsg({ chatType: 'p2p', chatId: 'oc_p2p', text: '', unsupportedType: 'file' })
+    );
+    expect(sender.dispatches()).toHaveLength(0);
+    expect(client.replies).toHaveLength(1);
+    expect(client.replies[0].text).toContain('「file」');
+    // A redelivered event must not produce a second notice on Feishu's side.
+    expect(client.replies[0].opts?.uuid).toBeTruthy();
+  });
+
+  it('forwards post images with the turn', async () => {
+    await gateway.handleInbound(
+      makeMsg({
+        chatType: 'p2p',
+        chatId: 'oc_p2p',
+        text: 'look [Image]',
+        images: [{ messageId: 'om_1', fileKey: 'img_1' }],
+      })
+    );
+    expect(sender.dispatches()[0].images).toEqual([{ messageId: 'om_1', fileKey: 'img_1' }]);
+  });
+
+  describe('backfill after downtime', () => {
+    const textEvent = (id: string, text: string, extra?: Partial<FeishuMessageEvent['message']>) =>
+      makeEvent({
+        message_id: id,
+        content: JSON.stringify({ text }),
+        mentions: text.includes('@_user_1')
+          ? [{ key: '@_user_1', name: 'bot', id: { open_id: BOT } }]
+          : undefined,
+        ...extra,
+      });
+
+    it('answers missed @bot messages, skips chatter and commands, and does not repeat', async () => {
+      client.recentMessages = [
+        textEvent('om_missed', '@_user_1 missed question'),
+        textEvent('om_chatter', 'people talking'),
+        textEvent('om_new', '@_user_1 /new'),
+      ];
+
+      await gateway.backfill();
+      await gateway.backfill();
+
+      const dispatches = sender.dispatches();
+      expect(dispatches).toHaveLength(1);
+      expect(dispatches[0].prompt).toContain('missed question');
+      expect(client.replies.every((reply) => !reply.text.includes('/new'))).toBe(true);
+      expect(errors).toEqual([]);
+    });
+
+    it('answers missed messages of an engaged thread without a mention', async () => {
+      await gateway.handleInbound(makeMsg({ mentionedOpenIds: [BOT] }));
+      client.recentMessages = [
+        textEvent('om_late', 'follow up while down', { thread_id: 'omt_prewarm', root_id: 'om_1' }),
+      ];
+
+      await gateway.backfill();
+
+      expect(sender.dispatches()).toHaveLength(2);
+      expect(sender.dispatches()[1].prompt).toContain('follow up while down');
+    });
+  });
+
+  describe('when no worker is online', () => {
+    const offlineNotices = () =>
+      client.replies.filter((reply) => reply.text.includes('没有在线的 worker'));
+
+    it('tells a thread user once, retries quietly and processes the message on return', async () => {
+      sender.connected.delete('w1');
+      const message = makeMsg({ mentionedOpenIds: [BOT] });
+
+      await expect(gateway.handleInbound(message)).rejects.toBeInstanceOf(NoOnlineWorkerError);
+      await gateway.recover();
+      await gateway.recover();
+
+      expect(offlineNotices()).toHaveLength(1);
+      expect(offlineNotices()[0].opts?.replyInThread).toBe(true);
+      expect(errors).toEqual([]);
+      expect(sender.dispatches()).toHaveLength(0);
+
+      // Retries reuse the thread spawned by the first attempt instead of searching Feishu again.
+      expect(client.findReplyCalls).toBe(1);
+      expect(client.replies.filter((reply) => reply.text === '正在处理，请稍候…')).toHaveLength(1);
+
+      sender.connected.add('w1');
+      await gateway.recover();
+      expect(sender.dispatches()).toHaveLength(1);
+      expect(inbox.size).toBe(0);
+      expect(offlineNotices()).toHaveLength(1);
+    });
+
+    it('tells a private-chat user that the queued message waits for the worker', async () => {
+      sender.connected.delete('w1');
+      await gateway.handleInbound(makeMsg({ chatType: 'p2p', chatId: 'oc_p2p', text: 'hi' }));
+
+      expect(offlineNotices()).toHaveLength(1);
+      expect(offlineNotices()[0].opts?.replyInThread).toBe(false);
+      expect(sender.dispatches()).toHaveLength(0);
+    });
+  });
+});
+
+function makeEvent(
+  overrides: Partial<FeishuMessageEvent['message']> & { content: string }
+): FeishuMessageEvent {
+  return {
+    sender: { sender_id: { open_id: 'ou_user' }, sender_type: 'user' },
+    message: {
+      message_id: 'om_1',
+      chat_id: 'oc_group',
+      chat_type: 'group',
+      message_type: 'text',
+      ...overrides,
+    },
+  };
+}
+
+describe('normalizeMessage', () => {
+  const text = (value: string) => JSON.stringify({ text: value });
+
+  it('drops the implicit thread-root parent_id but keeps real quotes', () => {
+    const implicit = normalizeMessage(
+      makeEvent({
+        content: text('hi'),
+        thread_id: 'omt_1',
+        root_id: 'om_root',
+        parent_id: 'om_root',
+      })
+    );
+    expect(implicit).toMatchObject({ threadId: 'omt_1', rootId: 'om_root', parentId: undefined });
+
+    const quote = normalizeMessage(
+      makeEvent({
+        content: text('hi'),
+        thread_id: 'omt_1',
+        root_id: 'om_root',
+        parent_id: 'om_other',
+      })
+    );
+    expect(quote?.parentId).toBe('om_other');
+
+    const mainStreamReply = normalizeMessage(
+      makeEvent({ content: text('hi'), root_id: 'om_root', parent_id: 'om_root' })
+    );
+    expect(mainStreamReply?.parentId).toBe('om_root');
+  });
+
+  it('flattens post messages into text, mentions and images', () => {
+    const post = {
+      title: 'Report',
+      content: [
+        [
+          { tag: 'at', user_id: '@_user_1', user_name: 'ClawFox' },
+          { tag: 'text', text: ' please read ' },
+          { tag: 'a', text: 'the doc', href: 'https://example.com/doc' },
+        ],
+        [{ tag: 'img', image_key: 'img_a' }],
+        [{ tag: 'md', text: '**bold** <at user_id="@_user_1">ClawFox</at>' }],
+        [{ tag: 'code_block', language: 'TS', text: 'const a = 1;' }],
+      ],
+    };
+    const msg = normalizeMessage(
+      makeEvent({
+        message_type: 'post',
+        content: JSON.stringify(post),
+        mentions: [{ key: '@_user_1', name: 'ClawFox', id: { open_id: 'ou_bot' } }],
+      })
+    );
+
+    expect(msg?.mentionedOpenIds).toEqual(['ou_bot']);
+    expect(msg?.images).toEqual([{ messageId: 'om_1', fileKey: 'img_a' }]);
+    expect(msg?.text).toBe(
+      [
+        'Report',
+        '@ClawFox please read [the doc](https://example.com/doc)',
+        '[Image]',
+        '**bold** @ClawFox',
+        '```ts\nconst a = 1;\n```',
+      ].join('\n')
+    );
+  });
+
+  it("strips the bot's own mention but keeps other people's and bare mentions", () => {
+    const mentions = [
+      { key: '@_user_1', name: 'ClawFox', id: { open_id: 'ou_bot' } },
+      { key: '@_user_2', name: 'Alice', id: { open_id: 'ou_alice' } },
+    ];
+    const withText = normalizeMessage(
+      makeEvent({ content: text('@_user_1 ask @_user_2 about it'), mentions }),
+      'ou_bot'
+    );
+    expect(withText?.text).toBe('ask @Alice about it');
+    expect(withText?.mentionedOpenIds).toEqual(['ou_bot', 'ou_alice']);
+
+    const bare = normalizeMessage(makeEvent({ content: text('@_user_1'), mentions }), 'ou_bot');
+    expect(bare?.text).toBe('@ClawFox');
+
+    const unknownBot = normalizeMessage(makeEvent({ content: text('@_user_1 hi'), mentions }));
+    expect(unknownBot?.text).toBe('@ClawFox hi');
+  });
+
+  it('names post mentions that carry a real id instead of a mention key', () => {
+    const post = {
+      content: [
+        [
+          { tag: 'at', user_id: 'ou_alice', user_name: 'Alice' },
+          { tag: 'text', text: ' hi' },
+        ],
+      ],
+    };
+    const msg = normalizeMessage(
+      makeEvent({ message_type: 'post', content: JSON.stringify(post) })
+    );
+    expect(msg?.text).toBe('@Alice hi');
+  });
+
+  it('accepts post content wrapped in a locale key and rejects empty posts', () => {
+    const wrapped = normalizeMessage(
+      makeEvent({
+        message_type: 'post',
+        content: JSON.stringify({
+          zh_cn: { title: '', content: [[{ tag: 'text', text: 'hello' }]] },
+        }),
+      })
+    );
+    expect(wrapped?.text).toBe('hello');
+    expect(
+      normalizeMessage(
+        makeEvent({ message_type: 'post', content: JSON.stringify({ content: [] }) })
+      )
+    ).toBeNull();
+  });
+
+  it('marks unreadable message types instead of dropping them', () => {
+    const msg = normalizeMessage(
+      makeEvent({ message_type: 'file', content: JSON.stringify({ file_key: 'f' }) })
+    );
+    expect(msg).toMatchObject({ unsupportedType: 'file', text: '' });
+  });
+
+  it('rejects malformed bodies of readable types', () => {
+    expect(normalizeMessage(makeEvent({ content: 'not json' }))).toBeNull();
+    expect(normalizeMessage(makeEvent({ content: 'null' }))).toBeNull();
+    expect(normalizeMessage(makeEvent({ message_type: 'image', content: '{}' }))).toBeNull();
   });
 });

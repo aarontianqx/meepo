@@ -78,7 +78,7 @@ export class StreamProcessor {
       } else if (run.status === 'running' && run.work.kind === 'turn') {
         if (this.journal) {
           const interrupted = this.journal.TxInterrupt(run.id, 'worker_lost', this.now());
-          if (interrupted) this.renderInterrupted(interrupted);
+          if (interrupted) this.renderInterrupted(interrupted, 'worker_lost');
           continue;
         }
         run.status = 'failed';
@@ -91,13 +91,11 @@ export class StreamProcessor {
     return result;
   }
 
-  renderInterrupted(run: Run): void {
+  /** Tells the IM card why a run was cut short outside the worker's own event stream. */
+  renderInterrupted(run: Run, reason: 'stopped' | 'session_changed' | 'worker_lost'): void {
     const ref = refOfRun(run);
     if (ref)
-      this.renderHook?.(
-        { type: 'run_failed', runId: run.id, error: '执行已中断', code: 'interrupted' },
-        ref
-      );
+      this.renderHook?.({ type: 'run_failed', runId: run.id, error: reason, code: reason }, ref);
   }
 
   async renewLeases(workerId: string, ids: string[], durationMs: number): Promise<void> {

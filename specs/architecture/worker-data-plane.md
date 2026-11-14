@@ -40,7 +40,8 @@ Every session and ticket provides four local workspace tools rooted at the task'
 1. **`read`**: Reads local text/image files from the worker filesystem.
 2. **`write`**: Creates or overwrites local files (creating parent directories as needed).
 3. **`edit`**: Applies exact string-replacement edits with diff feedback.
-4. **`bash`**: Executes shell commands in a child process with streaming output and abort propagation (`SIGTERM`/process tree cancellation on `run.abort`). On ticket runs, subprocesses receive `MEEPO_IDEMPOTENCY_KEY=<ticketId>-<attempt>` in their environment.
+4. **`bash`**: Executes shell commands in a child process with streaming output and abort propagation (`SIGTERM`/process tree cancellation on `run.abort`). Subprocesses inherit the worker's environment **except** `MEEPO_*` variables (enrollment token, server URL, data paths); on ticket runs, subprocesses receive `MEEPO_IDEMPOTENCY_KEY=<ticketId>-<attempt>`.
+   _Rationale: Any participant in a bound chat can ask the agent to inspect environment variables; stripping `MEEPO_*` keeps worker enrollment credentials unreachable from tool subprocesses._
 
 ### Tool Output Bounding
 
@@ -58,7 +59,7 @@ Every local, server-backed, and MCP tool is wrapped by an output budget guard be
 
 Worker owners configure external MCP servers in `worker.toml` / `.json` under `[mcp.<server>]` using either `command` + `args` + `env` (stdio) or `url` + `headers` (Streamable HTTP):
 
-- Server names must match `[a-zA-Z0-9_-]+`; discovered tools are exposed as `mcp__<server>__<normalizedToolName>` (colliding normalized names fail reload). Connection timeout defaults to `30s`; call timeout defaults to `timeoutSeconds ?? 60s` and propagates run `AbortSignal`. On ticket runs, `callTool` attaches `_meta: { meepoIdempotencyKey: "<ticketId>-<attempt>" }`.
+- Server names must match `[a-zA-Z0-9_-]+`; discovered tools are exposed as `mcp__<server>__<normalizedToolName>` (colliding normalized names fail reload). Stdio servers inherit the worker host environment with `MEEPO_*` variables stripped, overlaid with any explicit `[mcp.<server>.env]` entries. Connection timeout defaults to `30s`; call timeout defaults to `timeoutSeconds ?? 60s` and propagates run `AbortSignal`. On ticket runs, `callTool` attaches `_meta: { meepoIdempotencyKey: "<ticketId>-<attempt>" }`.
 - **Reference-counted generations**: Watching `worker.toml` (2-second poll) reloads `mcp` and `modelDefaults` atomically. If any MCP server fails validation or connection, the new generation closes and the previous generation remains active. Newly started tickets and cold-started sessions acquire a lease on the latest generation; warm sessions hold their existing generation lease until evicted or closed, after which zero-reference old generations close their connections cleanly.
 
 ## 4. Model Resolution and Context Compaction

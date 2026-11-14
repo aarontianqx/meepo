@@ -16,3 +16,11 @@ export const validation = (message: string): DomainError => new DomainError('val
 export const conflict = (message: string): DomainError => new DomainError('conflict', message);
 export const unauthorized = (message: string): DomainError =>
   new DomainError('unauthorized', message);
+
+/** No enrolled, connected worker can host a new thread session right now; callers retry later. */
+export class NoOnlineWorkerError extends DomainError {
+  constructor(spaceId: string) {
+    super('validation', `No online worker enrolled for space ${spaceId}`);
+    this.name = 'NoOnlineWorkerError';
+  }
+}

@@ -40,6 +40,8 @@ _Rationale: Unifying reminders, cron wakeups, interactive chat turns, and async 
 - **Deterministic jitter**: Every `cron` schedule adds a deterministic offset derived from `hash(scheduleId) % floor(min(0.1 × periodMs, 15 minutes))` to its ideal fire instants, spreading synchronized schedules (such as `0 9 * * *`) across workers without losing predictability.
 - **Missed-fire coalescing**: All jittered fire instants falling in `(lastFiredAt ?? createdAt, now]` collapse into a **single** fire carrying `coalescedCount` (bounded at `10,000` iterations).
 - **Atomic commitment (`TxFire`)**: Advancing `Schedule.lastFiredAt`/`status`, recording `ScheduleFire`, and inserting the resulting `Ticket` or queued `Turn` commit in one database transaction. When the target session is busy or its bound worker is offline, the `Turn` queues durably (`wait`) rather than dropping or interrupting mid-turn.
+- **Agent-created one-shots must lie in the future**: `CronCreate` and scheduled `TicketCreate` reject an `at` that is not after the server clock, and the error states the current server time (ISO and epoch ms) so the model can retry. Console/HTTP creation keeps the catch-up semantics above.
+  _Rationale: models cannot see the clock and compute epoch milliseconds badly; a silently accepted past time fires at once and looks like success._
 - **Attribution**: Schedules created via Console HTTP record the caller's `userId` as `createdByUserId`; schedules created by agent tools record `Run.initiatorIds[0]` (or `'agent'` when created during a machine turn).
 
 ## 3. Run State Machine

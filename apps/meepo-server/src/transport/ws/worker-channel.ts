@@ -26,6 +26,7 @@ import {
   type CompactionRecordParams,
   type TicketCreateParams,
   type TicketCreateResult,
+  type Timing,
   type WorkerChannelDownstream,
   type WorkerHeartbeatPayload,
   type WorkerRegisterPayload,
@@ -369,6 +370,7 @@ export class WorkerChannelHandler implements WorkerSender {
 
   /** cron.create: schedule a wakeup (`resume_session`) for the calling session. */
   private async onCronCreate(params: CronCreateParams, authorId?: string) {
+    assertFutureTiming(params.timing);
     const session = await this.deps.sessionService.getSession(params.sessionId);
     const schedule = await this.deps.schedulerService.createSchedule(
       {
@@ -390,6 +392,7 @@ export class WorkerChannelHandler implements WorkerSender {
     params: TicketCreateParams,
     authorId?: string
   ): Promise<TicketCreateResult> {
+    assertFutureTiming(params.timing);
     const session = await this.deps.sessionService.getSession(params.sessionId);
     if (!params.objective.trim()) throw validation('Ticket objective must not be empty');
     if (!params.timing) {
@@ -453,6 +456,20 @@ function parseFrame(raw: Buffer): RpcFrame | undefined {
     return parsed as RpcFrame;
   } catch {
     return undefined;
+  }
+}
+
+/**
+ * Models compute epoch milliseconds badly and cannot see the clock, so an
+ * agent-created one-shot in the past would silently fire at once. The error
+ * carries the server time so the model can retry correctly.
+ */
+function assertFutureTiming(timing: Timing | undefined): void {
+  const now = Date.now();
+  if (timing?.kind === 'at' && timing.at <= now) {
+    throw validation(
+      `Schedule time ${timing.at} is in the past. Server time is now ${new Date(now).toISOString()} (epoch ms ${now}); use an "at" later than that.`
+    );
   }
 }
 

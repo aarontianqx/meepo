@@ -15,7 +15,7 @@ export function buildBasePrompt(workDir: string, contribution?: string, session 
     contribution ?? 'You are Meepo, a general-purpose collaborative assistant.',
     `Your isolated working directory is ${workDir}.`,
     session
-      ? 'CronCreate/CronList/CronDelete manage future wakeups of this session. TicketCreate creates independent work with a self-contained objective.'
+      ? "CronCreate/CronList/CronDelete manage future wakeups of this session. TicketCreate creates independent work with a self-contained objective. Your reply is delivered to this session's chat window automatically, including after a scheduled wakeup or a ticket receipt; do not send it through other tools (messaging CLIs, APIs) unless the user asks you to contact somewhere else."
       : 'Complete the objective independently and summarize the outcome.',
   ].join('\n\n');
 }

@@ -1,8 +1,10 @@
 import type { InboundInbox } from '../../domain/im/inbound-inbox.js';
 import { createHash } from 'node:crypto';
 
+import type { Session } from '@meepo/core';
 import { formatQuotedMessage } from '@meepo/protocol';
-import type { DispatchService } from '../../domain/dispatch/dispatch-service.js';
+import type { DispatchOutcome, DispatchService } from '../../domain/dispatch/dispatch-service.js';
+import { NoOnlineWorkerError } from '../../domain/errors.js';
 import {
   decideInbound,
   GROUP_MAIN_SUB_ID,
@@ -16,10 +18,13 @@ import type { TranscriptService } from '../../domain/sessions/transcript-service
 import type { SpaceRepository } from '../../domain/spaces/space-repository.js';
 import { DedupCache } from './dedup-cache.js';
 import type { FeishuCardActionEvent, FeishuClient, FeishuMessageEvent } from './feishu-client.js';
+import { parsePostContent } from './post-content.js';
 
 const MESSAGE_DEDUP_TTL_MS = 30 * 60 * 1000;
 const PREWARM_TEXT = '正在处理，请稍候…';
+const WORKER_OFFLINE_TEXT = '当前没有在线的 worker，消息已排队，worker 恢复后会自动处理。';
 const NEW_COMMAND = '/new';
+const BACKFILL_WINDOW_MS = 24 * 60 * 60 * 1000;
 const THREAD_SEED_LIMIT = 50;
 
 export interface FeishuGatewayDeps {
@@ -50,6 +55,8 @@ export class FeishuGateway {
   private readonly dedup: DedupCache;
   /** windowId -> sessionId for every window this gateway has engaged. */
   private readonly windowSessions = new Map<string, string>();
+  /** Messages already told that no worker is online; their retries stay quiet. */
+  private readonly offlineNoticed = new Set<string>();
   private readonly onError: (err: unknown) => void;
 
   constructor(private readonly deps: FeishuGatewayDeps) {
@@ -60,11 +67,36 @@ export class FeishuGateway {
   /** Entry point for the raw WS event. Never throws. */
   async handleEvent(event: FeishuMessageEvent): Promise<void> {
     try {
-      const msg = normalizeMessage(event);
+      const msg = normalizeMessage(event, this.deps.botOpenId);
       if (!msg) return;
       await this.handleInbound(msg);
     } catch (err: unknown) {
-      this.onError(err);
+      this.report(err);
+    }
+  }
+
+  /**
+   * Re-delivers group messages from the last 24 hours that arrived while the
+   * server was down. The normal pipeline filters them: already processed
+   * messages are deduplicated, and only @bot or engaged-thread messages
+   * dispatch. Commands and unreadable types are not replayed.
+   */
+  async backfill(): Promise<void> {
+    const since = Date.now() - BACKFILL_WINDOW_MS;
+    for (const chatId of (await this.chatSpaceMap()).keys()) {
+      try {
+        for (const event of (await this.deps.client.listRecentMessages?.(chatId, since)) ?? []) {
+          const msg = normalizeMessage(event, this.deps.botOpenId);
+          if (!msg || msg.unsupportedType || isNewCommand(msg)) continue;
+          try {
+            await this.handleInbound(msg);
+          } catch (err: unknown) {
+            this.report(err);
+          }
+        }
+      } catch (err: unknown) {
+        this.report(err);
+      }
     }
   }
 
@@ -73,7 +105,7 @@ export class FeishuGateway {
       try {
         await this.handleInbound(message);
       } catch (error) {
-        this.onError(error);
+        this.report(error);
       }
     }
   }
@@ -107,9 +139,8 @@ export class FeishuGateway {
     const spaceId = msg.chatType === 'p2p' ? this.deps.defaultSpaceId : spaceByChat.get(msg.chatId);
     if (spaceId && msg.threadId) await this.warmThreadWindow(spaceId, msg.chatId, msg.threadId);
 
-    const command = msg.text.replace(/@[^\s]+/g, '').trim();
     if (
-      command === NEW_COMMAND &&
+      isNewCommand(msg) &&
       spaceId &&
       (msg.chatType === 'p2p' || msg.mentionedOpenIds.includes(this.deps.botOpenId))
     ) {
@@ -127,8 +158,56 @@ export class FeishuGateway {
       seenMessage: (messageId) => this.dedup.has(messageId),
     });
     if (decision.action === 'ignore') return;
-    await this.executeDispatch(msg, decision);
+    if (msg.unsupportedType) {
+      await this.deps.client.replyText(
+        msg.messageId,
+        `暂不支持「${msg.unsupportedType}」类型的消息，请改用文字、图片或富文本。`,
+        { uuid: this.idempotencyKey(msg.messageId, 'unsupported') }
+      );
+      this.dedup.add(msg.messageId);
+      return;
+    }
+    let outcome: DispatchOutcome;
+    try {
+      outcome = await this.executeDispatch(msg, decision);
+    } catch (err: unknown) {
+      // The inbox keeps the message pending and the recover loop retries it.
+      if (err instanceof NoOnlineWorkerError && !this.offlineNoticed.has(msg.messageId)) {
+        this.offlineNoticed.add(msg.messageId);
+        await this.noticeWorkerOffline(msg, decision.sessionKind);
+      }
+      throw err;
+    }
+    this.offlineNoticed.delete(msg.messageId);
+    if (outcome.queued) await this.noticeWorkerOffline(msg, decision.sessionKind);
     this.dedup.add(msg.messageId);
+  }
+
+  /** Retried "no worker" failures are an expected waiting state, not errors to log every tick. */
+  private report(err: unknown): void {
+    if (!(err instanceof NoOnlineWorkerError)) this.onError(err);
+  }
+
+  private async noticeWorkerOffline(
+    msg: InboundMessage,
+    sessionKind: 'main' | 'thread'
+  ): Promise<void> {
+    try {
+      await this.deps.client.replyText(msg.messageId, WORKER_OFFLINE_TEXT, {
+        // Thread messages already live in their thread; only a fresh main-stream mention opens one.
+        replyInThread: sessionKind === 'thread' && !msg.threadId,
+        uuid: this.idempotencyKey(msg.messageId, 'worker-offline'),
+      });
+    } catch (err: unknown) {
+      this.onError(err);
+    }
+  }
+
+  private idempotencyKey(messageId: string, purpose: string): string {
+    return createHash('sha256')
+      .update(`${this.deps.channelId}:${messageId}:${purpose}`)
+      .digest('hex')
+      .slice(0, 40);
   }
 
   /** Handles `card.action.trigger`: only the run's initiating users may abort it. */
@@ -220,11 +299,20 @@ export class FeishuGateway {
   private async executeDispatch(
     msg: InboundMessage,
     decision: Extract<InboundDecision, { action: 'dispatch' }>
-  ): Promise<void> {
+  ): Promise<DispatchOutcome> {
     let threadId: string;
     let anchorMessageId: string;
     let prewarmMessageId: string | undefined;
-    if (decision.threadRef.kind === 'prewarm') {
+    const spawned =
+      decision.threadRef.kind === 'prewarm'
+        ? await this.spawnedSession(decision.windowId)
+        : undefined;
+    if (spawned) {
+      // A retry after a failed dispatch: the thread and prewarm reply already exist.
+      threadId = spawned.threadId;
+      anchorMessageId = spawned.anchorMessageId ?? msg.messageId;
+      prewarmMessageId = spawned.prewarmMessageId;
+    } else if (decision.threadRef.kind === 'prewarm') {
       const previous = await this.deps.client.findReply?.({
         chatId: msg.chatId,
         parentId: msg.messageId,
@@ -235,10 +323,7 @@ export class FeishuGateway {
         previous ??
         (await this.deps.client.replyText(msg.messageId, PREWARM_TEXT, {
           replyInThread: true,
-          uuid: createHash('sha256')
-            .update(`${this.deps.channelId}:${msg.messageId}:prewarm`)
-            .digest('hex')
-            .slice(0, 40),
+          uuid: this.idempotencyKey(msg.messageId, 'prewarm'),
         }));
       threadId = reply.threadId ?? msg.messageId;
       anchorMessageId = msg.messageId;
@@ -272,14 +357,14 @@ export class FeishuGateway {
           prompt
         );
     }
-    await this.deps.dispatchService.dispatchSessionTurn({
+    return this.deps.dispatchService.dispatchSessionTurn({
       sessionId,
       ingress: { channelId: this.deps.channelId ?? 'feishu', messageId: msg.messageId },
       prompt,
       images: msg.images,
       source: { kind: 'user_message', messageId: msg.messageId },
       delivery: 'wait',
-      author: msg.senderName,
+      author: (await this.deps.client.getUserName?.(msg.senderOpenId)) ?? msg.senderName,
       authorOpenId: msg.senderOpenId,
       chatLabel: await this.chatLabelOf(msg),
     });
@@ -311,6 +396,14 @@ export class FeishuGateway {
     } catch (err: unknown) {
       this.onError(err);
     }
+  }
+
+  /** The open session this gateway already created for a prewarm window, if any. */
+  private async spawnedSession(windowId: string): Promise<Session | undefined> {
+    const id = this.windowSessions.get(windowId);
+    if (!id) return undefined;
+    const session = await this.deps.sessionService.getSession(id).catch(() => undefined);
+    return session && session.status !== 'closed' ? session : undefined;
   }
 
   private async resolveSession(
@@ -365,49 +458,88 @@ export class FeishuGateway {
   }
 }
 
+function isNewCommand(msg: InboundMessage): boolean {
+  return msg.text.replace(/@[^\s]+/g, '').trim() === NEW_COMMAND;
+}
+
 /** Normalizes a raw Feishu event into an {@link InboundMessage}; null when not actionable. */
-export function normalizeMessage(event: FeishuMessageEvent): InboundMessage | null {
+export function normalizeMessage(
+  event: FeishuMessageEvent,
+  botOpenId?: string
+): InboundMessage | null {
   const { message } = event;
   if (event.sender?.sender_type && event.sender.sender_type !== 'user') return null;
   const senderOpenId = event.sender?.sender_id?.open_id;
   if (!senderOpenId) return null;
   if (message.chat_type !== 'p2p' && message.chat_type !== 'group') return null;
-  if (!['text', 'image'].includes(message.message_type)) return null;
 
-  let text: string;
-  let imageKey: string | undefined;
-  try {
-    const content: unknown = JSON.parse(message.content);
-    if (message.message_type === 'image') {
-      imageKey = (content as { image_key?: string }).image_key;
-      if (!imageKey) return null;
-      text = '[Image]';
-    } else text = (content as { text?: unknown }).text as string;
-  } catch {
-    return null;
-  }
-  if (typeof text !== 'string') return null;
+  const body = readBody(message.message_type, message.content);
+  if (!body) return null;
+  let text = body.text;
+  let named = body.text;
 
   const mentionedOpenIds: string[] = [];
   for (const mention of message.mentions ?? []) {
     if (mention.key) {
       const readable = mention.name ? `@${mention.name}` : mention.key;
-      text = text.split(mention.key).join(readable);
+      named = named.split(mention.key).join(readable);
+      // The bot's own mention only addresses it; keeping the name would clutter titles and prompts.
+      const isBot = botOpenId !== undefined && mention.id?.open_id === botOpenId;
+      text = text.split(mention.key).join(isBot ? '' : readable);
     }
     if (mention.id?.open_id) mentionedOpenIds.push(mention.id.open_id);
   }
+  // A bare "@bot" keeps its name so the turn still has a prompt.
+  text = text.trim() || named.trim();
 
   return {
-    images: imageKey ? [{ messageId: message.message_id, fileKey: imageKey }] : undefined,
+    images: body.imageKeys.length
+      ? body.imageKeys.map((fileKey) => ({ messageId: message.message_id, fileKey }))
+      : undefined,
     messageId: message.message_id,
     chatId: message.chat_id,
     chatType: message.chat_type,
     threadId: message.thread_id,
     rootId: message.root_id,
-    parentId: message.parent_id,
+    // Feishu stamps every thread message with parent_id = thread root; that is not a user quote.
+    parentId:
+      message.thread_id && message.parent_id === message.root_id ? undefined : message.parent_id,
     senderOpenId,
     senderName: senderOpenId,
-    text: text.trim(),
+    text,
     mentionedOpenIds,
+    unsupportedType: body.unsupported ? message.message_type : undefined,
   };
+}
+
+interface MessageBody {
+  text: string;
+  imageKeys: string[];
+  unsupported?: true;
+}
+
+/** Reads a message's content by type (wire input); null when a readable type has an invalid body. */
+function readBody(type: string, rawContent: string): MessageBody | null {
+  if (type !== 'text' && type !== 'image' && type !== 'post') {
+    return { text: '', imageKeys: [], unsupported: true };
+  }
+  let content: unknown;
+  try {
+    content = JSON.parse(rawContent);
+  } catch {
+    return null;
+  }
+  if (!content || typeof content !== 'object') return null;
+  if (type === 'post') {
+    const post = parsePostContent(content);
+    return post.text || post.imageKeys.length ? post : null;
+  }
+  if (type === 'image') {
+    const imageKey = (content as { image_key?: unknown }).image_key;
+    return typeof imageKey === 'string' && imageKey
+      ? { text: '[Image]', imageKeys: [imageKey] }
+      : null;
+  }
+  const text = (content as { text?: unknown }).text;
+  return typeof text === 'string' ? { text, imageKeys: [] } : null;
 }

@@ -1,4 +1,5 @@
 import { toolContext } from './tool-context.js';
+import { withoutWorkerVariables } from './tool-env.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
@@ -37,7 +38,7 @@ export class McpManager {
           ? new StdioClientTransport({
               command: c.command,
               args: c.args,
-              env: { ...(process.env as Record<string, string>), ...c.env },
+              env: { ...(withoutWorkerVariables(process.env) as Record<string, string>), ...c.env },
               stderr: 'inherit',
             })
           : new StreamableHTTPClientTransport(new URL(c.url!), {

@@ -1,6 +1,11 @@
 import * as lark from '@larksuiteoapi/node-sdk';
 
 import type { FeishuConfig } from '../../config.js';
+import { parsePostContent } from './post-content.js';
+
+const USER_NAME_TTL_MS = 60 * 60 * 1000;
+const USER_NAME_MISS_TTL_MS = 5 * 60 * 1000;
+const MAX_RECENT_MESSAGE_PAGES = 20;
 
 export interface ReplyResult {
   messageId: string;
@@ -73,11 +78,16 @@ export interface FeishuClient {
   getMessage?(
     messageId: string
   ): Promise<{ sender: string; text: string; chatId: string } | undefined>;
+  /** Group messages created since `since` (epoch ms), oldest first, shaped like live events. */
+  listRecentMessages?(chatId: string, since: number): Promise<FeishuMessageEvent[]>;
+  /** Display name of a user by open_id; the open_id itself when it cannot be resolved. */
+  getUserName?(openId: string): Promise<string>;
 }
 
 /** lark.Client adapter for {@link FeishuClient}. */
 export class LarkFeishuClient implements FeishuClient {
   private readonly chatNames = new Map<string, string>();
+  private readonly userNames = new Map<string, { name: string; expiresAt: number }>();
 
   constructor(private readonly client: lark.Client) {}
 
@@ -218,18 +228,13 @@ export class LarkFeishuClient implements FeishuClient {
     const items = res.data?.items ?? [];
     const out: ThreadHistoryMessage[] = [];
     for (const item of items.slice(-limit)) {
-      let content: string;
-      try {
-        const body = JSON.parse(item.body?.content ?? '{}') as { text?: string };
-        content = body.text ?? '';
-      } catch {
-        continue;
-      }
+      const content = messageText(item);
       if (!content.trim()) continue;
       const isBot = item.sender?.sender_type === 'app';
+      const senderId = item.sender?.id;
       out.push({
         messageId: item.message_id ?? '',
-        authorName: item.sender?.sender_name ?? item.sender?.id ?? 'unknown',
+        authorName: senderId && !isBot ? await this.getUserName(senderId) : (senderId ?? 'unknown'),
         content: content.trim(),
         timestamp: Number(item.create_time ?? 0) || Date.now(),
         isBot,
@@ -244,17 +249,79 @@ export class LarkFeishuClient implements FeishuClient {
     const res = await this.client.im.v1.message.get({ path: { message_id: messageId } });
     if (res.code) return undefined;
     const item = res.data?.items?.[0];
-    if (!item || item.msg_type !== 'text') return undefined;
-    try {
-      const content = JSON.parse(item.body?.content ?? '{}') as { text?: string };
-      return {
-        sender: item.sender?.sender_name ?? item.sender?.id ?? 'unknown',
-        text: content.text ?? '',
-        chatId: item.chat_id ?? '',
-      };
-    } catch {
-      return undefined;
+    if (!item || (item.msg_type !== 'text' && item.msg_type !== 'post')) return undefined;
+    const senderId = item.sender?.id;
+    return {
+      sender:
+        senderId && item.sender?.sender_type !== 'app'
+          ? await this.getUserName(senderId)
+          : (senderId ?? 'unknown'),
+      text: messageText(item),
+      chatId: item.chat_id ?? '',
+    };
+  }
+
+  async listRecentMessages(chatId: string, since: number): Promise<FeishuMessageEvent[]> {
+    const events: FeishuMessageEvent[] = [];
+    let pageToken: string | undefined;
+    for (let page = 0; page < MAX_RECENT_MESSAGE_PAGES; page++) {
+      const res = await this.client.im.v1.message.list({
+        params: {
+          container_id_type: 'chat',
+          container_id: chatId,
+          start_time: String(Math.floor(since / 1000)),
+          sort_type: 'ByCreateTimeAsc',
+          page_size: 50,
+          page_token: pageToken,
+        },
+      });
+      if (res.code) throw new Error(`im message.list failed: ${res.code} ${res.msg}`);
+      for (const item of res.data?.items ?? []) {
+        if (item.deleted || !item.message_id || !item.msg_type || !item.sender?.id) continue;
+        events.push({
+          sender: { sender_id: { open_id: item.sender.id }, sender_type: item.sender.sender_type },
+          message: {
+            message_id: item.message_id,
+            chat_id: chatId,
+            chat_type: 'group',
+            thread_id: item.thread_id,
+            root_id: item.root_id,
+            parent_id: item.parent_id,
+            message_type: item.msg_type,
+            content: item.body?.content ?? '',
+            mentions: item.mentions?.map((m) => ({
+              key: m.key,
+              name: m.name,
+              id: { open_id: m.id },
+            })),
+          },
+        });
+      }
+      if (!res.data?.has_more) break;
+      pageToken = res.data.page_token;
     }
+    return events;
+  }
+
+  /** Resolves a user's display name (needs the contact read scope); caches misses briefly. */
+  async getUserName(openId: string): Promise<string> {
+    const cached = this.userNames.get(openId);
+    if (cached && cached.expiresAt > Date.now()) return cached.name;
+    let name: string | undefined;
+    try {
+      const res = await this.client.contact.v3.user.get({
+        path: { user_id: openId },
+        params: { user_id_type: 'open_id' },
+      });
+      name = res.data?.user?.name || undefined;
+    } catch {
+      // Missing scope or user outside the app's visibility: keep the open_id.
+    }
+    this.userNames.set(openId, {
+      name: name ?? openId,
+      expiresAt: Date.now() + (name ? USER_NAME_TTL_MS : USER_NAME_MISS_TTL_MS),
+    });
+    return name ?? openId;
   }
 
   /** Resolves a chat's display name with a small in-process cache (falls back to the id). */
@@ -317,4 +384,30 @@ export function startFeishuWs(
   });
   wsClient.start({ eventDispatcher });
   return wsClient;
+}
+
+export interface ReadableItem {
+  msg_type?: string;
+  body?: { content?: string };
+  mentions?: { key: string; name: string }[];
+}
+
+/** Plain text of a fetched `text` or `post` message with mention keys replaced by names; '' for anything else. */
+export function messageText(item: ReadableItem): string {
+  let content: { text?: string };
+  try {
+    content = JSON.parse(item.body?.content ?? '{}') as { text?: string };
+  } catch {
+    return '';
+  }
+  let text =
+    item.msg_type === 'post'
+      ? parsePostContent(content).text
+      : item.msg_type === 'text'
+        ? (content.text ?? '')
+        : '';
+  for (const mention of item.mentions ?? []) {
+    text = text.split(mention.key).join(mention.name ? `@${mention.name}` : mention.key);
+  }
+  return text;
 }

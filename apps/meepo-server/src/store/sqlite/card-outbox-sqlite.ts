@@ -71,6 +71,9 @@ export class SqliteCardOutbox implements CardOutbox {
       if (run.status === 'failed') {
         p.state = 'failed';
         p.failure = run.terminalReason ?? 'failed';
+        for (const tool of Object.values(p.tools)) {
+          if (tool.state === 'running') tool.state = 'failed';
+        }
       }
       if (run.status === 'completed') p.state = 'completed';
       p.dirty = true;

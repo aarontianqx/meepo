@@ -10,7 +10,7 @@ An IM **window** is addressed as `windowId = {channelId}:{chatId}:{subId}`. At m
 - **Group main stream (`group`, `subId = '_group'`)**: `kind = 'main'`. Long-lived conversation in the group's main timeline. Answering a **reply** message in the main stream that `@mentions` the bot continues this `main` session directly without spawning a thread. Supports `@bot /new`.
 - **Group thread (`group`, `subId = threadId`)**: `kind = 'thread'`. Dedicated per-topic session for focused multi-turn tasks (such as debugging or code changes).
   - A fresh `@bot` message in the group main stream (not a reply) sends a temporary prewarm reply (`正在处理，请稍候…`) with `replyInThread: true` to establish a new thread and opens a `thread` session anchored to that root message.
-  - Mentioning `@bot` mid-way inside an existing unengaged thread opens a `thread` session and seeds its transcript with up to **50** prior messages from that thread (`seedThreadHistory`) so the agent has surrounding context.
+  - Mentioning `@bot` mid-way inside an existing unengaged thread opens a `thread` session and seeds its transcript with up to **50** prior text and rich-text messages from that thread (`seedThreadHistory`, resolving `@mentions` to `@name` and skipping unreadable media types) so the agent has surrounding context.
   - Once a thread has an engaged session, subsequent replies in that thread route to it **without** requiring `@bot` (unless they explicitly `@mention` only other users/bots). `/new` is rejected inside threads (`话题内不支持 /new（话题过长时会自动压缩）。`); threads rely on automatic context compaction instead.
 
 _Note on `kind = 'main'`_: `main` denotes a window's lifecycle and migration behavior (private or group main stream), not a single space-wide orchestration inbox.
@@ -28,13 +28,26 @@ Every normalized inbound IM event passes four sequential gates:
 4. **Session binding & placement**:
    - Reuse the window's active session if present (coalescing concurrent session-creation races onto the same session).
    - On creation: `main` sessions bind to `space.boundWorkerId`; `thread` sessions pick a random online, enrolled, tag-matched worker and remain pinned to it permanently.
+   - **No worker online**: When a session's bound worker is offline or no eligible worker is online to place a new `thread`, the gateway sends a single notice (`当前没有在线的 worker，消息已排队，worker 恢复后会自动处理。`) to the reply window. `main` turns wait in `DispatchQueue`, while unplaced `thread` messages remain in `InboundInbox` (reusing their prewarmed thread and session without repeating the notice) until a worker connects.
+     _Rationale: Gives users immediate confirmation that their message was accepted rather than leaving an unchanging prewarm indicator._
+
+### Startup Group Catch-Up
+
+On gateway startup, each channel replays missed messages from the last **24 hours** across its bound group chats through the standard inbox and decision chain (private chats are not polled):
+
+- Only actionable `@bot` mentions and replies inside engaged threads dispatch; already-processed messages are dropped idempotently by Gate 1.
+- `/new` commands and unsupported attachment types are skipped during catch-up so stale resets never wipe active conversations and old files do not trigger late error replies.
+
+_Rationale: Bridges server outages that exceed an IM push channel's short reconnect-redelivery window._
 
 ### Supported Input Modalities
 
-Inbound messages accept **text**, **quoted parent messages**, and **images**:
+Inbound turns normalize **text**, **rich text**, **explicit user quotes**, and **images**:
 
-- **Quoted messages**: When a message replies to `parentId` in the same chat, the gateway fetches the parent message and prepends `<quoted_message>{"sender":"...","body":"..."}</quoted_message>` (`≤ 12,000` chars).
-- **Images**: Image messages normalize to `[Image]` plus `ImageReference { messageId, fileKey }`. Neither raw bytes nor channel secrets are stored in transcripts or sent in dispatch envelopes; the bound worker downloads bytes on demand via the server's `media.read` RPC (`≤ 10 MiB`), caches originals in `<sessionsDir>/.media`, and passes a downscaled JPEG to the model. Download errors or oversized files degrade to `[图片下载失败]`; models without vision support receive `[图片：当前模型不支持图像输入]`. Arbitrary file attachments and rich-text card inputs are currently ignored.
+- **Speaker attribution & bot mention cleanup**: The sender's display name is resolved via the IM contact API (cached with TTL, falling back to `open_id` when unavailable) and carried alongside `open_id`. The bot's own `@mention` is stripped from the message body so addressing the bot does not clutter prompts or session titles (a bare `@bot` message retains the name so the prompt is non-empty); mentions of other participants remain as `@name`.
+- **Rich text**: Structured rich-text posts flatten into plain text — preserving paragraph breaks, markdown links (`[text](url)`), `@name` mentions, and fenced code blocks, while mapping embedded images to `[Image]` + `ImageReference` and embedded videos to `[Video]` (empty posts with neither text/video nor images are ignored).
+- **Quoted messages**: When a user explicitly replies to an earlier text or rich-text message (`parentId`) in the same chat, the gateway fetches the parent and prepends `<quoted_message>{"sender":"...","body":"..."}</quoted_message>` (`≤ 12,000` chars). Implicit thread-root parent pointers attached automatically by IM platforms to ordinary thread replies are ignored so follow-up messages are not misattributed as quoting the thread's opening post.
+- **Images & unsupported media**: Image inputs record `ImageReference { messageId, fileKey }` (never raw bytes or channel secrets in transcripts); the bound worker fetches bytes via `media.read` (`≤ 10 MiB`), caches originals in `<sessionsDir>/.media`, and passes a downscaled JPEG to the model, degrading to `[图片下载失败]` on fetch/size failure or `[图片：当前模型不支持图像输入]` on text-only models. Standalone unreadable message types (files, audio, video, stickers, shared cards) in a window that would otherwise be answered reply once with a concise unsupported-type notice (deduplicated by deterministic reply UUID).
 
 ## 3. Turn Batching, Delivery Modes, and Interruption
 
@@ -71,13 +84,21 @@ _Rationale: Rebinding is most urgently needed when a developer laptop goes offli
 
 - **Content-gated card creation**: A run opens an outbound card only once visible assistant text or thinking arrives (or when a user-initiated run fails). Tool calls alone never open a placeholder card, and proactive machine turns (schedule wakeups, ticket receipts) that complete silently or fail produce **no card at all**.
 - **Card anatomy**:
-  1. Collapsible thinking panel (`💭 思考中` while streaming, `思考过程` once settled; retains latest `6,000` chars of reasoning).
-  2. Tool status pills (`⏳` running, `✓` completed, `⚠️` failed + backticked tool name; latest `10` tools; never arguments or results).
-  3. Markdown answer body (`30,000`-character pagination — overflowing streams finalize the current card with `↓ 内容较长，后续见下一张卡片` and open a continuation card).
+  1. Collapsible thinking panel (`💭 思考中` while streaming, `思考过程` once settled; retains latest `6,000` chars of reasoning). Shown on the **first card only**.
+  2. Tool status pills (`⏳` running, `✓` completed, `⚠️` failed + backticked tool name; latest `10` tools; never arguments or results). Shown on the **first card only**; any pill still `running` when a run fails transitions to `⚠️`.
+  3. Markdown answer body (`30,000`-character pagination — overflowing streams finalize the current card with `↓ 内容较长，后续见下一张卡片` and open a continuation card). Page splits prefer a nearby line break and automatically close/reopen fenced code blocks cut across pages.
   4. `停止` danger button (`action: 'abort_run'`, `runId`), shown **only** while streaming and authorized exclusively for `Run.initiatorIds` (Console members may also abort via `/api/sessions/:id/runs/:runId/abort`).
-- **Localized failure notices**: User-visible failures translate internal `terminalReason` codes into clear Chinese explanations (for example, `lease_lost` renders `Worker 连接中断，本次执行已终止。已发生的外部操作可能仍需核实。`, `worker_lost` renders `Worker 连接中断，本次执行无法继续。`, `interrupted` renders `本次执行已中断。`, `cancelled` renders `任务已取消。`).
+- **Localized settlement & failure notices**:
+  - User stop (`abort_run` / Console Stop / worker `aborted`): appends neutral `> ⏹ 已停止` rather than an error banner.
+  - Session reset, rebind, or close (`session_changed`): `会话已被重置或换绑，本次执行已中断。` A run fenced as `interrupted` in storage renders `本次执行已中断。`; a `cancelled` ticket renders `任务已取消。`.
+  - Worker disconnect / lease loss: `worker_lost` renders `Worker 连接中断，本次执行无法继续。`; `lease_lost` renders `Worker 连接中断，本次执行已终止。已发生的外部操作可能仍需核实。`.
+  - Model provider errors (`error`): classified into localized user-safe summaries (authentication/configuration failure, rate limit/quota exceeded, upstream `5xx` unavailable, or generic `模型调用失败，请稍后再试。`) — raw provider error payloads are never echoed into chat cards.
 
 ### Feishu Adapter Mechanics
 
-- Cards use CardKit `schema: '2.0'` with `streaming_mode: true` during generation, patched serially per run at ~`500 ms` intervals with monotonically persisted `sequence` numbers, and explicitly close `streaming_mode: false` on settlement.
-- Thread session replies attach to `session.anchorMessageId` (the thread's root message) with `replyInThread: true`, deleting `prewarmMessageId` once the first card reply lands; `main` sessions reply with `replyInThread: false`.
+- **Inbound wire normalization**: Feishu `post` bodies (direct or locale-keyed) flatten `text`, `a`, `at`, `img`, `media`, `emotion`, `hr`, `code_block`, and `md` nodes; `parent_id === root_id` on messages carrying `thread_id` is discarded as Feishu's implicit thread-root pointer rather than a user quote; display names resolve via `contact.v3.user.get` (`contact:user.base:readonly` scope).
+- **CardKit delivery**: Cards use CardKit `schema: '2.0'` with `streaming_mode: true` during generation, patched serially per run at ~`500 ms` intervals with monotonically persisted `sequence` numbers, and explicitly close `streaming_mode: false` on settlement. Thread session replies attach to `session.anchorMessageId` with `replyInThread: true` (deleting `prewarmMessageId` once the first card reply lands); `main` sessions reply with `replyInThread: false`.
+
+## 5. Current Implementation Notes
+
+- Cards reconstructed solely from storage after a server crash between journal commit and in-memory rendering read `Run.terminalReason` (`'interrupted'` or `'error'`) rather than the raw error string, so crash-recovered stops and model errors render their generic localized fallback (`本次执行已中断。` / `模型调用失败，请稍后再试。`).

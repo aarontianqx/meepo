@@ -46,7 +46,11 @@ class FakeSocket {
     this.handlers.get('message')?.(Buffer.from(JSON.stringify(frame)));
   }
 
-  async nextResponse(): Promise<{ id: string; result?: unknown; error?: { code: string } }> {
+  async nextResponse(): Promise<{
+    id: string;
+    result?: unknown;
+    error?: { code: string; message?: string };
+  }> {
     await vi.waitFor(() => {
       expect(this.sent.length).toBeGreaterThan(0);
     });
@@ -371,12 +375,34 @@ describe('WorkerChannelHandler scheduling tools', () => {
       expect(relisted.result).toEqual([]);
     });
 
+    it('rejects agent-created schedules in the past and reports the server time', async () => {
+      for (const [id, method, params] of [
+        ['30', 'cron.create', { sessionId: 'se1', prompt: 'late' }],
+        ['31', 'ticket.create', { sessionId: 'se1', objective: 'late' }],
+      ] as const) {
+        socket.receive({
+          kind: 'request',
+          id,
+          method,
+          params: { ...params, timing: { kind: 'at', at: Date.now() - 60_000 } },
+        });
+        const response = await socket.nextResponse();
+        expect(response.error?.code).toBe('invalid_params');
+        expect(response.error?.message).toContain('in the past');
+        expect(response.error?.message).toContain('epoch ms');
+      }
+    });
+
     it('scopes cron.delete to the owning session', async () => {
       socket.receive({
         kind: 'request',
         id: '20',
         method: 'cron.create',
-        params: { sessionId: 'se1', prompt: 'standup', timing: { kind: 'at', at: NOW + 60_000 } },
+        params: {
+          sessionId: 'se1',
+          prompt: 'standup',
+          timing: { kind: 'at', at: Date.now() + 60_000 },
+        },
       });
       const created = await socket.nextResponse();
       const view = created.result as ScheduleView;

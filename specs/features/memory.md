@@ -65,6 +65,8 @@ All five tools are available identically in interactive sessions and tickets, ba
 | `MemoryWrite`  | `PUT /api/memory/<path>?spaceId`                      | `path`, `description`, `content` (`≤ 64 KiB`), `keywords?` (omit preserves existing; `[]` clears), `pinned?`, `expected_revision` | Updated `MemoryMetadata` with incremented `revision`.                                      |
 | `MemoryDelete` | `DELETE /api/memory/<path>?spaceId&expected_revision` | `path`, `expected_revision`                                                                                                       | `{ deleted: true, revision }` (tombstoned).                                                |
 
+The HTTP and RPC interfaces answer a read of a missing path with the domain error `not_found`. The agent's `MemoryRead` tool turns that one case into an ordinary result, `{ found: false, message }`, because "nothing stored yet" is a normal answer for an agent probing memory and a thrown tool error makes models retry or apologize; every other error still fails the tool call, and `not_found` on write or delete stays an error.
+
 `MemoryRead` slices strictly on valid UTF-8 character boundaries (advancing `start` past continuation bytes and trimming incomplete trailing sequences before `end`), guaranteeing multi-byte characters are never corrupted across paged reads.
 
 Domain error codes: `not_found` (`404`), `revision_conflict` (`409`, returning `currentRevision` so callers can reload and reconcile), `invalid_path` (`400`), `invalid_prefix` (`400`), `content_too_large` (`400`), and `too_many_entries` (`400`).

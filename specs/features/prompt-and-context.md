@@ -26,7 +26,8 @@ When a session cold-starts (or a ticket starts), the worker calls `prompt.prepar
 The worker combines `prepared` with local host state in exact section order:
 
 1. **Prepared `base`** + isolated working directory (`Your isolated working directory is <workDir>.`) + orchestration rule:
-   - Sessions: `CronCreate/CronList/CronDelete manage future wakeups of this session. TicketCreate creates independent work with a self-contained objective.`
+   - Sessions: `CronCreate/CronList/CronDelete manage future wakeups of this session. TicketCreate creates independent work with a self-contained objective. Your reply is delivered to this session's chat window automatically, including after a scheduled wakeup or a ticket receipt; do not send it through other tools (messaging CLIs, APIs) unless the user asks you to contact somewhere else.`
+     _Rationale: without this sentence, agents on hosts with messaging skills or CLIs re-send their answer through those tools, producing duplicate messages and slow turns._
    - Tickets: `Complete the objective independently and summarize the outcome.`
 2. **Local host instructions** (optional): Contents of `~/.agents/AGENTS.md` on the worker host (`Local operating instructions:\n...`).
 3. **Local skill index** (optional): Scans `~/.agents/skills/<name>/SKILL.md` (directories and symlinks), extracts YAML frontmatter `description` (`≤ 1,500` chars each), and lists `- <name>: <description> (<path>)` with instruction to read `SKILL.md` before invoking a skill.
@@ -55,10 +56,11 @@ For interactive sessions, the worker persists the rendered `{ base, memoryMap, m
 Before dispatching a session turn, the server formats source metadata into `prompt`:
 
 - **User message (`source.kind === 'user_message'`)**:
+  - The bot's own `@mention` is removed from the message text before formatting; other mentions stay as `@name`.
   - Optional quoted reply block (when replying in the same chat):
     ```xml
     <quoted_message>
-    {"sender":"<open_id>","body":"<text up to 12000 chars>"}
+    {"sender":"<displayName | open_id>","body":"<text up to 12000 chars>"}
     </quoted_message>
     ```
   - Speaker attribution wrapper (`formatUserMessage`, XML-escaped attributes):

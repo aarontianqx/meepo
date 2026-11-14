@@ -1,7 +1,7 @@
 import { WORKER_CHANNEL_METHODS, type Timing } from '@meepo/protocol';
 import { describe, expect, it } from 'vitest';
 
-import { buildCronTools, buildTicketTools } from '../tools.js';
+import { buildCronTools, buildMemoryTools, buildTicketTools } from '../tools.js';
 
 interface RpcCall {
   method: string;
@@ -111,5 +111,39 @@ describe('buildCronTools', () => {
         params: { sessionId: 'sess-1', scheduleId: 'sched-1' },
       },
     ]);
+  });
+});
+
+describe('buildMemoryTools', () => {
+  const read = (rpc: (method: string, params: unknown) => Promise<unknown>) => {
+    const tool = buildMemoryTools(rpc, { sessionId: 's1' }).find((t) => t.name === 'MemoryRead');
+    if (!tool) throw new Error('MemoryRead missing');
+    return tool;
+  };
+
+  it('answers a read of a missing entry as data, not as a tool failure', async () => {
+    const tool = read(() =>
+      Promise.reject(new Error('[not_found] memory project/x does not exist'))
+    );
+    const result = await tool.execute('call', { path: 'project/x' });
+    expect(JSON.stringify(result)).toContain('\\"found\\": false');
+    expect(JSON.stringify(result)).toContain('does not exist');
+  });
+
+  it('still fails reads on other errors and keeps not_found a failure for writes', async () => {
+    await expect(
+      read(() => Promise.reject(new Error('[forbidden] nope'))).execute('call', { path: 'p' })
+    ).rejects.toThrow('forbidden');
+    const write = buildMemoryTools(() => Promise.reject(new Error('[not_found] x')), {
+      sessionId: 's1',
+    }).find((t) => t.name === 'MemoryWrite');
+    await expect(
+      write?.execute('call', {
+        path: 'p',
+        description: 'd',
+        content: 'c',
+        expected_revision: 0,
+      })
+    ).rejects.toThrow('not_found');
   });
 });

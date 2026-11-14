@@ -103,7 +103,7 @@ export async function bootstrap(config: ServerConfig = loadConfig()): Promise<Se
   const lifecycle: SessionLifecycle = new SessionLifecycle(
     new SqliteSessionLifecycle(db),
     connections,
-    (run) => streamProcessor.renderInterrupted(run)
+    (run) => streamProcessor.renderInterrupted(run, 'session_changed')
   );
   const memoryService = new MemoryService(new SqliteMemoryRepository(db));
   const membershipService = new MembershipService(membershipRepository);
@@ -164,7 +164,7 @@ export async function bootstrap(config: ServerConfig = loadConfig()): Promise<Se
     new SqliteDispatchCommitter(db),
     Date.now,
     config.heartbeatIntervalSeconds * 3_000,
-    (run) => streamProcessor.renderInterrupted(run),
+    (run) => streamProcessor.renderInterrupted(run, 'stopped'),
     journal
   );
   const receiptService = new ReceiptService(
@@ -259,6 +259,7 @@ export async function bootstrap(config: ServerConfig = loadConfig()): Promise<Se
         (event) => feishuGateway.handleCardAction(event)
       );
       cardStreamer.recover();
+      void feishuGateway.backfill().catch((err) => app.log.error(err, 'feishu backfill failed'));
       const recoverTimer = setInterval(() => {
         cardOutbox.reconcile(channel.id);
         cardStreamer.recover();

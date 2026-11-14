@@ -1,5 +1,6 @@
 import { loadDurableHistory } from './durable-history.js';
 import { boundedTools } from './tool-output.js';
+import { codingToolOptions } from './tool-env.js';
 import { reclaimDirectories, touchDirectory } from './retention.js';
 import { loadImages } from './media.js';
 import type { AnyAgentTool } from './tools.js';
@@ -323,7 +324,7 @@ export class SessionManager {
       });
     const tools = boundedTools(
       [
-        ...createCodingTools(workDir),
+        ...createCodingTools(workDir, codingToolOptions),
         ...(lease?.tools ?? this.deps.extraTools?.() ?? []),
         ...buildCronTools(executionRpc, envelope.sessionId),
         ...buildTicketTools(executionRpc, envelope.sessionId),

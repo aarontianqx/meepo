@@ -59,8 +59,8 @@ As a global admin, register a Feishu channel in **Channels** with its `appId`, `
 In the Feishu Developer Console:
 
 1. Enable the Bot capability.
-2. Grant message receive/read/send/reply, image resource download, and CardKit create/update permissions, then publish a version.
-3. Configure event delivery via **Long Connection** (WebSocket) for `im.message.receive_v1` and card action callback `card.action.trigger`. No public webhook URL is needed for Feishu events.
+2. Grant message receive/read/send/reply, image resource download, and CardKit create/update permissions, plus contact read (`contact:user.base:readonly`) so speakers appear by display name instead of `open_id`, then publish a version.
+3. Configure event delivery via **Long Connection** (WebSocket) for `im.message.receive_v1` and card action callback `card.action.trigger`. No public webhook URL is needed for Feishu events. Run exactly one long-connection consumer per Feishu app: Feishu delivers each event to only one of several connections, so a second consumer (another bot gateway on the same app) makes Meepo lose events at random.
 
 In a bound group, mentioning `@bot` in the main stream opens a dedicated thread session; subsequent replies inside an engaged thread require no mention, while replying to a main-stream message with `@bot` continues the group's main session. `/new` resets a private-chat or group-main session (group `/new` requires `@bot`). Use the streaming card's **停止** button or the console's **Stop** action to interrupt an active run.
 

@@ -1,4 +1,5 @@
 import { boundedTools } from './tool-output.js';
+import { codingToolOptions } from './tool-env.js';
 import { reclaimDirectories, touchDirectory } from './retention.js';
 import { withTicketContext } from './tool-context.js';
 import type { AnyAgentTool } from './tools.js';
@@ -105,7 +106,7 @@ export class TicketRunner {
       const tools = withTicketContext(
         boundedTools(
           [
-            ...createCodingTools(workDir),
+            ...createCodingTools(workDir, codingToolOptions),
             ...(lease?.tools ?? this.deps.extraTools?.() ?? []),
             ...(this.deps.rpc
               ? buildMemoryTools(

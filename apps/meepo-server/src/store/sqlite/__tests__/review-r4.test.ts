@@ -259,7 +259,7 @@ describe('review R4 durable boundaries', () => {
       channelId: 'ch',
       text: 'partial',
       thinking: '',
-      tools: {},
+      tools: { call: { name: 'bash', state: 'running' } },
       sequence: 0,
       part: 0,
       offset: 0,
@@ -291,6 +291,9 @@ describe('review R4 durable boundaries', () => {
       await vi.waitFor(() => expect(updateCardSettings).toHaveBeenCalled());
       expect(updateCard.mock.calls[0][1]).toContain('Worker 连接中断');
       expect(updateCard.mock.calls[0][1]).not.toContain('lease_lost');
+      // The tool that was mid-flight when the worker died must not keep spinning.
+      expect(updateCard.mock.calls[0][1]).toContain('⚠️ `bash`');
+      expect(updateCard.mock.calls[0][1]).not.toContain('⏳');
       expect((await runs.getById('card'))?.terminalReason).toBe('lease_lost');
       expect(updateCard.mock.calls[0][1]).not.toContain('停止');
       expect(JSON.parse(updateCardSettings.mock.calls[0][1]).config.streaming_mode).toBe(false);

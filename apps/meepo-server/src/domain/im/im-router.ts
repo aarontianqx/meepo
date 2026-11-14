@@ -9,12 +9,14 @@ export interface InboundMessage {
   threadId?: string;
   /** The thread's top-level (root) message id, used as the reply anchor */
   rootId?: string;
-  /** Present when the message is a reply to another message */
+  /** Present when the user explicitly replied to (quoted) another message */
   parentId?: string;
   senderOpenId: string;
   senderName: string;
   text: string;
   mentionedOpenIds: string[];
+  /** Message type the transport cannot read; the gateway answers with a notice instead of a turn */
+  unsupportedType?: string;
 }
 
 export type InboundDecision =

@@ -173,9 +173,21 @@ export function buildMemoryTools(
     label: d.name,
     description: d.description,
     parameters: d.schema,
-    execute: async (_id: string, input: unknown) =>
-      toTextResult(
-        await rpc(WORKER_CHANNEL_METHODS.memory, { ...scope, operation: d.operation, input })
-      ),
+    execute: async (_id: string, input: unknown) => {
+      try {
+        return toTextResult(
+          await rpc(WORKER_CHANNEL_METHODS.memory, { ...scope, operation: d.operation, input })
+        );
+      } catch (error) {
+        // A missing entry is an ordinary answer to a read, not a tool failure.
+        if (
+          d.operation === 'read' &&
+          error instanceof Error &&
+          error.message.startsWith('[not_found]')
+        )
+          return toTextResult({ found: false, message: error.message });
+        throw error;
+      }
+    },
   }));
 }
