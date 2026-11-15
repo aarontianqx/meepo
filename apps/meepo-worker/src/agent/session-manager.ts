@@ -13,7 +13,6 @@ import type { AssistantMessage, Usage } from '@earendil-works/pi-ai';
 import { createCodingTools } from '@earendil-works/pi-coding-agent';
 import {
   WORKER_CHANNEL_METHODS,
-  formatUserMessage,
   type MediaReadResult,
   type ImageReference,
   type ModelConfig,
@@ -26,7 +25,7 @@ import {
   type WorkerStreamEvent,
 } from '@meepo/protocol';
 
-import { restoreEvents } from './history.js';
+import { historicUserContent, restoreEvents } from './history.js';
 import { createModel, createStreamFn } from './model-factory.js';
 import { createCompactor } from './compaction.js';
 import { SessionRunner, type RunnerAgent } from './session-runner.js';
@@ -81,18 +80,9 @@ export function transcriptToAgentMessage(
 ): AgentMessage {
   switch (message.role) {
     case 'user':
-      // Multi-party windows: attribute each utterance to its speaker, structured
-      // so the agent can tell senders apart.
       return {
         role: 'user',
-        content: message.author
-          ? formatUserMessage(message.content, {
-              author: message.author,
-              authorOpenId: message.authorOpenId,
-              chatLabel: message.chatLabel,
-              timestamp: message.timestamp,
-            })
-          : message.content,
+        content: historicUserContent(message, message.timestamp),
         timestamp: message.timestamp,
       };
     case 'assistant': {

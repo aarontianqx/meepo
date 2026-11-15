@@ -291,6 +291,50 @@ describe('SessionManager runner creation', () => {
     expect(prompts.at(-1)).toContain('当前模型不支持图像输入');
   });
 
+  it('appends context events to a warm runner as speaker-attributed history, and ignores cold ones', async () => {
+    const state = { messages: [] as AgentMessage[] };
+    const { manager } = setup({
+      createAgent: () => ({
+        subscribe: () => () => {},
+        prompt: () => Promise.resolve(),
+        steer: () => {},
+        abort: () => {},
+        state,
+      }),
+    });
+    const events = [
+      {
+        seq: 2,
+        type: 'system_note',
+        payload: { content: 'recent messages follow' },
+        timestamp: 10,
+      },
+      {
+        seq: 3,
+        type: 'message',
+        payload: {
+          role: 'user',
+          author: 'Alice',
+          authorOpenId: 'ou_a',
+          content: 'ship it?',
+          timestamp: 0,
+        },
+        timestamp: Date.UTC(2026, 10, 15, 2, 1, 5),
+      },
+    ];
+    // No runner yet: the events reach the worker through the transcript snapshot instead.
+    manager.handleContextAppend({ sessionId: 'session-1', events });
+    expect(state.messages).toHaveLength(0);
+
+    await manager.handleDispatch(envelope({ sessionId: 'session-1' }));
+    state.messages = [];
+    manager.handleContextAppend({ sessionId: 'session-1', events });
+    expect(state.messages.map((m) => ('content' in m ? m.content : undefined))).toEqual([
+      '<system_note>recent messages follow</system_note>',
+      '<message sender="Alice" open_id="ou_a" time="2026-11-15T02:01:05Z">\nship it?\n</message>',
+    ]);
+  });
+
   it('does not evict an idle runner while a dispatch for it is still preparing', async () => {
     let clock = 0;
     let releaseDir!: () => void;

@@ -20,6 +20,44 @@ const event = (seq: number, type: string, payload: unknown): CanonicalEvent => (
   payload,
   timestamp: seq,
 });
+describe('user messages in history', () => {
+  it('tells speakers apart by name, open_id and time, and leaves anonymous text alone', () => {
+    const at = Date.UTC(2026, 10, 15, 2, 1, 5);
+    const messages = restoreEvents(
+      [
+        {
+          ...event(1, 'message', {
+            role: 'user',
+            author: 'Alice',
+            authorOpenId: 'ou_a',
+            content: 'ship it?',
+            timestamp: at,
+          }),
+          timestamp: at,
+        },
+        {
+          ...event(2, 'message', {
+            role: 'user',
+            author: 'Bob',
+            content: 'not yet',
+            timestamp: at + 60_000,
+          }),
+          timestamp: at + 60_000,
+        },
+        {
+          ...event(3, 'message', { role: 'user', content: 'plain', timestamp: at }),
+          timestamp: at,
+        },
+      ],
+      model
+    );
+    expect(messages.map((m) => ('content' in m ? m.content : undefined))).toEqual([
+      '<message sender="Alice" open_id="ou_a" time="2026-11-15T02:01:05Z">\nship it?\n</message>',
+      '<message sender="Bob" time="2026-11-15T02:02:05Z">\nnot yet\n</message>',
+      'plain',
+    ]);
+  });
+});
 describe('cold recovery and scheduling contracts', () => {
   it('preserves tool IDs, pairs parallel calls, and marks unconfirmed outcomes unknown', () => {
     const messages = restoreEvents(

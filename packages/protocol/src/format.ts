@@ -56,8 +56,7 @@ export function escapeAttr(value: string): string {
     .replace(/>/g, '&gt;');
 }
 
+/** ISO 8601 UTC to the second, the same clock as the turn's `<current-time>`. */
 function formatTime(timestamp: number): string {
-  const date = new Date(timestamp);
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  return `${new Date(timestamp).toISOString().slice(0, 19)}Z`;
 }

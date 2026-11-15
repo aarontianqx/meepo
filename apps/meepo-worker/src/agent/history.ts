@@ -1,6 +1,22 @@
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { AssistantMessage, ToolCall } from '@earendil-works/pi-ai';
+import { formatUserMessage } from '@meepo/protocol';
 import type { CanonicalEvent, ModelConfig, TranscriptMessage } from '@meepo/protocol';
+
+/**
+ * A user message as the model sees it in history. With a known speaker it carries who, when and
+ * where, so consecutive messages from different people in a group stay apart.
+ */
+export function historicUserContent(message: TranscriptMessage, timestamp: number): string {
+  return message.author
+    ? formatUserMessage(message.content, {
+        author: message.author,
+        authorOpenId: message.authorOpenId,
+        chatLabel: message.chatLabel,
+        timestamp,
+      })
+    : message.content;
+}
 
 export function assistantMessage(model: ModelConfig, timestamp: number): AssistantMessage {
   return {
@@ -42,7 +58,7 @@ export function restoreEvents(events: CanonicalEvent[], model: ModelConfig): Age
       } else if (old.role === 'user') {
         messages.push({
           role: 'user',
-          content: old.author ? `[${old.author}] ${old.content}` : old.content,
+          content: historicUserContent(old, event.timestamp),
           timestamp: event.timestamp,
         });
       }

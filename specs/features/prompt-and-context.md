@@ -63,9 +63,9 @@ Before dispatching a session turn, the server formats source metadata into `prom
     {"sender":"<displayName | open_id>","body":"<text up to 12000 chars>"}
     </quoted_message>
     ```
-  - Speaker attribution wrapper (`formatUserMessage`, XML-escaped attributes):
+  - Speaker attribution wrapper (`formatUserMessage`, XML-escaped attributes). The live turn omits `time` because `<current-time>` already gives the moment; history entries carry it (see section 4):
     ```xml
-    <message sender="<displayName>" open_id="<openId>" time="HH:MM" chat="<groupName | 私聊>">
+    <message sender="<displayName>" open_id="<openId>" chat="<groupName | 私聊>">
     <user text>
     </message>
     ```
@@ -109,7 +109,8 @@ When cold-starting a session runner, the worker fetches `session.snapshot` (`bef
 
 1. **Compacted prefix summary**: If a non-degraded `CompactionCache` exists (or was built during paged `loadDurableHistory`), it is injected first as a user message: `<system_note>[Summary of earlier events]\n<summary></system_note>`.
 2. **Event-to-message mapping**:
-   - `user_message` (and legacy `message` with `role: 'user'`): User message (`[<author>] <content>` when author is present), rehydrating any attached `ImageReference`s through `media.read` / `<sessionsDir>/.media`.
+   - `user_message` (and `message` with `role: 'user'`, which is how imported group messages are stored): User message. With a known speaker it uses the same `formatUserMessage` wrapper as the live turn plus the event's time: `<message sender="<displayName>" open_id="<openId>" time="<ISO 8601 UTC, to the second>" chat="<...>">…</message>`, so consecutive messages from different people stay apart and share the clock of `<current-time>`. Without a speaker the content is passed through unchanged. Attached `ImageReference`s are rehydrated through `media.read` / `<sessionsDir>/.media`. A warm runner receiving `context.append` renders the same events the same way.
+     _Rationale: In a group the history is a run of user-role messages from several people; without the speaker and time on each one the model cannot tell who said what or how far apart. Time is UTC ISO so it needs no timezone guess against `<current-time>`; the Space timezone in the system prompt tells the model how to present it._
    - `system_note`: User-role message wrapped in `<system_note>...</system_note>` (because OpenAI-compatible APIs restrict mid-conversation system roles and `supportsDeveloperRole` is disabled).
    - `assistant_text`: Assistant text message.
    - `tool_call` + `tool_result`: Matched by `(runId, toolCallId)`. If a provider reused the same `toolCallId` string across different runs in the same session, the rehydrator disambiguates later occurrences as `<id>_<seq>` so model API tool-ID uniqueness holds.
