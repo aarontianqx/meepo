@@ -2,7 +2,7 @@ import type { InboundInbox } from '../../domain/im/inbound-inbox.js';
 import { createHash } from 'node:crypto';
 
 import type { Session } from '@meepo/core';
-import { formatQuotedMessage } from '@meepo/protocol';
+import { formatQuotedMessage, type ImageReference } from '@meepo/protocol';
 import type { DispatchOutcome, DispatchService } from '../../domain/dispatch/dispatch-service.js';
 import { NoOnlineWorkerError } from '../../domain/errors.js';
 import {
@@ -12,6 +12,12 @@ import {
   type InboundDecision,
   type InboundMessage,
 } from '../../domain/im/im-router.js';
+import {
+  MAIN_STREAM_LIMITS,
+  mainStreamContextNote,
+  selectMainStreamContext,
+  type MainStreamContextKind,
+} from '../../domain/im/main-stream-context.js';
 import type { RunRepository } from '../../domain/runs/run-repository.js';
 import type { SessionService } from '../../domain/sessions/session-service.js';
 import type { TranscriptService } from '../../domain/sessions/transcript-service.js';
@@ -26,6 +32,8 @@ const WORKER_OFFLINE_TEXT = '当前没有在线的 worker，消息已排队，wo
 const NEW_COMMAND = '/new';
 const BACKFILL_WINDOW_MS = 24 * 60 * 60 * 1000;
 const THREAD_SEED_LIMIT = 50;
+/** Images taken from the message a turn replies to; the turn's own images are never capped. */
+const MAX_QUOTED_IMAGES = 4;
 
 export interface FeishuGatewayDeps {
   inbox?: InboundInbox;
@@ -347,21 +355,17 @@ export class FeishuGateway {
     if (decision.seedThreadHistory) {
       await this.seedThreadHistory(sessionId, threadId, msg.messageId);
     }
-
-    let prompt = msg.text;
-    if (msg.parentId) {
-      const quoted = await this.deps.client.getMessage?.(msg.parentId);
-      if (quoted && quoted.chatId === msg.chatId)
-        prompt = formatQuotedMessage(
-          { sender: quoted.sender, body: quoted.text.slice(0, 12000) },
-          prompt
-        );
+    if (decision.seedMainStream) {
+      await this.seedMainStreamContext(sessionId, msg);
     }
+
+    const { prompt, images } = await this.withQuotedMessage(msg);
     return this.deps.dispatchService.dispatchSessionTurn({
       sessionId,
       ingress: { channelId: this.deps.channelId ?? 'feishu', messageId: msg.messageId },
       prompt,
-      images: msg.images,
+      images,
+      sentAt: msg.createTime,
       source: { kind: 'user_message', messageId: msg.messageId },
       delivery: 'wait',
       author: (await this.deps.client.getUserName?.(msg.senderOpenId)) ?? msg.senderName,
@@ -396,6 +400,101 @@ export class FeishuGateway {
     } catch (err: unknown) {
       this.onError(err);
     }
+  }
+
+  /** The turn's prompt and images, with the message it replies to (text and images) folded in. */
+  private async withQuotedMessage(
+    msg: InboundMessage
+  ): Promise<{ prompt: string; images: ImageReference[] | undefined }> {
+    const parentId = msg.parentId;
+    const quoted = parentId ? await this.deps.client.getMessage?.(parentId) : undefined;
+    if (!parentId || !quoted || quoted.chatId !== msg.chatId)
+      return { prompt: msg.text, images: msg.images };
+    const body = quoted.text || (quoted.imageKeys.length ? '[图片]' : '');
+    let prompt = formatQuotedMessage(
+      { sender: quoted.sender, body: body.slice(0, 12000) },
+      msg.text
+    );
+    const omitted = quoted.imageKeys.length - MAX_QUOTED_IMAGES;
+    if (omitted > 0) prompt += `\n（被引用的消息另有 ${omitted} 张图片未加载）`;
+    const refs = quoted.imageKeys
+      .slice(0, MAX_QUOTED_IMAGES)
+      .map((fileKey): ImageReference => ({ messageId: parentId, fileKey }));
+    return { prompt, images: refs.length ? [...(msg.images ?? []), ...refs] : msg.images };
+  }
+
+  /**
+   * Gives the session the group's main-stream messages it has not seen, so "the discussion above"
+   * has something to point at. A session that has not run a turn reads the recent window; a
+   * running one continues after the message behind its last chat-triggered turn. A retried
+   * dispatch repeats this; the external ids make the repeat a no-op.
+   */
+  private async seedMainStreamContext(sessionId: string, msg: InboundMessage): Promise<void> {
+    try {
+      const before = msg.createTime ?? Date.now();
+      const notBefore = before - MAIN_STREAM_LIMITS.windowMs;
+      const started = await this.deps.transcriptService.firstEvent(sessionId, 'user_message');
+      const lastSentAt = started
+        ? await this.deps.transcriptService.lastTurnSentAt(sessionId)
+        : undefined;
+      // A running session without a recorded send time has no cursor; guessing would repeat or skip.
+      if (started && lastSentAt === undefined) return;
+      const since = lastSentAt === undefined ? notBefore : lastSentAt + 1;
+      if (since >= before) return;
+      const recent = await this.deps.client.listMainStreamMessages?.(msg.chatId, {
+        since,
+        before,
+        excludeMessageId: msg.messageId,
+        limit: MAIN_STREAM_LIMITS.messages,
+      });
+      if (!recent) return;
+      const context = selectMainStreamContext(recent.messages, {
+        moreAvailable: recent.moreAvailable,
+        notBefore,
+      });
+      if (context.messages.length === 0) return;
+      await this.importMainStreamContext(
+        sessionId,
+        msg.messageId,
+        started ? 'since-last-turn' : 'new-session',
+        context
+      );
+    } catch (err: unknown) {
+      this.onError(err);
+    }
+  }
+
+  private async importMainStreamContext(
+    sessionId: string,
+    triggerMessageId: string,
+    kind: MainStreamContextKind,
+    context: ReturnType<typeof selectMainStreamContext>
+  ): Promise<void> {
+    const { transcriptService, dispatchService } = this.deps;
+    const seqBefore = await transcriptService.latestSeq(sessionId);
+    const added = [
+      await transcriptService.appendEvent(sessionId, 'system_note', {
+        externalMessageId: `main-stream-context:${triggerMessageId}`,
+        content: mainStreamContextNote(kind, context.omitted),
+      }),
+    ];
+    for (const item of context.messages) {
+      added.push(
+        await transcriptService.appendMessage(sessionId, {
+          externalMessageId: item.messageId,
+          role: 'user',
+          author: item.authorName,
+          authorOpenId: item.authorOpenId,
+          content: item.content,
+          timestamp: item.timestamp,
+        })
+      );
+    }
+    // A retry returns the records it stored the first time; only new ones are news to the worker.
+    await dispatchService.announceContext(
+      sessionId,
+      added.filter((event) => event.seq > seqBefore)
+    );
   }
 
   /** The open session this gateway already created for a prewarm window, if any. */
@@ -504,6 +603,7 @@ export function normalizeMessage(
     // Feishu stamps every thread message with parent_id = thread root; that is not a user quote.
     parentId:
       message.thread_id && message.parent_id === message.root_id ? undefined : message.parent_id,
+    createTime: Number(message.create_time) || undefined,
     senderOpenId,
     senderName: senderOpenId,
     text,

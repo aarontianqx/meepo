@@ -6,6 +6,7 @@ import type { TurnDispatchEnvelope, WorkerChannelDownstream } from '@meepo/proto
 import { DispatchService } from '../../../domain/dispatch/dispatch-service.js';
 import type { WorkerSender } from '../../../domain/dispatch/worker-sender.js';
 import type { InboundMessage } from '../../../domain/im/im-router.js';
+import type { MainStreamMessage } from '../../../domain/im/main-stream-context.js';
 import { SessionService } from '../../../domain/sessions/session-service.js';
 import { TranscriptService } from '../../../domain/sessions/transcript-service.js';
 import { MemoryDispatchQueueRepository } from '../../../store/memory/dispatch-queue-memory.js';
@@ -33,7 +34,19 @@ class FakeFeishuClient implements FeishuClient {
   /** thread_id handed back for reply_in_thread prewarms */
   prewarmThreadId = 'omt_prewarm';
   threadHistory: import('../feishu-client.js').ThreadHistoryMessage[] = [];
-  readonly messages = new Map<string, { sender: string; text: string; chatId: string }>();
+  readonly messages = new Map<
+    string,
+    { sender: string; text: string; chatId: string; imageKeys?: string[] }
+  >();
+  mainStream: { messages: MainStreamMessage[]; moreAvailable: boolean } = {
+    messages: [],
+    moreAvailable: false,
+  };
+  failMainStream = false;
+  readonly mainStreamCalls: {
+    chatId: string;
+    range: { since: number; before: number; excludeMessageId: string; limit: number };
+  }[] = [];
   readonly userNames = new Map<string, string>();
   recentMessages: FeishuMessageEvent[] = [];
 
@@ -69,7 +82,17 @@ class FakeFeishuClient implements FeishuClient {
   }
 
   async getMessage(messageId: string) {
-    return this.messages.get(messageId);
+    const message = this.messages.get(messageId);
+    return message && { ...message, imageKeys: message.imageKeys ?? [] };
+  }
+
+  async listMainStreamMessages(
+    chatId: string,
+    range: { since: number; before: number; excludeMessageId: string; limit: number }
+  ) {
+    this.mainStreamCalls.push({ chatId, range });
+    if (this.failMainStream) throw new Error('message.list failed');
+    return this.mainStream;
   }
 
   async listRecentMessages(): Promise<FeishuMessageEvent[]> {
@@ -156,6 +179,7 @@ describe('FeishuGateway', () => {
   let sender: FakeSender;
   let gateway: FeishuGateway;
   let sessionService: SessionService;
+  let transcriptService: TranscriptService;
   let runs: MemoryRunRepository;
   let errors: unknown[];
   const inbox = new Map<string, InboundMessage>();
@@ -177,7 +201,7 @@ describe('FeishuGateway', () => {
     sender = new FakeSender();
     sender.connected.add('w1');
     sessionService = new SessionService(sessions, spaces);
-    const transcriptService = new TranscriptService(sessionEvents, sessions);
+    transcriptService = new TranscriptService(sessionEvents, sessions);
     const dispatchService = new DispatchService(
       sessions,
       spaces,
@@ -431,6 +455,264 @@ describe('FeishuGateway', () => {
       makeMsg({ mentionedOpenIds: [BOT], rootId: 'om_target', parentId: 'om_target', text: 'ok' })
     );
     expect(sender.dispatches()[0].prompt).toContain('original words');
+  });
+
+  it("loads the images of the message a turn replies to, after the turn's own", async () => {
+    client.messages.set('om_target', {
+      sender: 'Bob',
+      text: '',
+      chatId: 'oc_group',
+      imageKeys: ['img_q1', 'img_q2'],
+    });
+    await gateway.handleInbound(
+      makeMsg({
+        mentionedOpenIds: [BOT],
+        rootId: 'om_target',
+        parentId: 'om_target',
+        text: 'what is this',
+        images: [{ messageId: 'om_1', fileKey: 'img_own' }],
+      })
+    );
+    const [dispatch] = sender.dispatches();
+    expect(dispatch.images).toEqual([
+      { messageId: 'om_1', fileKey: 'img_own' },
+      { messageId: 'om_target', fileKey: 'img_q1' },
+      { messageId: 'om_target', fileKey: 'img_q2' },
+    ]);
+    expect(dispatch.prompt).toContain('[图片]');
+  });
+
+  it('caps the images taken from the quoted message and tells the model', async () => {
+    client.messages.set('om_target', {
+      sender: 'Bob',
+      text: 'album',
+      chatId: 'oc_group',
+      imageKeys: ['a', 'b', 'c', 'd', 'e', 'f'],
+    });
+    await gateway.handleInbound(
+      makeMsg({ mentionedOpenIds: [BOT], rootId: 'om_target', parentId: 'om_target', text: 'ok' })
+    );
+    const [dispatch] = sender.dispatches();
+    expect(dispatch.images).toHaveLength(4);
+    expect(dispatch.prompt).toContain('另有 2 张图片未加载');
+  });
+
+  it('does not touch images when the reply target is in another chat', async () => {
+    client.messages.set('om_target', {
+      sender: 'Bob',
+      text: 'elsewhere',
+      chatId: 'oc_other',
+      imageKeys: ['img_x'],
+    });
+    await gateway.handleInbound(
+      makeMsg({ mentionedOpenIds: [BOT], rootId: 'om_target', parentId: 'om_target' })
+    );
+    expect(sender.dispatches()[0].images).toBeUndefined();
+  });
+
+  describe('main-stream context for a new session', () => {
+    const recent = (index: number): MainStreamMessage => ({
+      messageId: `om_ctx${index}`,
+      authorName: `User${index}`,
+      authorOpenId: `ou_${index}`,
+      content: `chatter ${index}`,
+      timestamp: 4_000_000 + index,
+      hasThread: false,
+    });
+
+    type Payload = { externalMessageId?: string; content?: string };
+
+    async function events(sessionId: string) {
+      return (await transcriptService.listEvents(sessionId)).map((event) => ({
+        type: event.type,
+        payload: event.payload as Payload,
+      }));
+    }
+
+    async function importedMessages(sessionId: string) {
+      return (await events(sessionId)).filter((event) =>
+        /^(main-stream-context:|om_ctx)/.test(event.payload.externalMessageId ?? '')
+      );
+    }
+
+    it('imports the recent main stream before the first turn of a fresh @ session', async () => {
+      client.mainStream = { messages: [recent(1), recent(2)], moreAvailable: true };
+      await gateway.handleInbound(
+        makeMsg({ mentionedOpenIds: [BOT], text: 'summarize', createTime: 10_000_000 })
+      );
+
+      const [call] = client.mainStreamCalls;
+      expect(call).toMatchObject({
+        chatId: 'oc_group',
+        range: { before: 10_000_000, excludeMessageId: 'om_1', limit: 30 },
+      });
+      expect(call.range.since).toBe(10_000_000 - 2 * 60 * 60 * 1000);
+
+      const session = (await sessionService.listBySpace('sp_group'))[0];
+      const imported = await importedMessages(session.id);
+      expect(imported.map((event) => event.type)).toEqual(['system_note', 'message', 'message']);
+      expect(imported[0].payload).toMatchObject({
+        externalMessageId: 'main-stream-context:om_1',
+        content: expect.stringContaining('更早还有消息未列出'),
+      });
+      expect(imported[1].payload).toMatchObject({
+        externalMessageId: 'om_ctx1',
+        author: 'User1',
+        authorOpenId: 'ou_1',
+        content: 'chatter 1',
+      });
+      // The context is imported before the turn that triggers it.
+      const all = await events(session.id);
+      expect(
+        all.findIndex((event) => event.payload.content?.includes('summarize'))
+      ).toBeGreaterThan(all.findIndex((event) => event.payload.externalMessageId === 'om_ctx2'));
+    });
+
+    // The production dispatch committer records a chat turn as a `user_message` event; the
+    // in-memory dispatch path used here records a plain message, so record it explicitly.
+    async function recordTurn(sessionId: string, sentAt?: number) {
+      await transcriptService.appendEvent(sessionId, 'user_message', {
+        role: 'user',
+        content: 'earlier turn',
+        timestamp: 1,
+        sentAt,
+      });
+    }
+
+    const groupReply = (id: string, createTime: number) =>
+      makeMsg({ messageId: id, mentionedOpenIds: [BOT], rootId: 'om_root', createTime });
+
+    it('records when the platform created the message behind a turn', async () => {
+      await gateway.handleInbound(groupReply('om_a', 5_000_000));
+      const session = (await sessionService.listBySpace('sp_group'))[0];
+      const turn = (await events(session.id)).find((event) =>
+        event.payload.content?.includes('hello')
+      );
+      expect(turn?.payload).toMatchObject({ sentAt: 5_000_000 });
+    });
+
+    it('continues a running group session after the message behind its last turn', async () => {
+      client.mainStream = { messages: [recent(1)], moreAvailable: false };
+      await gateway.handleInbound(groupReply('om_a', 5_000_000));
+      const session = (await sessionService.listBySpace('sp_group'))[0];
+      await recordTurn(session.id, 5_000_000);
+
+      client.mainStreamCalls.length = 0;
+      sender.sent.length = 0;
+      client.mainStream = { messages: [recent(2), recent(3)], moreAvailable: false };
+      await gateway.handleInbound(groupReply('om_b', 5_600_000));
+
+      expect(client.mainStreamCalls).toHaveLength(1);
+      expect(client.mainStreamCalls[0].range).toMatchObject({
+        since: 5_000_001,
+        before: 5_600_000,
+        excludeMessageId: 'om_b',
+      });
+      const imported = await importedMessages(session.id);
+      expect(imported.map((event) => event.payload.externalMessageId)).toEqual([
+        'main-stream-context:om_a',
+        'om_ctx1',
+        'main-stream-context:om_b',
+        'om_ctx2',
+        'om_ctx3',
+      ]);
+      expect(imported[2].payload.content).toContain('自上一次对话触发之后');
+    });
+
+    it('tells a warm worker about the continuation without starting a turn', async () => {
+      await gateway.handleInbound(groupReply('om_a', 5_000_000));
+      const session = (await sessionService.listBySpace('sp_group'))[0];
+      await recordTurn(session.id, 5_000_000);
+
+      sender.sent.length = 0;
+      client.mainStream = { messages: [recent(2)], moreAvailable: false };
+      await gateway.handleInbound(groupReply('om_b', 5_600_000));
+
+      const appends = sender.sent.filter(
+        (item) => item.frame.kind === 'notification' && item.frame.event === 'context.append'
+      );
+      expect(appends).toHaveLength(1);
+      const payload = (
+        appends[0].frame as { payload: { sessionId: string; events: { type: string }[] } }
+      ).payload;
+      expect(payload.sessionId).toBe(session.id);
+      expect(payload.events.map((event) => event.type)).toEqual(['system_note', 'message']);
+      // The turn itself still goes out as its own dispatch, after the context.
+      expect(sender.dispatches()).toHaveLength(1);
+      expect(sender.sent.indexOf(appends[0])).toBeLessThan(
+        sender.sent.findIndex(
+          (item) => 'event' in item.frame && item.frame.event === 'turn.dispatch'
+        )
+      );
+    });
+
+    it('cuts a continuation to the time window and says earlier messages were left out', async () => {
+      await gateway.handleInbound(groupReply('om_a', 1_000));
+      const session = (await sessionService.listBySpace('sp_group'))[0];
+      await recordTurn(session.id, 1_000);
+
+      const before = 100_000_000;
+      client.mainStream = {
+        messages: [
+          { ...recent(1), timestamp: 2_000 },
+          { ...recent(2), timestamp: before - 1_000 },
+        ],
+        moreAvailable: false,
+      };
+      await gateway.handleInbound(groupReply('om_b', before));
+
+      const imported = await importedMessages(session.id);
+      expect(imported.map((event) => event.payload.externalMessageId)).toEqual([
+        'main-stream-context:om_b',
+        'om_ctx2',
+      ]);
+      expect(imported[0].payload.content).toContain('更早还有消息未列出');
+    });
+
+    it('does not guess a cursor for a running session whose turns carry no send time', async () => {
+      await gateway.handleInbound(groupReply('om_a', 5_000_000));
+      const session = (await sessionService.listBySpace('sp_group'))[0];
+      await recordTurn(session.id);
+
+      client.mainStreamCalls.length = 0;
+      await gateway.handleInbound(groupReply('om_b', 5_600_000));
+      expect(client.mainStreamCalls).toHaveLength(0);
+    });
+
+    it('imports nothing for a continuation with no newer message', async () => {
+      await gateway.handleInbound(groupReply('om_a', 5_000_000));
+      const session = (await sessionService.listBySpace('sp_group'))[0];
+      await recordTurn(session.id, 5_000_000);
+      client.mainStreamCalls.length = 0;
+      await gateway.handleInbound(groupReply('om_b', 5_000_001));
+      expect(client.mainStreamCalls).toHaveLength(0);
+    });
+
+    it('does not seed private chats or engaged threads', async () => {
+      client.mainStream = { messages: [recent(1)], moreAvailable: false };
+      await gateway.handleInbound(makeMsg({ chatType: 'p2p', chatId: 'oc_p2p', text: 'hi' }));
+      await gateway.handleInbound(makeMsg({ messageId: 'om_t', mentionedOpenIds: [BOT] }));
+      await gateway.handleInbound(
+        makeMsg({ messageId: 'om_t2', threadId: 'omt_prewarm', text: 'follow up' })
+      );
+      // Only the fresh group @ asked for context.
+      expect(client.mainStreamCalls).toHaveLength(1);
+      expect(client.mainStreamCalls[0].range.excludeMessageId).toBe('om_t');
+    });
+
+    it('imports nothing when the window is empty', async () => {
+      await gateway.handleInbound(makeMsg({ mentionedOpenIds: [BOT] }));
+      const session = (await sessionService.listBySpace('sp_group'))[0];
+      expect(await importedMessages(session.id)).toHaveLength(0);
+      expect(sender.dispatches()).toHaveLength(1);
+    });
+
+    it('still answers when the main stream cannot be listed', async () => {
+      client.failMainStream = true;
+      await gateway.handleInbound(makeMsg({ mentionedOpenIds: [BOT], text: 'hello' }));
+      expect(sender.dispatches()).toHaveLength(1);
+      expect(errors).toHaveLength(1);
+    });
   });
 
   it('answers unsupported message types in private chats with a notice instead of a turn', async () => {

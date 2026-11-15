@@ -11,6 +11,8 @@ export interface InboundMessage {
   rootId?: string;
   /** Present when the user explicitly replied to (quoted) another message */
   parentId?: string;
+  /** Epoch ms at which the platform created the message */
+  createTime?: number;
   senderOpenId: string;
   senderName: string;
   text: string;
@@ -30,6 +32,8 @@ export type InboundDecision =
       spaceId: string;
       /** Thread sessions are seeded with existing thread history on creation */
       seedThreadHistory: boolean;
+      /** A session that has not run a turn yet is given the group's recent main-stream messages */
+      seedMainStream: boolean;
     };
 
 export interface InboundContext {
@@ -80,6 +84,7 @@ export function decideInbound(msg: InboundMessage, ctx: InboundContext): Inbound
       sessionKind: 'main',
       spaceId,
       seedThreadHistory: false,
+      seedMainStream: false,
     };
   }
 
@@ -98,6 +103,7 @@ export function decideInbound(msg: InboundMessage, ctx: InboundContext): Inbound
         sessionKind: 'thread',
         spaceId,
         seedThreadHistory: !engaged,
+        seedMainStream: false,
       };
     }
     return { action: 'ignore', reason: 'thread is not engaged' };
@@ -113,6 +119,7 @@ export function decideInbound(msg: InboundMessage, ctx: InboundContext): Inbound
         sessionKind: 'main',
         spaceId,
         seedThreadHistory: false,
+        seedMainStream: true,
       };
     }
     return { action: 'ignore', reason: 'main-stream reply without mention' };
@@ -126,6 +133,7 @@ export function decideInbound(msg: InboundMessage, ctx: InboundContext): Inbound
       sessionKind: 'thread',
       spaceId,
       seedThreadHistory: false,
+      seedMainStream: true,
     };
   }
 

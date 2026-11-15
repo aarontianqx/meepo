@@ -10,6 +10,7 @@ import {
 } from '@meepo/core';
 import {
   WORKER_CHANNEL_EVENTS,
+  type CanonicalEvent,
   type DeliveryMode,
   type ImageReference,
   type DispatchSource,
@@ -38,6 +39,8 @@ export interface DispatchSessionTurnInput {
   ingress?: { channelId: string; messageId: string };
   sourceId?: string;
   eventType?: string;
+  /** When the chat platform created the message behind this turn */
+  sentAt?: number;
   prompt: string;
   source: DispatchSource;
   delivery: DeliveryMode;
@@ -83,6 +86,30 @@ export class DispatchService {
     return this.committer?.hasProcessedMessage(channelId, messageId) ?? false;
   }
 
+  /**
+   * Tells the session's worker about history-only events just added to the transcript, so a warm
+   * runner learns them without a turn. A cold runner (or an offline worker) reads them from the
+   * transcript snapshot at its next start.
+   */
+  async announceContext(sessionId: string, events: CanonicalEvent[]): Promise<void> {
+    if (events.length === 0) return;
+    const workerId = (await this.sessions.getById(sessionId))?.boundWorkerId;
+    if (!workerId || !this.sender.isConnected(workerId)) return;
+    this.sender.sendToWorker(workerId, {
+      kind: 'notification',
+      event: WORKER_CHANNEL_EVENTS.contextAppend,
+      payload: {
+        sessionId,
+        events: events.map(({ seq, type, payload, timestamp }) => ({
+          seq,
+          type,
+          payload,
+          timestamp,
+        })),
+      },
+    });
+  }
+
   async dispatchSessionTurn(input: DispatchSessionTurnInput): Promise<DispatchOutcome> {
     const session = await this.sessions.getById(input.sessionId);
     if (!session) throw notFound(`Session not found: ${input.sessionId}`);
@@ -103,6 +130,7 @@ export class DispatchService {
       authorOpenId: input.authorOpenId,
       chatLabel: input.chatLabel,
       content: input.prompt,
+      sentAt: input.sentAt,
       timestamp: turnTimestamp,
     } as const;
 

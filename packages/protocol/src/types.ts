@@ -155,6 +155,8 @@ export interface TicketDispatchEnvelope {
 /** Simplified transcript entry used for session rehydration snapshots */
 export interface TranscriptMessage {
   externalMessageId?: string;
+  /** When the chat platform created the message that caused this turn; `timestamp` is when the server recorded it. */
+  sentAt?: number;
   images?: ImageReference[];
   role: 'user' | 'assistant' | 'tool';
   content: string;

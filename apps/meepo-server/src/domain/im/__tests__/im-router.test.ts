@@ -61,6 +61,7 @@ describe('decideInbound', () => {
       threadRef: { kind: 'prewarm' },
       sessionKind: 'thread',
       spaceId: 'sp1',
+      seedMainStream: true,
     });
   });
 
@@ -74,6 +75,7 @@ describe('decideInbound', () => {
       windowId: windowIdOf('chat1', GROUP_MAIN_SUB_ID),
       sessionKind: 'main',
       seedThreadHistory: false,
+      seedMainStream: true,
     });
   });
 
@@ -93,6 +95,7 @@ describe('decideInbound', () => {
       threadRef: { kind: 'thread', threadId: 'omt_1' },
       sessionKind: 'thread',
       seedThreadHistory: false,
+      seedMainStream: false,
     });
   });
 
@@ -119,6 +122,7 @@ describe('decideInbound', () => {
       sessionKind: 'main',
       spaceId: 'sp-default',
       windowId: windowIdOf('chat1', 'ou_user'),
+      seedMainStream: false,
     });
   });
 

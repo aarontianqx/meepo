@@ -32,6 +32,36 @@ describe('TranscriptService', () => {
     service = new TranscriptService(events, sessions);
   });
 
+  describe('lastTurnSentAt', () => {
+    const turn = (sentAt?: number) => ({ role: 'user', content: 'x', timestamp: 1, sentAt });
+
+    it('returns the send time of the newest chat-triggered turn', async () => {
+      await service.appendEvent('se1', 'user_message', turn(100));
+      await service.appendEvent('se1', 'user_message', turn(200));
+      expect(await service.lastTurnSentAt('se1')).toBe(200);
+    });
+
+    it('skips newer turns that carry no send time, and ignores other event types', async () => {
+      await service.appendEvent('se1', 'user_message', turn(100));
+      await service.appendEvent('se1', 'user_message', turn());
+      await service.appendEvent('se1', 'message', turn(900));
+      expect(await service.lastTurnSentAt('se1')).toBe(100);
+    });
+
+    it('is undefined when no turn recorded one', async () => {
+      expect(await service.lastTurnSentAt('se1')).toBeUndefined();
+      await service.appendEvent('se1', 'user_message', turn());
+      expect(await service.lastTurnSentAt('se1')).toBeUndefined();
+    });
+  });
+
+  it('reports the latest event sequence and returns appended records', async () => {
+    expect(await service.latestSeq('se1')).toBe(0);
+    const record = await service.appendMessage('se1', { role: 'user', content: 'a', timestamp: 1 });
+    expect(record.seq).toBe(1);
+    expect(await service.latestSeq('se1')).toBe(1);
+  });
+
   it('excludes messages at or after beforeTimestamp', async () => {
     await service.appendMessage('se1', { role: 'user', content: 'first', timestamp: 1000 });
     await service.appendMessage('se1', { role: 'user', content: 'current turn', timestamp: 2000 });

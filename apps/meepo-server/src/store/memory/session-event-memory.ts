@@ -36,20 +36,19 @@ export class MemorySessionEventRepository implements SessionEventRepository {
   }
 
   async listBySession(sessionId: string, query: EventQuery = {}): Promise<SessionEventRecord[]> {
-    return (this.rows.get(sessionId) ?? [])
-      .filter(
-        (e) =>
-          e.seq > (query.afterSeq ?? 0) &&
-          (!query.type || e.type === query.type) &&
-          (query.beforeSeq === undefined
-            ? query.beforeTimestamp === undefined || e.timestamp < query.beforeTimestamp
-            : e.seq < query.beforeSeq ||
-              (query.includeHistoryNotes &&
-                e.type === 'system_note' &&
-                (e.payload as { historyOnly?: boolean }).historyOnly))
-      )
-      .slice(0, query.limit)
-      .map((row) => structuredClone(row));
+    const rows = (this.rows.get(sessionId) ?? []).filter(
+      (e) =>
+        e.seq > (query.afterSeq ?? 0) &&
+        (!query.type || e.type === query.type) &&
+        (query.beforeSeq === undefined
+          ? query.beforeTimestamp === undefined || e.timestamp < query.beforeTimestamp
+          : e.seq < query.beforeSeq ||
+            (query.includeHistoryNotes &&
+              e.type === 'system_note' &&
+              (e.payload as { historyOnly?: boolean }).historyOnly))
+    );
+    if (query.order === 'desc') rows.reverse();
+    return rows.slice(0, query.limit).map((row) => structuredClone(row));
   }
 
   async latestSeq(sessionId: string): Promise<number> {

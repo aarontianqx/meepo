@@ -42,6 +42,17 @@ describe('SqliteSessionEventRepository', () => {
     expect(record.timestamp).toBeLessThanOrEqual(after);
   });
 
+  it('lists newest first with a limit when asked for descending order', async () => {
+    await repo.append('session-1', 'a', 1, 1000);
+    await repo.append('session-1', 'b', 2, 1001);
+    await repo.append('session-1', 'a', 3, 1002);
+
+    const newest = await repo.listBySession('session-1', { type: 'a', order: 'desc', limit: 1 });
+    expect(newest.map((event) => event.payload)).toEqual([3]);
+    const all = await repo.listBySession('session-1', { order: 'desc' });
+    expect(all.map((event) => event.seq)).toEqual([3, 2, 1]);
+  });
+
   it('lists events for a session ordered by seq', async () => {
     await repo.append('session-1', 'a', 1, 1000);
     await repo.append('session-1', 'b', [2], 1001);

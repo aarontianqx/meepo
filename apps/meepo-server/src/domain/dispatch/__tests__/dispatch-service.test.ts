@@ -177,6 +177,40 @@ describe('DispatchService', () => {
     });
   });
 
+  describe('announceContext', () => {
+    const note = { seq: 3, type: 'system_note', payload: { content: 'n' }, timestamp: 5 };
+
+    it('sends history-only events to the connected bound worker, stripped to canonical fields', async () => {
+      await spaces.save(makeSpace('sp1', 'w1'));
+      await workers.save(makeWorker('w1', ['sp1']));
+      await sessions.save({ ...makeSession('se1', 'sp1', 'main'), boundWorkerId: 'w1' });
+      sender.connected.add('w1');
+
+      await service.announceContext('se1', [{ ...note, sessionId: 'se1' } as typeof note]);
+      expect(sender.sent).toEqual([
+        {
+          workerId: 'w1',
+          frame: {
+            kind: 'notification',
+            event: 'context.append',
+            payload: { sessionId: 'se1', events: [note] },
+          },
+        },
+      ]);
+    });
+
+    it('sends nothing without events, without a bound worker, or to an offline worker', async () => {
+      await spaces.save(makeSpace('sp1', 'w1'));
+      await sessions.save(makeSession('se1', 'sp1', 'main'));
+      await sessions.save({ ...makeSession('se2', 'sp1', 'main'), boundWorkerId: 'w1' });
+
+      await service.announceContext('se1', [note]);
+      await service.announceContext('se2', [note]);
+      await service.announceContext('se2', []);
+      expect(sender.sent).toHaveLength(0);
+    });
+  });
+
   it('pins a thread session to its dispatch target across turns', async () => {
     await spaces.save(makeSpace('sp1'));
     await workers.save(makeWorker('w1', ['sp1']));

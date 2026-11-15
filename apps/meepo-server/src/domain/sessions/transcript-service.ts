@@ -19,8 +19,28 @@ export class TranscriptService {
     private readonly compactions?: CompactionRepository
   ) {}
 
-  async appendMessage(sessionId: string, message: TranscriptMessage): Promise<void> {
-    await this.events.append(sessionId, MESSAGE_EVENT_TYPE, message, message.timestamp);
+  async appendMessage(sessionId: string, message: TranscriptMessage): Promise<CanonicalEvent> {
+    return this.events.append(sessionId, MESSAGE_EVENT_TYPE, message, message.timestamp);
+  }
+
+  async latestSeq(sessionId: string): Promise<number> {
+    return this.events.latestSeq(sessionId);
+  }
+
+  /**
+   * When the chat platform created the message behind the session's newest chat-triggered turn;
+   * undefined when no turn recorded one (turns from the Console or from before it was recorded).
+   */
+  async lastTurnSentAt(sessionId: string): Promise<number | undefined> {
+    // Console and API turns carry no send time; skip over a bounded run of them.
+    const turns = await this.events.listBySession(sessionId, {
+      type: 'user_message',
+      order: 'desc',
+      limit: 50,
+    });
+    return turns
+      .map((turn) => (turn.payload as TranscriptMessage).sentAt)
+      .find((at) => at !== undefined);
   }
 
   async getSnapshot(

@@ -1,11 +1,14 @@
 import * as lark from '@larksuiteoapi/node-sdk';
 
 import type { FeishuConfig } from '../../config.js';
+import type { MainStreamMessage } from '../../domain/im/main-stream-context.js';
 import { parsePostContent } from './post-content.js';
 
 const USER_NAME_TTL_MS = 60 * 60 * 1000;
 const USER_NAME_MISS_TTL_MS = 5 * 60 * 1000;
 const MAX_RECENT_MESSAGE_PAGES = 20;
+const MAX_MAIN_STREAM_PAGES = 3;
+const IMAGE_PLACEHOLDER = '[图片]';
 
 export interface ReplyResult {
   messageId: string;
@@ -27,6 +30,8 @@ export interface FeishuMessageEvent {
     parent_id?: string;
     message_type: string;
     content: string;
+    /** Epoch ms, as a string */
+    create_time?: string;
     mentions?: { key: string; name?: string; id?: { open_id?: string } }[];
   };
 }
@@ -77,7 +82,16 @@ export interface FeishuClient {
   getChatName(chatId: string): Promise<string>;
   getMessage?(
     messageId: string
-  ): Promise<{ sender: string; text: string; chatId: string } | undefined>;
+  ): Promise<{ sender: string; text: string; chatId: string; imageKeys: string[] } | undefined>;
+  /**
+   * Main-stream messages of a group created in `[since, before)` (epoch ms), oldest first: no
+   * thread replies and no messages from apps. Stops once more than `limit` are found;
+   * `moreAvailable` says it stopped with more messages inside the window.
+   */
+  listMainStreamMessages?(
+    chatId: string,
+    range: { since: number; before: number; excludeMessageId: string; limit: number }
+  ): Promise<{ messages: MainStreamMessage[]; moreAvailable: boolean }>;
   /** Group messages created since `since` (epoch ms), oldest first, shaped like live events. */
   listRecentMessages?(chatId: string, since: number): Promise<FeishuMessageEvent[]>;
   /** Display name of a user by open_id; the open_id itself when it cannot be resolved. */
@@ -245,20 +259,78 @@ export class LarkFeishuClient implements FeishuClient {
 
   async getMessage(
     messageId: string
-  ): Promise<{ sender: string; text: string; chatId: string } | undefined> {
+  ): Promise<{ sender: string; text: string; chatId: string; imageKeys: string[] } | undefined> {
     const res = await this.client.im.v1.message.get({ path: { message_id: messageId } });
     if (res.code) return undefined;
     const item = res.data?.items?.[0];
-    if (!item || (item.msg_type !== 'text' && item.msg_type !== 'post')) return undefined;
+    const body = item && readableBody(item);
+    if (!item || !body) return undefined;
     const senderId = item.sender?.id;
     return {
       sender:
         senderId && item.sender?.sender_type !== 'app'
           ? await this.getUserName(senderId)
           : (senderId ?? 'unknown'),
-      text: messageText(item),
+      text: body.text,
       chatId: item.chat_id ?? '',
+      imageKeys: body.imageKeys,
     };
+  }
+
+  async listMainStreamMessages(
+    chatId: string,
+    range: { since: number; before: number; excludeMessageId: string; limit: number }
+  ): Promise<{ messages: MainStreamMessage[]; moreAvailable: boolean }> {
+    const newestFirst: MainStreamMessage[] = [];
+    let pageToken: string | undefined;
+    let moreAvailable = false;
+    for (let page = 0; page < MAX_MAIN_STREAM_PAGES; page++) {
+      const res = await this.client.im.v1.message.list({
+        params: {
+          container_id_type: 'chat',
+          container_id: chatId,
+          start_time: String(Math.floor(range.since / 1000)),
+          end_time: String(Math.ceil(range.before / 1000)),
+          sort_type: 'ByCreateTimeDesc',
+          page_size: 50,
+          page_token: pageToken,
+        },
+      });
+      if (res.code) throw new Error(`im message.list failed: ${res.code} ${res.msg}`);
+      for (const item of res.data?.items ?? []) {
+        const timestamp = Number(item.create_time ?? 0);
+        if (
+          !item.message_id ||
+          item.message_id === range.excludeMessageId ||
+          item.deleted ||
+          !item.sender?.id ||
+          item.sender.sender_type === 'app' ||
+          // A reply inside a thread belongs to that thread's own session.
+          (item.thread_id && item.root_id) ||
+          timestamp >= range.before ||
+          timestamp < range.since
+        )
+          continue;
+        newestFirst.push({
+          messageId: item.message_id,
+          authorName: await this.getUserName(item.sender.id),
+          authorOpenId: item.sender.id,
+          content: contextContent(item),
+          timestamp,
+          hasThread: Boolean(item.thread_id),
+        });
+      }
+      if (
+        newestFirst.length > range.limit ||
+        (res.data?.has_more && page === MAX_MAIN_STREAM_PAGES - 1)
+      ) {
+        moreAvailable = true;
+        break;
+      }
+      if (!res.data?.has_more) break;
+      pageToken = res.data.page_token;
+    }
+    return { messages: newestFirst.reverse(), moreAvailable };
   }
 
   async listRecentMessages(chatId: string, since: number): Promise<FeishuMessageEvent[]> {
@@ -289,6 +361,7 @@ export class LarkFeishuClient implements FeishuClient {
             parent_id: item.parent_id,
             message_type: item.msg_type,
             content: item.body?.content ?? '',
+            create_time: item.create_time,
             mentions: item.mentions?.map((m) => ({
               key: m.key,
               name: m.name,
@@ -392,22 +465,42 @@ export interface ReadableItem {
   mentions?: { key: string; name: string }[];
 }
 
-/** Plain text of a fetched `text` or `post` message with mention keys replaced by names; '' for anything else. */
-export function messageText(item: ReadableItem): string {
-  let content: { text?: string };
+/**
+ * Text and image keys of a fetched `text`, `post` or `image` message, with mention keys replaced
+ * by names; undefined for other types and malformed bodies.
+ */
+export function readableBody(
+  item: ReadableItem
+): { text: string; imageKeys: string[] } | undefined {
+  let content: { text?: string; image_key?: string };
   try {
-    content = JSON.parse(item.body?.content ?? '{}') as { text?: string };
+    content = JSON.parse(item.body?.content ?? '{}') as { text?: string; image_key?: string };
   } catch {
-    return '';
+    return undefined;
   }
-  let text =
-    item.msg_type === 'post'
-      ? parsePostContent(content).text
-      : item.msg_type === 'text'
-        ? (content.text ?? '')
-        : '';
+  if (item.msg_type === 'image')
+    return typeof content.image_key === 'string' && content.image_key
+      ? { text: '', imageKeys: [content.image_key] }
+      : undefined;
+  if (item.msg_type !== 'text' && item.msg_type !== 'post') return undefined;
+  const post = item.msg_type === 'post' ? parsePostContent(content) : undefined;
+  let text = post ? post.text : (content.text ?? '');
   for (const mention of item.mentions ?? []) {
     text = text.split(mention.key).join(mention.name ? `@${mention.name}` : mention.key);
   }
-  return text;
+  return { text, imageKeys: post?.imageKeys ?? [] };
+}
+
+/** Plain text of a fetched `text` or `post` message with mention keys replaced by names; '' for anything else. */
+export function messageText(item: ReadableItem): string {
+  return readableBody(item)?.text ?? '';
+}
+
+/** One line of context for a message: its text, with images and unreadable types as placeholders. */
+function contextContent(item: ReadableItem): string {
+  const body = readableBody(item);
+  if (!body) return `[${item.msg_type ?? 'unknown'}]`;
+  return [body.text.trim(), ...body.imageKeys.map(() => IMAGE_PLACEHOLDER)]
+    .filter(Boolean)
+    .join(' ');
 }

@@ -14,6 +14,8 @@ export interface EventQuery {
   beforeTimestamp?: number;
   limit?: number;
   type?: string;
+  /** Oldest first unless `desc`; `limit` applies after ordering. */
+  order?: 'desc';
   includeHistoryNotes?: boolean;
 }
 /** Append-only event stream backing a session's transcript. */

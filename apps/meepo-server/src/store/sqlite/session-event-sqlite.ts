@@ -88,7 +88,7 @@ export class SqliteSessionEventRepository implements SessionEventRepository {
     }
     const rows = this.db
       .prepare(
-        `SELECT * FROM session_events WHERE ${clauses.join(' AND ')} ORDER BY seq ASC LIMIT ?`
+        `SELECT * FROM session_events WHERE ${clauses.join(' AND ')} ORDER BY seq ${query.order === 'desc' ? 'DESC' : 'ASC'} LIMIT ?`
       )
       .all(...args, query.limit ?? -1) as SessionEventRow[];
     return rows.map(rowToEvent);
