@@ -14,6 +14,7 @@ import {
 } from '../../domain/im/im-router.js';
 import {
   MAIN_STREAM_LIMITS,
+  afterLastReset,
   mainStreamContextNote,
   selectMainStreamContext,
   type MainStreamContextKind,
@@ -448,8 +449,14 @@ export class FeishuGateway {
         limit: MAIN_STREAM_LIMITS.messages,
       });
       if (!recent) return;
-      const context = selectMainStreamContext(recent.messages, {
-        moreAvailable: recent.moreAvailable,
+      // `@bot /new` starts a fresh conversation: nothing before it is background.
+      const sinceReset = afterLastReset(
+        recent.messages,
+        (item) =>
+          item.mentionedOpenIds.includes(this.deps.botOpenId) && isNewCommandText(item.content)
+      );
+      const context = selectMainStreamContext(sinceReset.messages, {
+        moreAvailable: recent.moreAvailable && !sinceReset.reset,
         notBefore,
       });
       if (context.messages.length === 0) return;
@@ -558,7 +565,11 @@ export class FeishuGateway {
 }
 
 function isNewCommand(msg: InboundMessage): boolean {
-  return msg.text.replace(/@[^\s]+/g, '').trim() === NEW_COMMAND;
+  return isNewCommandText(msg.text);
+}
+
+function isNewCommandText(text: string): boolean {
+  return text.replace(/@[^\s]+/g, '').trim() === NEW_COMMAND;
 }
 
 /** Normalizes a raw Feishu event into an {@link InboundMessage}; null when not actionable. */

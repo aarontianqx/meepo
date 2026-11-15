@@ -1,6 +1,6 @@
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { AssistantMessage, ToolCall } from '@earendil-works/pi-ai';
-import { formatUserMessage } from '@meepo/protocol';
+import { formatUserMessage, resultText } from '@meepo/protocol';
 import type { CanonicalEvent, ModelConfig, TranscriptMessage } from '@meepo/protocol';
 
 /**
@@ -110,7 +110,7 @@ export function restoreEvents(
           {
             type: 'text',
             text: resultEvent
-              ? (JSON.stringify(resultPayload?.result) ?? '')
+              ? resultText(resultPayload?.result)
               : 'Outcome unknown: worker stopped before the result was confirmed. Do not blindly repeat this operation; inspect its effects or ask the user.',
           },
         ],

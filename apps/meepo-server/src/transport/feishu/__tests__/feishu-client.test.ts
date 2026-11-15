@@ -107,6 +107,20 @@ describe('LarkFeishuClient.listMainStreamMessages', () => {
 
   const range = { since: 1_000_000, before: 2_000_000, excludeMessageId: 'om_trigger', limit: 30 };
 
+  it('reports who each message @mentions', async () => {
+    const { client } = clientWith([
+      {
+        items: [
+          item('om_1', 1_200_000, {
+            mentions: [{ key: '@_user_1', id: 'ou_bot', name: 'ClawFox' }],
+          }),
+        ],
+      },
+    ]);
+    const result = await client.listMainStreamMessages('oc_group', range);
+    expect(result.messages[0].mentionedOpenIds).toEqual(['ou_bot']);
+  });
+
   it('returns main-stream messages oldest first with names, and asks Feishu for the window', async () => {
     const { client, params } = clientWith([
       { items: [item('om_2', 1_500_000), item('om_1', 1_200_000, { thread_id: 'omt_1' })] },
@@ -120,6 +134,7 @@ describe('LarkFeishuClient.listMainStreamMessages', () => {
       content: 'text of om_1',
       timestamp: 1_200_000,
       hasThread: true,
+      mentionedOpenIds: [],
     });
     expect(params[0]).toMatchObject({
       container_id_type: 'chat',

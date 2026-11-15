@@ -1,6 +1,11 @@
 // Turns the durable event stream into display items for the transcript.
 
-import { splitQuotedMessage, type CanonicalEvent, type QuotedMessage } from '@meepo/protocol';
+import {
+  resultText,
+  splitQuotedMessage,
+  type CanonicalEvent,
+  type QuotedMessage,
+} from '@meepo/protocol';
 
 export type TimelineItem =
   | {
@@ -159,22 +164,6 @@ export function buildTimeline(events: CanonicalEvent[]): TimelineItem[] {
 
 function callKey(runId: string | undefined, toolCallId: string): string {
   return `${runId ?? ''}:${toolCallId}`;
-}
-
-/** Plain text of a tool result: joined text parts, a bare string, or pretty JSON. */
-export function resultText(result: unknown): string {
-  if (typeof result === 'string') return result;
-  const parts = (result as { content?: Array<{ type?: string; text?: string }> } | null)?.content;
-  if (Array.isArray(parts)) {
-    return parts
-      .map((part) =>
-        part.type === 'text' && typeof part.text === 'string'
-          ? part.text
-          : `[${part.type ?? 'item'}]`
-      )
-      .join('\n');
-  }
-  return result === undefined ? '' : JSON.stringify(result, null, 2);
 }
 
 /** One-line description of a tool call's arguments for the collapsed row. */

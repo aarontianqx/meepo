@@ -518,6 +518,7 @@ describe('FeishuGateway', () => {
       content: `chatter ${index}`,
       timestamp: 4_000_000 + index,
       hasThread: false,
+      mentionedOpenIds: [],
     });
 
     type Payload = { externalMessageId?: string; content?: string };
@@ -566,6 +567,49 @@ describe('FeishuGateway', () => {
       expect(
         all.findIndex((event) => event.payload.content?.includes('summarize'))
       ).toBeGreaterThan(all.findIndex((event) => event.payload.externalMessageId === 'om_ctx2'));
+    });
+
+    it('starts the background after the latest @bot /new, with no note about earlier messages', async () => {
+      const reset = { ...recent(3), content: '@ClawFox /new', mentionedOpenIds: [BOT] };
+      client.mainStream = {
+        messages: [recent(1), recent(2), reset, recent(4), recent(5)],
+        moreAvailable: true,
+      };
+      await gateway.handleInbound(
+        makeMsg({ mentionedOpenIds: [BOT], text: 'summarize', createTime: 10_000_000 })
+      );
+
+      const session = (await sessionService.listBySpace('sp_group'))[0];
+      const imported = await importedMessages(session.id);
+      expect(imported.map((event) => event.payload.externalMessageId)).toEqual([
+        'main-stream-context:om_1',
+        'om_ctx4',
+        'om_ctx5',
+      ]);
+      expect(imported[0].payload.content).not.toContain('更早还有消息未列出');
+    });
+
+    it('treats a /new that does not mention the bot as ordinary chatter', async () => {
+      client.mainStream = {
+        messages: [
+          recent(1),
+          { ...recent(2), content: '/new' },
+          { ...recent(3), content: '@Someone /new', mentionedOpenIds: ['ou_other'] },
+        ],
+        moreAvailable: false,
+      };
+      await gateway.handleInbound(
+        makeMsg({ mentionedOpenIds: [BOT], text: 'summarize', createTime: 10_000_000 })
+      );
+
+      const session = (await sessionService.listBySpace('sp_group'))[0];
+      const imported = await importedMessages(session.id);
+      expect(imported.map((event) => event.payload.externalMessageId)).toEqual([
+        'main-stream-context:om_1',
+        'om_ctx1',
+        'om_ctx2',
+        'om_ctx3',
+      ]);
     });
 
     // The production dispatch committer records a chat turn as a `user_message` event; the

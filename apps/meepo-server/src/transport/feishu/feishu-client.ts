@@ -318,6 +318,7 @@ export class LarkFeishuClient implements FeishuClient {
           content: contextContent(item),
           timestamp,
           hasThread: Boolean(item.thread_id),
+          mentionedOpenIds: (item.mentions ?? []).map((mention) => mention.id),
         });
       }
       if (

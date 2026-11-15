@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   MAIN_STREAM_LIMITS,
+  afterLastReset,
   mainStreamContextNote,
   selectMainStreamContext,
   type MainStreamMessage,
@@ -17,6 +18,7 @@ function message(index: number, overrides: Partial<MainStreamMessage> = {}): Mai
     content: `message ${index}`,
     timestamp: index * 1000,
     hasThread: false,
+    mentionedOpenIds: [],
     ...overrides,
   };
 }
@@ -63,6 +65,31 @@ describe('selectMainStreamContext', () => {
   it('marks a message that has a thread without listing the thread', () => {
     const [kept] = selectMainStreamContext([message(1, { hasThread: true })], open).messages;
     expect(kept.content).toContain('已有话题讨论');
+  });
+});
+
+describe('afterLastReset', () => {
+  const isReset = (m: MainStreamMessage) => m.content === 'reset';
+
+  it('keeps only what follows the latest reset, and drops the reset itself', () => {
+    const input = [
+      message(1),
+      message(2, { content: 'reset' }),
+      message(3),
+      message(4, { content: 'reset' }),
+      message(5),
+    ];
+    expect(afterLastReset(input, isReset)).toEqual({ messages: [input[4]], reset: true });
+  });
+
+  it('returns an empty list when the reset is the newest message', () => {
+    const input = [message(1), message(2, { content: 'reset' })];
+    expect(afterLastReset(input, isReset)).toEqual({ messages: [], reset: true });
+  });
+
+  it('returns everything when there is no reset', () => {
+    const input = [message(1), message(2)];
+    expect(afterLastReset(input, isReset)).toEqual({ messages: input, reset: false });
   });
 });
 

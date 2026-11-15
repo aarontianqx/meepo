@@ -121,3 +121,25 @@ export function parseInstant(text: string): number {
     );
   return timestamp;
 }
+
+/**
+ * The text of a recorded tool result: a string as is, the text parts of a pi tool result
+ * (`{ content: [{ type: 'text', text }] }`) joined, and anything else (for example a truncated
+ * payload) as JSON. Non-text parts show as `[type]`. Console and cold-start history share it,
+ * so a restored tool result reads like the one the model saw live.
+ */
+export function resultText(result: unknown): string {
+  if (typeof result === 'string') return result;
+  // Journaled payloads are wire data: the shape is checked, not assumed.
+  const parts = (result as { content?: Array<{ type?: string; text?: string }> } | null)?.content;
+  if (Array.isArray(parts)) {
+    return parts
+      .map((part) =>
+        part.type === 'text' && typeof part.text === 'string'
+          ? part.text
+          : `[${part.type ?? 'item'}]`
+      )
+      .join('\n');
+  }
+  return result === undefined ? '' : JSON.stringify(result, null, 2);
+}

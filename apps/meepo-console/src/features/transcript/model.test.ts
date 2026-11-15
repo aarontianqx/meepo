@@ -1,7 +1,7 @@
 import type { CanonicalEvent } from '@meepo/protocol';
 import { describe, expect, it } from 'vitest';
 
-import { argsSummary, buildTimeline, resultText } from './model';
+import { argsSummary, buildTimeline } from './model';
 
 const event = (
   seq: number,
@@ -101,19 +101,6 @@ describe('buildTimeline quotes and call ids', () => {
       'one',
       'two',
     ]);
-  });
-});
-
-describe('resultText', () => {
-  it('joins text parts, marks other parts, and falls back to JSON', () => {
-    expect(resultText('plain')).toBe('plain');
-    expect(
-      resultText({
-        content: [{ type: 'text', text: 'a' }, { type: 'image' }, { type: 'text', text: 'b' }],
-      })
-    ).toBe('a\n[image]\nb');
-    expect(resultText({ n: 1 })).toBe('{\n  "n": 1\n}');
-    expect(resultText(undefined)).toBe('');
   });
 });
 

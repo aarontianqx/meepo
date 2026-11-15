@@ -129,9 +129,29 @@ describe('cold recovery and scheduling contracts', () => {
     expect(messages[3]).toMatchObject({
       toolCallId: 'same_2',
       isError: false,
-      content: [{ text: '"second result"' }],
+      content: [{ text: 'second result' }],
     });
     expect(messages[2]).toMatchObject({ content: [{ id: 'same_2' }] });
+  });
+
+  it('restores a tool result as the text the model saw live, not as wrapped JSON', () => {
+    const messages = restoreEvents(
+      [
+        event(1, 'tool_call', { toolCallId: 'a', toolName: 'CronList', args: {} }),
+        event(2, 'tool_result', {
+          toolCallId: 'a',
+          result: {
+            content: [{ type: 'text', text: '[\n  { "id": "s1" }\n]' }],
+            details: undefined,
+          },
+          isError: false,
+        }),
+      ],
+      model
+    );
+    expect(messages[1]).toMatchObject({
+      content: [{ type: 'text', text: '[\n  { "id": "s1" }\n]' }],
+    });
   });
 
   it('gives queued interactive sessions priority over tickets without exceeding slots', async () => {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { formatInstant, formatUserMessage, parseInstant } from '../format.js';
+import { formatInstant, formatUserMessage, parseInstant, resultText } from '../format.js';
 
 describe('formatInstant', () => {
   const at = Date.UTC(2026, 10, 15, 2, 18, 0, 573);
@@ -67,5 +67,18 @@ describe('formatUserMessage', () => {
     expect(
       formatUserMessage('hi', { author: 'Alice', timestamp: at, timezone: 'Asia/Shanghai' })
     ).toBe('<message sender="Alice" time="2026-11-15T10:01:05+08:00">\nhi\n</message>');
+  });
+});
+
+describe('resultText', () => {
+  it('joins text parts, marks other parts, and falls back to JSON', () => {
+    expect(resultText('plain')).toBe('plain');
+    expect(
+      resultText({
+        content: [{ type: 'text', text: 'a' }, { type: 'image' }, { type: 'text', text: 'b' }],
+      })
+    ).toBe('a\n[image]\nb');
+    expect(resultText({ n: 1 })).toBe('{\n  "n": 1\n}');
+    expect(resultText(undefined)).toBe('');
   });
 });

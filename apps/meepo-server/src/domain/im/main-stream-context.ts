@@ -11,6 +11,8 @@ export interface MainStreamMessage {
   timestamp: number;
   /** A thread was started under this message; its replies are not part of the main stream. */
   hasThread: boolean;
+  /** open_ids @mentioned in the message. */
+  mentionedOpenIds: string[];
 }
 
 /** How far back, and how much, a new session looks at the main stream. */
@@ -22,6 +24,21 @@ export const MAIN_STREAM_LIMITS = {
 };
 
 const THREAD_HINT = '（已有话题讨论，内容未列出）';
+
+/**
+ * The messages after the latest one for which `isReset` holds (that message is dropped too), or
+ * all of them when none does. A reset starts a fresh conversation, and the people's half of the
+ * old one, without the bot's answers, would read as unanswered requests.
+ */
+export function afterLastReset(
+  oldestFirst: MainStreamMessage[],
+  isReset: (message: MainStreamMessage) => boolean
+): { messages: MainStreamMessage[]; reset: boolean } {
+  const index = oldestFirst.findLastIndex(isReset);
+  return index < 0
+    ? { messages: oldestFirst, reset: false }
+    : { messages: oldestFirst.slice(index + 1), reset: true };
+}
 
 /**
  * Keeps the newest messages that fit the limits, oldest first. Messages older than `notBefore`
