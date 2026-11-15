@@ -18,7 +18,7 @@ describe('tool subprocess environment', () => {
     vi.stubEnv('MEEPO_ENROLLMENT_TOKEN', 'secret-token');
     vi.stubEnv('MEEPO_TEST_VISIBLE_VARIABLE', 'plain');
     vi.stubEnv('UNRELATED_TEST_VARIABLE', 'kept');
-    const bash = createCodingTools(process.cwd(), codingToolOptions).find(
+    const bash = createCodingTools(process.cwd(), codingToolOptions()).find(
       (t) => t.name === 'bash'
     )!;
 
@@ -28,5 +28,18 @@ describe('tool subprocess environment', () => {
     });
 
     expect(JSON.stringify(result)).toContain('token=[] other=[] kept=[kept]');
+  });
+
+  it('runs bash in the session timezone when one is given, and in the host zone otherwise', async () => {
+    vi.stubEnv('TZ', 'UTC');
+    const run = async (timezone?: string) => {
+      const bash = createCodingTools(process.cwd(), codingToolOptions(timezone)).find(
+        (t) => t.name === 'bash'
+      )!;
+      const result = await bash.execute('call', { command: 'echo "offset=[$(date +%z)]"' });
+      return JSON.stringify(result);
+    };
+    expect(await run('Asia/Shanghai')).toContain('offset=[+0800]');
+    expect(await run()).toContain('offset=[+0000]');
   });
 });

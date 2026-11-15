@@ -40,8 +40,8 @@ Every session and ticket provides four local workspace tools rooted at the task'
 1. **`read`**: Reads local text/image files from the worker filesystem.
 2. **`write`**: Creates or overwrites local files (creating parent directories as needed).
 3. **`edit`**: Applies exact string-replacement edits with diff feedback.
-4. **`bash`**: Executes shell commands in a child process with streaming output and abort propagation (`SIGTERM`/process tree cancellation on `run.abort`). Subprocesses inherit the worker's environment **except** `MEEPO_*` variables (enrollment token, server URL, data paths); on ticket runs, subprocesses receive `MEEPO_IDEMPOTENCY_KEY=<ticketId>-<attempt>`.
-   _Rationale: Any participant in a bound chat can ask the agent to inspect environment variables; stripping `MEEPO_*` keeps worker enrollment credentials unreachable from tool subprocesses._
+4. **`bash`**: Executes shell commands in a child process with streaming output and abort propagation (`SIGTERM`/process tree cancellation on `run.abort`). Subprocesses inherit the worker's environment **except** `MEEPO_*` variables (enrollment token, server URL, data paths); on ticket runs, subprocesses receive `MEEPO_IDEMPOTENCY_KEY=<ticketId>-<attempt>`. When the session (or ticket) has a frozen timezone from `prompt.prepare`, subprocesses also get `TZ=<timezone>`; without one they keep the worker host's zone.
+   _Rationale: Any participant in a bound chat can ask the agent to inspect environment variables; stripping `MEEPO_*` keeps worker enrollment credentials unreachable from tool subprocesses. `TZ` makes `date`, logs and commit timestamps agree with the clock the agent is shown instead of the host's, without touching the worker process or other sessions._
 
 ### Tool Output Bounding
 

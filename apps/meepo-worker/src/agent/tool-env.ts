@@ -10,7 +10,18 @@ export function withoutWorkerVariables(env: NodeJS.ProcessEnv): NodeJS.ProcessEn
   );
 }
 
-/** Options for the built-in coding tools: bash never inherits the worker's credentials. */
-export const codingToolOptions: ToolsOptions = {
-  bash: { spawnHook: (context) => ({ ...context, env: withoutWorkerVariables(context.env) }) },
-};
+/**
+ * Options for the built-in coding tools: bash never inherits the worker's credentials, and with a
+ * session timezone it runs in that zone (`TZ`) so `date`, logs and commit times match the clock
+ * the agent is shown. Without one, bash keeps the worker host's zone.
+ */
+export function codingToolOptions(timezone?: string): ToolsOptions {
+  return {
+    bash: {
+      spawnHook: (context) => ({
+        ...context,
+        env: { ...withoutWorkerVariables(context.env), ...(timezone && { TZ: timezone }) },
+      }),
+    },
+  };
+}

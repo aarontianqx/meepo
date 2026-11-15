@@ -291,6 +291,24 @@ describe('SessionManager runner creation', () => {
     expect(prompts.at(-1)).toContain('当前模型不支持图像输入');
   });
 
+  it('stamps the turn with the current time in UTC when the session has no frozen timezone', async () => {
+    const prompts: string[] = [];
+    const { manager } = setup({
+      createAgent: () => ({
+        subscribe: () => () => {},
+        prompt: (input: string) => {
+          prompts.push(input);
+          return Promise.resolve();
+        },
+        steer: () => {},
+        abort: () => {},
+        state: { messages: [] },
+      }),
+    });
+    await manager.handleDispatch(envelope({ currentTime: Date.UTC(2026, 10, 15, 2, 18, 0, 573) }));
+    expect(prompts[0]).toMatch(/^<current-time>2026-11-15T02:18:00Z<\/current-time>\nhi/);
+  });
+
   it('appends context events to a warm runner as speaker-attributed history, and ignores cold ones', async () => {
     const state = { messages: [] as AgentMessage[] };
     const { manager } = setup({

@@ -78,6 +78,16 @@ describe('buildTicketPrompt', () => {
   it('omits the context section when absent', () => {
     expect(buildTicketPrompt(envelope())).toContain('# Objective\nFix the flaky login test');
   });
+
+  it('shows the current time in the space timezone with its offset', () => {
+    const at = Date.UTC(2026, 10, 15, 2, 18, 0);
+    expect(buildTicketPrompt(envelope({ currentTime: at }), 'Asia/Shanghai')).toContain(
+      'Current time: 2026-11-15T10:18:00+08:00'
+    );
+    expect(buildTicketPrompt(envelope({ currentTime: at }))).toContain(
+      'Current time: 2026-11-15T02:18:00Z'
+    );
+  });
 });
 
 describe('TicketRunner', () => {

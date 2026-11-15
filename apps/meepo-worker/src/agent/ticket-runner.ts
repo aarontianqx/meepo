@@ -4,7 +4,7 @@ import { reclaimDirectories, touchDirectory } from './retention.js';
 import { withTicketContext } from './tool-context.js';
 import type { AnyAgentTool } from './tools.js';
 import { buildBasePrompt, renderPrompt, type PreparedPrompt } from './prompt.js';
-import { WORKER_CHANNEL_METHODS } from '@meepo/protocol';
+import { WORKER_CHANNEL_METHODS, formatInstant } from '@meepo/protocol';
 import { buildMemoryTools } from './tools.js';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -43,9 +43,9 @@ export function buildTicketSystemPrompt(workDir: string, contribution?: string):
 }
 
 /** The ticket's single user prompt: the objective plus optional context. */
-export function buildTicketPrompt(envelope: TicketDispatchEnvelope): string {
+export function buildTicketPrompt(envelope: TicketDispatchEnvelope, timezone?: string): string {
   const parts = [
-    `Current time: ${new Date(envelope.currentTime ?? Date.now()).toISOString()}`,
+    `Current time: ${formatInstant(envelope.currentTime ?? Date.now(), timezone)}`,
     `# Objective\n${envelope.objective}`,
   ];
   parts.push(
@@ -101,12 +101,19 @@ export class TicketRunner {
         ticketId: envelope.ticketId,
       });
       const workDir = await this.ensureTicketDir(envelope.ticketId, envelope.attempt ?? 1);
+      // Prepared before the tools: its timezone is the zone bash runs in.
+      const prepared =
+        !this.deps.createAgent && this.deps.rpc
+          ? ((await this.deps.rpc(WORKER_CHANNEL_METHODS.promptPrepare, {
+              ticketId: envelope.ticketId,
+            })) as PreparedPrompt)
+          : undefined;
       const lease = this.deps.acquireTools?.();
       releaseTools = lease?.release;
       const tools = withTicketContext(
         boundedTools(
           [
-            ...createCodingTools(workDir, codingToolOptions),
+            ...createCodingTools(workDir, codingToolOptions(prepared?.timezone)),
             ...(lease?.tools ?? this.deps.extraTools?.() ?? []),
             ...(this.deps.rpc
               ? buildMemoryTools(
@@ -123,12 +130,6 @@ export class TicketRunner {
         ),
         `${envelope.ticketId}-${envelope.attempt ?? 1}`
       );
-      const prepared =
-        !this.deps.createAgent && this.deps.rpc
-          ? ((await this.deps.rpc(WORKER_CHANNEL_METHODS.promptPrepare, {
-              ticketId: envelope.ticketId,
-            })) as PreparedPrompt)
-          : undefined;
       const systemPrompt = prepared
         ? await renderPrompt(workDir, prepared, tools, false)
         : buildTicketSystemPrompt(workDir, envelope.systemPromptContribution);
@@ -162,7 +163,7 @@ export class TicketRunner {
         timeoutTimer.unref();
       }
 
-      await agent.prompt(buildTicketPrompt(envelope));
+      await agent.prompt(buildTicketPrompt(envelope, prepared?.timezone));
       if (timedOut) {
         forwarder.failRun(`ticket timed out after ${envelope.timeoutSeconds}s`, 'timeout');
       } else if (entry.aborted) {

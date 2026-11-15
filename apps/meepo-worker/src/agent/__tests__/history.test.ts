@@ -57,6 +57,22 @@ describe('user messages in history', () => {
       'plain',
     ]);
   });
+
+  it('renders message times in the session timezone, and in UTC when none was frozen', () => {
+    const at = Date.UTC(2026, 10, 15, 2, 1, 5);
+    const events = [
+      {
+        ...event(1, 'message', { role: 'user', author: 'Alice', content: 'hi', timestamp: at }),
+        timestamp: at,
+      },
+    ];
+    const timeOf = (timezone?: string) =>
+      String(
+        restoreEvents(events, model, timezone).map((m) => ('content' in m ? m.content : ''))[0]
+      );
+    expect(timeOf('Asia/Shanghai')).toContain('time="2026-11-15T10:01:05+08:00"');
+    expect(timeOf()).toContain('time="2026-11-15T02:01:05Z"');
+  });
 });
 describe('cold recovery and scheduling contracts', () => {
   it('preserves tool IDs, pairs parallel calls, and marks unconfirmed outcomes unknown', () => {

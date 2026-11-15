@@ -5,15 +5,21 @@ import type { CanonicalEvent, ModelConfig, TranscriptMessage } from '@meepo/prot
 
 /**
  * A user message as the model sees it in history. With a known speaker it carries who, when and
- * where, so consecutive messages from different people in a group stay apart.
+ * where, so consecutive messages from different people in a group stay apart. `timezone` is the
+ * session's frozen timezone; without one, times render in UTC.
  */
-export function historicUserContent(message: TranscriptMessage, timestamp: number): string {
+export function historicUserContent(
+  message: TranscriptMessage,
+  timestamp: number,
+  timezone?: string
+): string {
   return message.author
     ? formatUserMessage(message.content, {
         author: message.author,
         authorOpenId: message.authorOpenId,
         chatLabel: message.chatLabel,
         timestamp,
+        timezone,
       })
     : message.content;
 }
@@ -39,7 +45,11 @@ export function assistantMessage(model: ModelConfig, timestamp: number): Assista
 }
 
 /** Rebuild actual tool-call/result pairs, preserving IDs across worker restarts. */
-export function restoreEvents(events: CanonicalEvent[], model: ModelConfig): AgentMessage[] {
+export function restoreEvents(
+  events: CanonicalEvent[],
+  model: ModelConfig,
+  timezone?: string
+): AgentMessage[] {
   const messages: AgentMessage[] = [];
   const results = new Map<string, CanonicalEvent>();
   const keyOf = (event: CanonicalEvent) =>
@@ -58,7 +68,7 @@ export function restoreEvents(events: CanonicalEvent[], model: ModelConfig): Age
       } else if (old.role === 'user') {
         messages.push({
           role: 'user',
-          content: historicUserContent(old, event.timestamp),
+          content: historicUserContent(old, event.timestamp, timezone),
           timestamp: event.timestamp,
         });
       }

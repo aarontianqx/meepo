@@ -217,7 +217,10 @@ function CreateSpaceModal({ onClose }: { onClose: () => void }): React.JSX.Eleme
       </button>
       {showAdvanced ? (
         <>
-          <Field label='Timezone' hint='Default for schedules and relative times the agent sees.'>
+          <Field
+            label='Timezone'
+            hint='Default for schedules, and the timezone new conversations show times in.'
+          >
             <Select value={timezone} onChange={(e) => setTimezone(e.target.value)}>
               {timezoneOptions(browserTimezone()).map((zone) => (
                 <option key={zone} value={zone}>

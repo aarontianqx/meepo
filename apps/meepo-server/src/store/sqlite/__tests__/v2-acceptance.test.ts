@@ -665,4 +665,44 @@ describe('v2 cross-module fault contracts', () => {
     expect(cold.memoryMap).not.toContain('PRIVATE_BODY');
     expect((await prompt.prepare('sp1')).base).toContain('Coding preset');
   });
+
+  it('freezes the space timezone with the session so a later change cannot rewrite its clock', async () => {
+    const spaces = new SqliteSpaceRepository(db),
+      sessions = new SqliteSessionRepository(db);
+    const transcripts = new TranscriptService(new SqliteSessionEventRepository(db), sessions);
+    const prompt = new PromptService(
+      spaces,
+      sessions,
+      transcripts,
+      new MemoryService(new SqliteMemoryRepository(db))
+    );
+    await spaces.save({ ...space, timezone: 'Asia/Shanghai' });
+    const first = await prompt.prepare('sp1', 's1');
+    expect(first.timezone).toBe('Asia/Shanghai');
+    expect(first.base).toContain('Session created at: 1970-01-01T08:00:00+08:00');
+
+    await spaces.save({ ...space, timezone: 'America/New_York' });
+    const cold = await prompt.prepare('sp1', 's1');
+    expect(cold.timezone).toBe('Asia/Shanghai');
+    expect(cold.base).toBe(first.base);
+    // A new session and a ticket read the space timezone as it is now.
+    expect((await prompt.prepare('sp1')).timezone).toBe('America/New_York');
+  });
+
+  it('keeps UTC for a session whose frozen identity predates the timezone', async () => {
+    const spaces = new SqliteSpaceRepository(db),
+      sessions = new SqliteSessionRepository(db);
+    const transcripts = new TranscriptService(new SqliteSessionEventRepository(db), sessions);
+    const prompt = new PromptService(
+      spaces,
+      sessions,
+      transcripts,
+      new MemoryService(new SqliteMemoryRepository(db))
+    );
+    await transcripts.appendEvent('s1', 'prompt_identity', { base: 'Frozen long ago.' });
+    await spaces.save({ ...space, timezone: 'Asia/Shanghai' });
+    const prepared = await prompt.prepare('sp1', 's1');
+    expect(prepared.base).toBe('Frozen long ago.');
+    expect(prepared.timezone).toBeUndefined();
+  });
 });

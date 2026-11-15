@@ -98,6 +98,91 @@ describe('buildCronTools', () => {
     ]);
   });
 
+  it('CronCreate converts an ISO time with an offset to the epoch milliseconds the server stores', async () => {
+    const { rpc, calls } = rpcRecorder({
+      id: 'sched-1',
+      nextFireAt: 1_794_877_200_000,
+      createdAt: 0,
+    });
+    const cronCreate = buildCronTools(rpc, 'sess-1', 'Asia/Shanghai').find(
+      (tool) => tool.name === 'CronCreate'
+    )!;
+
+    const result = await cronCreate.execute('call-1', {
+      prompt: 'Standup',
+      timing: { kind: 'at', at: '2026-11-17T09:00:00+08:00' },
+    });
+
+    expect(calls[0].params).toMatchObject({ timing: { kind: 'at', at: 1_794_877_200_000 } });
+    const text = result.content[0].type === 'text' ? result.content[0].text : '';
+    expect(text).toContain('"nextFireAtLocal": "2026-11-17T09:00:00+08:00"');
+  });
+
+  it('CronCreate rejects an ISO time without an offset before calling the server', async () => {
+    const { rpc, calls } = rpcRecorder();
+    const cronCreate = buildCronTools(rpc, 'sess-1').find((tool) => tool.name === 'CronCreate')!;
+
+    await expect(
+      cronCreate.execute('call-1', {
+        prompt: 'Standup',
+        timing: { kind: 'at', at: '2026-11-17T09:00:00' },
+      })
+    ).rejects.toThrow('UTC offset');
+    expect(calls).toEqual([]);
+  });
+
+  it('CronList shows each instant next to its epoch value in the session timezone', async () => {
+    const { rpc } = rpcRecorder([
+      {
+        id: 'sched-1',
+        action: 'resume_session',
+        timing: { kind: 'cron', expression: '0 9 * * *', timezone: 'Asia/Shanghai' },
+        nextFireAt: 1_794_877_200_000,
+        createdAt: 1_794_800_000_000,
+        lastFiredAt: 1_794_790_800_000,
+      },
+      {
+        id: 'sched-2',
+        action: 'resume_session',
+        timing: { kind: 'at', at: 1 },
+        nextFireAt: null,
+        createdAt: 1_794_800_000_000,
+      },
+    ]);
+    const cronList = buildCronTools(rpc, 'sess-1', 'Asia/Shanghai').find(
+      (tool) => tool.name === 'CronList'
+    )!;
+
+    const result = await cronList.execute('call-1', {});
+    const jobs = JSON.parse(result.content[0].type === 'text' ? result.content[0].text : '[]');
+
+    expect(jobs[0]).toMatchObject({
+      nextFireAt: 1_794_877_200_000,
+      nextFireAtLocal: '2026-11-17T09:00:00+08:00',
+      createdAtLocal: '2026-11-16T11:33:20+08:00',
+      lastFiredAtLocal: '2026-11-16T09:00:00+08:00',
+    });
+    expect(jobs[1].nextFireAt).toBeNull();
+    expect(jobs[1].nextFireAtLocal).toBeUndefined();
+  });
+
+  it('TicketCreate accepts the same ISO time for a scheduled ticket', async () => {
+    const { rpc, calls } = rpcRecorder({
+      kind: 'schedule',
+      schedule: { id: 's', nextFireAt: 1_794_877_200_000, createdAt: 0 },
+    });
+    const [tool] = buildTicketTools(rpc, 'sess-1', 'Asia/Shanghai');
+
+    const result = await tool.execute('call-1', {
+      objective: 'Audit',
+      timing: { kind: 'at', at: '2026-11-17T01:00:00Z' },
+    });
+
+    expect(calls[0].params).toMatchObject({ timing: { kind: 'at', at: 1_794_877_200_000 } });
+    const text = result.content[0].type === 'text' ? result.content[0].text : '';
+    expect(text).toContain('"nextFireAtLocal": "2026-11-17T09:00:00+08:00"');
+  });
+
   it('CronDelete takes scheduleId', async () => {
     const { rpc, calls } = rpcRecorder({ deleted: true });
     const tools = buildCronTools(rpc, 'sess-1');

@@ -7,6 +7,8 @@ export const MEMORY_DISCLAIMER =
   'This map is a snapshot from session start and may be incomplete. Memory tools always return current data — search first; do not answer from this map alone.';
 export interface PreparedPrompt {
   base: string;
+  /** IANA timezone frozen with the session; absent for sessions created before it was frozen. */
+  timezone?: string;
   memoryMap: string;
   memoryMapVersion: number;
 }

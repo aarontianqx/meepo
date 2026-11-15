@@ -1,6 +1,13 @@
-import { Type } from 'typebox';
+import { Type, type Static } from 'typebox';
 
-import { WORKER_CHANNEL_METHODS, type ScheduleView } from '@meepo/protocol';
+import {
+  WORKER_CHANNEL_METHODS,
+  formatInstant,
+  parseInstant,
+  type ScheduleView,
+  type TicketCreateResult,
+  type Timing,
+} from '@meepo/protocol';
 import type { AgentTool, AgentToolResult } from '@earendil-works/pi-agent-core';
 
 type RpcFn = (method: string, params: unknown) => Promise<unknown>;
@@ -12,7 +19,11 @@ export type AnyAgentTool = AgentTool<any>;
 const timingSchema = Type.Union([
   Type.Object({
     kind: Type.Literal('at'),
-    at: Type.Number({ description: 'Unix epoch milliseconds at which to fire once' }),
+    at: Type.Union([Type.String(), Type.Number()], {
+      description:
+        'When to fire once: an ISO 8601 time with a UTC offset, e.g. "2026-11-17T09:00:00+08:00" ' +
+        '(preferred, use the timezone of the times you were shown), or Unix epoch milliseconds',
+    }),
   }),
   Type.Object({
     kind: Type.Literal('cron'),
@@ -45,6 +56,26 @@ const ticketCreateSchema = Type.Object({
   timing: Type.Optional(timingSchema),
 });
 
+type TimingInput = Static<typeof timingSchema>;
+
+/** Resolves the model's ISO time to the epoch milliseconds the server stores. */
+function toWireTiming(timing: TimingInput): Timing {
+  if (timing.kind === 'cron') return timing;
+  return { kind: 'at', at: typeof timing.at === 'string' ? parseInstant(timing.at) : timing.at };
+}
+
+/** Adds the human-readable instants models cannot compute from epoch milliseconds. */
+function withLocalTimes(view: ScheduleView, timezone?: string) {
+  const local = (timestamp: number | null | undefined) =>
+    typeof timestamp === 'number' ? formatInstant(timestamp, timezone) : undefined;
+  return {
+    ...view,
+    nextFireAtLocal: local(view.nextFireAt),
+    createdAtLocal: local(view.createdAt),
+    lastFiredAtLocal: local(view.lastFiredAt),
+  };
+}
+
 function toTextResult(value: unknown): AgentToolResult<undefined> {
   return { content: [{ type: 'text', text: JSON.stringify(value, null, 2) }], details: undefined };
 }
@@ -54,7 +85,7 @@ function toTextResult(value: unknown): AgentToolResult<undefined> {
  * operation is proxied over the worker channel RPC to the server, which owns
  * schedules scoped to the given session.
  */
-export function buildCronTools(rpc: RpcFn, sessionId: string): AnyAgentTool[] {
+export function buildCronTools(rpc: RpcFn, sessionId: string, timezone?: string): AnyAgentTool[] {
   const cronCreate: AgentTool<typeof cronCreateSchema> = {
     name: 'CronCreate',
     label: 'Create schedule',
@@ -64,8 +95,12 @@ export function buildCronTools(rpc: RpcFn, sessionId: string): AnyAgentTool[] {
       'wakeup. For independent background work that does not need this context, use TicketCreate.',
     parameters: cronCreateSchema,
     execute: async (_toolCallId, params) => {
-      const schedule = await rpc(WORKER_CHANNEL_METHODS.cronCreate, { sessionId, ...params });
-      return toTextResult(schedule);
+      const schedule = (await rpc(WORKER_CHANNEL_METHODS.cronCreate, {
+        sessionId,
+        prompt: params.prompt,
+        timing: toWireTiming(params.timing),
+      })) as ScheduleView;
+      return toTextResult(withLocalTimes(schedule, timezone));
     },
   };
   const cronList: AgentTool<typeof cronListSchema> = {
@@ -75,7 +110,7 @@ export function buildCronTools(rpc: RpcFn, sessionId: string): AnyAgentTool[] {
     parameters: cronListSchema,
     execute: async () => {
       const jobs = (await rpc(WORKER_CHANNEL_METHODS.cronList, { sessionId })) as ScheduleView[];
-      return toTextResult(jobs);
+      return toTextResult(jobs.map((job) => withLocalTimes(job, timezone)));
     },
   };
   const cronDelete: AgentTool<typeof cronDeleteSchema> = {
@@ -95,7 +130,7 @@ export function buildCronTools(rpc: RpcFn, sessionId: string): AnyAgentTool[] {
  * Server-backed ticket tool: creates independent background tasks (optionally
  * scheduled) that run in a fresh context on some worker.
  */
-export function buildTicketTools(rpc: RpcFn, sessionId: string): AnyAgentTool[] {
+export function buildTicketTools(rpc: RpcFn, sessionId: string, timezone?: string): AnyAgentTool[] {
   const ticketCreate: AgentTool<typeof ticketCreateSchema> = {
     name: 'TicketCreate',
     label: 'Create ticket',
@@ -106,8 +141,16 @@ export function buildTicketTools(rpc: RpcFn, sessionId: string): AnyAgentTool[] 
       'CronCreate wakes up THIS session and preserves its context.',
     parameters: ticketCreateSchema,
     execute: async (_toolCallId, params) => {
-      const result = await rpc(WORKER_CHANNEL_METHODS.ticketCreate, { sessionId, ...params });
-      return toTextResult(result);
+      const result = (await rpc(WORKER_CHANNEL_METHODS.ticketCreate, {
+        sessionId,
+        ...params,
+        timing: params.timing && toWireTiming(params.timing),
+      })) as TicketCreateResult;
+      return toTextResult(
+        result.kind === 'schedule'
+          ? { ...result, schedule: withLocalTimes(result.schedule, timezone) }
+          : result
+      );
     },
   };
   return [ticketCreate] as AnyAgentTool[];

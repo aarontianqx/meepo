@@ -63,7 +63,10 @@ export function GeneralSettings(): React.JSX.Element {
         >
           <Textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={3} />
         </Field>
-        <Field label='Timezone' hint='Default for schedules in this space.'>
+        <Field
+          label='Timezone'
+          hint='Default for schedules, and the timezone new conversations show times in.'
+        >
           <Select value={timezone} onChange={(e) => setTimezone(e.target.value)}>
             {timezoneOptions(space.timezone).map((zone) => (
               <option key={zone} value={zone}>

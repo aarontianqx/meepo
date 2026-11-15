@@ -13,6 +13,7 @@ import type { AssistantMessage, Usage } from '@earendil-works/pi-ai';
 import { createCodingTools } from '@earendil-works/pi-coding-agent';
 import {
   WORKER_CHANNEL_METHODS,
+  formatInstant,
   type MediaReadResult,
   type ImageReference,
   type ModelConfig,
@@ -76,13 +77,14 @@ function emptyUsage(): Usage {
 export function transcriptToAgentMessage(
   message: TranscriptMessage,
   index: number,
-  model: ModelConfig
+  model: ModelConfig,
+  timezone?: string
 ): AgentMessage {
   switch (message.role) {
     case 'user':
       return {
         role: 'user',
-        content: historicUserContent(message, message.timestamp),
+        content: historicUserContent(message, message.timestamp, timezone),
         timestamp: message.timestamp,
       };
     case 'assistant': {
@@ -123,6 +125,8 @@ export class SessionManager {
   private readonly generations = new Map<string, number>();
   private readonly closing = new Map<string, Promise<void>>();
   private readonly models = new Map<string, ModelConfig>();
+  /** Frozen timezone per warm session; absent means UTC (sessions created before it was frozen). */
+  private readonly timezones = new Map<string, string>();
   private readonly runners = new Map<string, SessionRunner>();
   private readonly pendingCreates = new Map<string, Promise<SessionRunner>>();
   private readonly cancelledRuns = new Set<string>();
@@ -180,7 +184,7 @@ export class SessionManager {
     if (this.cancelledRuns.has(envelope.runId)) throw new Error('Run cancelled during startup');
     runner.runTurn(
       envelope.runId,
-      `${envelope.currentTime ? `<current-time>${new Date(envelope.currentTime).toISOString()}</current-time>\n` : ''}${envelope.prompt}\n${media.notes.join('\n')}`,
+      `${envelope.currentTime ? `<current-time>${formatInstant(envelope.currentTime, this.timezones.get(envelope.sessionId))}</current-time>\n` : ''}${envelope.prompt}\n${media.notes.join('\n')}`,
       envelope.delivery,
       envelope.timeoutSeconds,
       media.images
@@ -190,7 +194,10 @@ export class SessionManager {
   handleContextAppend(payload: ContextAppendPayload): void {
     const runner = this.runners.get(payload.sessionId);
     const model = this.models.get(payload.sessionId);
-    if (runner && model) runner.appendHistory(restoreEvents(payload.events, model));
+    if (runner && model)
+      runner.appendHistory(
+        restoreEvents(payload.events, model, this.timezones.get(payload.sessionId))
+      );
   }
 
   closeSession(sessionId: string): Promise<void> {
@@ -222,6 +229,7 @@ export class SessionManager {
     this.toolReleases.get(sessionId)?.();
     this.toolReleases.delete(sessionId);
     this.models.delete(sessionId);
+    this.timezones.delete(sessionId);
     if (removeDirectory && /^[a-zA-Z0-9_-]+$/.test(sessionId))
       await rm(join(this.deps.sessionsDir, sessionId), { recursive: true, force: true });
   }
@@ -250,6 +258,7 @@ export class SessionManager {
         this.toolReleases.get(sessionId)?.();
         this.toolReleases.delete(sessionId);
         this.models.delete(sessionId);
+        this.timezones.delete(sessionId);
       }
     }
   }
@@ -309,7 +318,13 @@ export class SessionManager {
   }
 
   private async createRunner(envelope: TurnDispatchEnvelope): Promise<SessionRunner> {
-    const messages = await this.fetchSnapshot(envelope);
+    // Prepared first: its frozen timezone decides how history messages render.
+    const prepared = this.deps.createAgent
+      ? undefined
+      : ((await this.deps.rpc(WORKER_CHANNEL_METHODS.promptPrepare, {
+          sessionId: envelope.sessionId,
+        })) as PreparedPrompt);
+    const messages = await this.fetchSnapshot(envelope, prepared?.timezone);
     const workDir = await this.ensureSessionDir(envelope.sessionId);
     const lease = this.deps.acquireTools?.();
     if (lease) this.toolReleases.set(envelope.sessionId, lease.release);
@@ -320,19 +335,14 @@ export class SessionManager {
       });
     const tools = boundedTools(
       [
-        ...createCodingTools(workDir, codingToolOptions),
+        ...createCodingTools(workDir, codingToolOptions(prepared?.timezone)),
         ...(lease?.tools ?? this.deps.extraTools?.() ?? []),
-        ...buildCronTools(executionRpc, envelope.sessionId),
-        ...buildTicketTools(executionRpc, envelope.sessionId),
+        ...buildCronTools(executionRpc, envelope.sessionId, prepared?.timezone),
+        ...buildTicketTools(executionRpc, envelope.sessionId, prepared?.timezone),
         ...buildMemoryTools(executionRpc, { sessionId: envelope.sessionId }),
       ],
       workDir
     );
-    const prepared = this.deps.createAgent
-      ? undefined
-      : ((await this.deps.rpc(WORKER_CHANNEL_METHODS.promptPrepare, {
-          sessionId: envelope.sessionId,
-        })) as PreparedPrompt);
     const systemPrompt = prepared
       ? await renderPrompt(workDir, prepared, tools)
       : buildSessionSystemPrompt(workDir, envelope.systemPromptContribution);
@@ -343,6 +353,7 @@ export class SessionManager {
       });
     const createAgent = this.deps.createAgent ?? ((options: AgentOptions) => new Agent(options));
     this.models.set(envelope.sessionId, envelope.model);
+    if (prepared?.timezone) this.timezones.set(envelope.sessionId, prepared.timezone);
     const agent = createAgent({
       prepareRequest: async () => {
         await this.deps.beforeExecution?.(this.runners.get(envelope.sessionId)?.currentRunId);
@@ -397,7 +408,10 @@ export class SessionManager {
     return dir;
   }
 
-  private async fetchSnapshot(envelope: TurnDispatchEnvelope): Promise<AgentMessage[]> {
+  private async fetchSnapshot(
+    envelope: TurnDispatchEnvelope,
+    timezone?: string
+  ): Promise<AgentMessage[]> {
     const compactor = createCompactor(envelope.model);
     const snapshot = await loadDurableHistory({
       fetch: async (afterSeq) =>
@@ -424,7 +438,7 @@ export class SessionManager {
       },
     });
     if (snapshot.events) {
-      const restored = restoreEvents(snapshot.events, envelope.model);
+      const restored = restoreEvents(snapshot.events, envelope.model, timezone);
       const users = restored.filter((m) => m.role === 'user');
       let index = 0;
       for (const event of snapshot.events) {
@@ -454,7 +468,7 @@ export class SessionManager {
       return restored;
     }
     return snapshot.messages.map((message, index) =>
-      transcriptToAgentMessage(message, index, envelope.model)
+      transcriptToAgentMessage(message, index, envelope.model, timezone)
     );
   }
 }
