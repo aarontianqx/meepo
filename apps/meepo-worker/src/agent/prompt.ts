@@ -53,5 +53,9 @@ function loadSkillIndex(dir: string): string[] {
   return skills
     .filter((skill) => !skill.disableModelInvocation)
     .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
-    .map((skill) => `- ${skill.name}: ${skill.description.slice(0, 1500)} (${skill.filePath})`);
+    .map((skill) => {
+      // Folded YAML descriptions keep a trailing newline; one skill must stay one line.
+      const description = skill.description.replace(/\s+/g, ' ').trim().slice(0, 1500);
+      return `- ${skill.name}: ${description} (${skill.filePath})`;
+    });
 }

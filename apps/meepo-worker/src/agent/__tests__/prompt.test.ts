@@ -41,6 +41,14 @@ describe('renderPrompt skill index', () => {
     expect(prompt).not.toContain('hidden');
   });
 
+  it('keeps a multi-line description on one line with its path', async () => {
+    await writeSkill('folded', 'name: folded\ndescription: >\n  first part\n  second part');
+    const prompt = await renderPrompt('/work', prepared, [], { skillsDir: dir });
+    expect(prompt).toContain(
+      `- folded: first part second part (${join(dir, 'folded', 'SKILL.md')})`
+    );
+  });
+
   it('adds no skill section without a skills directory or when it is missing', async () => {
     expect(await renderPrompt('/work', prepared, [])).not.toContain('Available skills');
     expect(
