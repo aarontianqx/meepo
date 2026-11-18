@@ -5,6 +5,7 @@ import { keys } from '../api/keys';
 import { useQuery } from '../api/query';
 import { AllWorkersPage } from '../features/workers/AllWorkersPage';
 import { ChannelsPage } from '../features/admin/ChannelsPage';
+import { InstructionsPage } from '../features/admin/InstructionsPage';
 import { ModelsPage } from '../features/admin/ModelsPage';
 import { SpacesHome } from '../features/spaces/SpacesHome';
 import { Button } from '../ui/Button';
@@ -82,6 +83,8 @@ function RouteView({ route }: { route: Route }): React.JSX.Element {
       return me.isAdmin ? <ModelsPage /> : <AdminOnly />;
     case 'channels':
       return me.isAdmin ? <ChannelsPage /> : <AdminOnly />;
+    case 'instructions':
+      return me.isAdmin ? <InstructionsPage /> : <AdminOnly />;
     case 'not-found':
       return (
         <div className='detail-placeholder'>

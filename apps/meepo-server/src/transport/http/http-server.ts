@@ -24,6 +24,7 @@ import { registerMeRoutes } from './routes/me.js';
 import { registerModelRoutes } from './routes/models.js';
 import { registerScheduleRoutes } from './routes/schedule.js';
 import { registerSessionRoutes } from './routes/sessions.js';
+import { registerSettingsRoutes } from './routes/settings.js';
 import { registerSpaceRoutes } from './routes/spaces.js';
 import { registerTicketRoutes } from './routes/tickets.js';
 import { registerWorkerRoutes } from './routes/workers.js';
@@ -97,6 +98,8 @@ export async function buildHttpServer(options: HttpServerOptions): Promise<Fasti
   if (options.services.memoryService) registerMemoryRoutes(app, options.services);
   if (options.services.channelService)
     registerChannelRoutes(app, options.services.channelService, options.config.adminUserIds ?? []);
+  if (options.services.settingsService)
+    registerSettingsRoutes(app, options.services.settingsService);
   registerMembershipRoutes(app, options.services);
   registerSpaceRoutes(app, options.services);
   registerWorkerRoutes(app, options.services);

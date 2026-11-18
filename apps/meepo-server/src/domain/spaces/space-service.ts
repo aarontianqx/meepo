@@ -13,6 +13,7 @@ export interface CreateSpaceInput {
   promptPreset?: Space['promptPreset'];
   name: string;
   description?: string;
+  instructions?: string;
   repoUrl?: string;
   defaultBranch?: string;
   requiredTags?: string[];
@@ -23,6 +24,7 @@ export interface UpdateSpaceInput {
   promptPreset?: Space['promptPreset'];
   name?: string;
   description?: string;
+  instructions?: string;
   repoUrl?: string;
   defaultBranch?: string;
   requiredTags?: string[];
@@ -52,6 +54,7 @@ export class SpaceService {
       id: randomUUID(),
       name: input.name.trim(),
       description: input.description,
+      instructions: input.instructions?.trim() || undefined,
       repoUrl: input.repoUrl?.trim() ?? '',
       promptPreset: input.promptPreset,
       defaultBranch: input.defaultBranch ?? 'main',
@@ -113,6 +116,8 @@ export class SpaceService {
       space.promptPreset = patch.promptPreset;
     }
     if (patch.description !== undefined) space.description = patch.description;
+    if (patch.instructions !== undefined)
+      space.instructions = patch.instructions.trim() || undefined;
     if (patch.repoUrl !== undefined) {
       space.repoUrl = patch.repoUrl.trim();
     }
@@ -166,7 +171,13 @@ function isValidModelRef(model: unknown): model is NonNullable<Space['model']> {
 }
 
 function validatePatch(input: UpdateSpaceInput): void {
-  for (const key of ['description', 'repoUrl', 'defaultBranch', 'timezone'] as const)
+  for (const key of [
+    'description',
+    'instructions',
+    'repoUrl',
+    'defaultBranch',
+    'timezone',
+  ] as const)
     if (input[key] !== undefined && typeof input[key] !== 'string')
       throw validation(`${key} must be a string`);
   if (

@@ -35,7 +35,7 @@ Meepo maintains no user account table; authorization maps authenticated `userId`
 
 - **Space `owner`**: Full control over the space, plus exclusive authority to delete the space, remove members, and transfer ownership.
 - **Space `operator`**: Full operational administration of the space (settings, model selection, group chat bindings, memory CRUD, enrollment/webhook token lifecycle, worker rebinding, session/ticket/schedule controls).
-- **Global `admin`** (bootstrapped via `MEEPO_ADMIN_USER_IDS`): Manages only the global `Models` and `Channels` registries. Global admin status grants **no** access to private spaces unless the admin is also a member of that space.
+- **Global `admin`** (bootstrapped via `MEEPO_ADMIN_USER_IDS`): Manages only the global `Models` and `Channels` registries and the global instructions. Global admin status grants **no** access to private spaces unless the admin is also a member of that space.
 
 ### Worker Enrollment and Placement
 
@@ -50,6 +50,7 @@ Meepo maintains no user account table; authorization maps authenticated `userId`
 | Setting                                      | Default / Scope  | Behavioral Effect                                                                                                                                                                                                                         |
 | -------------------------------------------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `Space.timezone`                             | `'UTC'`          | Default IANA timezone for `cron` schedules created in this space, and the timezone new sessions show times in (frozen per session at creation).                                                                                           |
+| `Space.instructions`                         | unset            | Free text appended to the frozen session identity after the global instructions; edits apply to sessions created afterwards.                                                                                                              |
 | `Space.promptPreset`                         | `'general'`      | `'coding'` appends isolated `git worktree` rules to new sessions/tickets; frozen once a session's identity is recorded.                                                                                                                   |
 | `Space.model` (`modelId?`, `thinkingLevel?`) | Server default   | Optionally selects a `ModelRegistry` entry (default: the registry default) and an optional `'low' \| 'high' \| 'max'` effort override.                                                                                                    |
 | `Space.repoUrl` / `defaultBranch`            | `''` / `'main'`  | Optional API-only repository hint included in prompt identity; never triggers automatic cloning. The console does not expose it: a space is not tied to one repository, and the agent finds the repositories it needs on the worker host. |

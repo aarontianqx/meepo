@@ -7,6 +7,8 @@ import { SqliteCardOutbox } from './store/sqlite/card-outbox-sqlite.js';
 import { ModelService } from './domain/models/model-service.js';
 import { SqliteModelRepository, SqliteModelUsage } from './store/sqlite/model-sqlite.js';
 import { PromptService } from './domain/prompts/prompt-service.js';
+import { SettingsService } from './domain/settings/settings-service.js';
+import { SqliteSettingsRepository } from './store/sqlite/settings-sqlite.js';
 import { MemoryService } from './domain/memory/memory-service.js';
 import { SqliteMemoryRepository } from './store/sqlite/memory-sqlite.js';
 import { WorkerConnectionHub } from './transport/ws/worker-connection-hub.js';
@@ -110,6 +112,7 @@ export async function bootstrap(config: ServerConfig = loadConfig()): Promise<Se
     (run) => streamProcessor.renderInterrupted(run, 'session_changed')
   );
   const memoryService = new MemoryService(new SqliteMemoryRepository(db));
+  const settingsService = new SettingsService(new SqliteSettingsRepository(db));
   const membershipService = new MembershipService(membershipRepository);
   const spaceService = new SpaceService(
     spaceRepository,
@@ -196,7 +199,8 @@ export async function bootstrap(config: ServerConfig = loadConfig()): Promise<Se
       spaceRepository,
       sessionRepository,
       transcriptService,
-      memoryService
+      memoryService,
+      settingsService
     ),
     onWorkerReady: (workerId) => {
       void dispatchService.flushWorkerQueues(workerId).catch((err) => app.log.error(err));
@@ -208,6 +212,7 @@ export async function bootstrap(config: ServerConfig = loadConfig()): Promise<Se
     runRepository,
     executionJournal: journal,
     memoryService,
+    settingsService,
     modelService,
     channelService,
     membershipService,

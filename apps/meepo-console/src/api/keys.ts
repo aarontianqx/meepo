@@ -23,4 +23,5 @@ export const keys = {
   models: 'models',
   providers: 'providers',
   channels: 'channels',
+  globalInstructions: 'global-instructions',
 } as const;

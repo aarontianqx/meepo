@@ -9,7 +9,7 @@ import { useMe, useSpace } from '../../app/context';
 import { navigate } from '../../app/router';
 import { formatTokens, groupByProvider, levelFor, type Level } from '../../lib/models';
 import { Button } from '../../ui/Button';
-import { Field, Segmented, Select } from '../../ui/Form';
+import { Field, Segmented, Select, Textarea } from '../../ui/Form';
 import { Callout, ErrorState, ListSkeleton } from '../../ui/Misc';
 import { useAction } from '../../ui/useAction';
 
@@ -36,6 +36,7 @@ export function AgentSettings(): React.JSX.Element {
     <>
       <ModelCard />
       <PresetCard />
+      <InstructionsCard />
     </>
   );
 }
@@ -213,5 +214,54 @@ function PresetCard(): React.JSX.Element {
         </Button>
       </div>
     </section>
+  );
+}
+
+function InstructionsCard(): React.JSX.Element {
+  const space = useSpace();
+  const { run, pending } = useAction();
+  const saved = space.instructions ?? '';
+  const [text, setText] = useState(saved);
+  const dirty = text.trim() !== saved;
+
+  const save = async (): Promise<void> => {
+    const updated = await run(() => api.updateSpace(space.id, { instructions: text }), {
+      success: 'Instructions saved',
+    });
+    if (updated) {
+      replaceSpace(updated);
+      setText(updated.instructions ?? '');
+    }
+  };
+
+  return (
+    <form
+      className='card card-pad stack'
+      onSubmit={(event) => {
+        event.preventDefault();
+        void save();
+      }}
+    >
+      <div>
+        <h3 className='card-title'>Instructions</h3>
+        <p className='muted'>
+          How the agent should work in this space: background, conventions, what to avoid. Read
+          after the platform-wide instructions.
+        </p>
+      </div>
+      <Field label='Space instructions' optional>
+        <Textarea value={text} onChange={(e) => setText(e.target.value)} rows={8} />
+      </Field>
+      <Callout>
+        A conversation keeps the instructions it started with. Edits apply to new conversations,
+        including the first message after <code>/new</code>.
+      </Callout>
+      <div className='row'>
+        <Button type='submit' variant='primary' loading={pending} disabled={!dirty}>
+          Save instructions
+        </Button>
+        {dirty ? <Button onClick={() => setText(saved)}>Reset</Button> : null}
+      </div>
+    </form>
   );
 }

@@ -4,7 +4,7 @@
  *
  *   #/spaces
  *   #/s/:spaceId[/overview|conversations[/:id]|tickets[/:id]|schedules|memory|workers|settings[/:tab]]
- *   #/workers | #/models | #/channels
+ *   #/workers | #/models | #/channels | #/instructions
  */
 
 import { useSyncExternalStore } from 'react';
@@ -35,7 +35,7 @@ export type Route =
   | { page: 'home' }
   | { page: 'spaces' }
   | { page: 'space'; spaceId: string; section: SpaceSection; item?: string; query: URLSearchParams }
-  | { page: 'workers' | 'models' | 'channels' }
+  | { page: 'workers' | 'models' | 'channels' | 'instructions' }
   | { page: 'not-found' };
 
 export function parseRoute(hash: string): Route {
@@ -49,6 +49,7 @@ export function parseRoute(hash: string): Route {
     case 'workers':
     case 'models':
     case 'channels':
+    case 'instructions':
       return { page: head };
     case 's': {
       const [spaceId, section = 'overview', ...item] = rest;

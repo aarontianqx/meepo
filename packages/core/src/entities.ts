@@ -52,6 +52,8 @@ export interface Space {
   id: string;
   name: string;
   description?: string;
+  /** How the agent should work in this space; frozen into each session's identity at creation */
+  instructions?: string;
   /** Optional repository hint included in prompt context; never auto-cloned */
   repoUrl: string;
   defaultBranch: string;

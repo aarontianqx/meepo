@@ -8,6 +8,7 @@ interface SpaceRow {
   id: string;
   name: string;
   description: string | null;
+  instructions: string | null;
   repo_url: string;
   default_branch: string;
   bound_worker_id: string | null;
@@ -27,6 +28,7 @@ function rowToSpace(row: SpaceRow): Space {
     promptPreset: row.prompt_preset ?? undefined,
     name: row.name,
     description: row.description ?? undefined,
+    instructions: row.instructions ?? undefined,
     repoUrl: row.repo_url,
     defaultBranch: row.default_branch,
     boundWorkerId: row.bound_worker_id ?? undefined,
@@ -56,8 +58,8 @@ export class SqliteSpaceRepository implements SpaceRepository {
         `INSERT OR REPLACE INTO spaces (
           id, name, description, repo_url, default_branch, bound_worker_id,
           timezone, model_id, model_thinking_level,
-          bound_chat_ids, required_tags, long_term_memory, created_at, updated_at, prompt_preset
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          bound_chat_ids, required_tags, long_term_memory, created_at, updated_at, prompt_preset, instructions
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         space.id,
@@ -74,7 +76,8 @@ export class SqliteSpaceRepository implements SpaceRepository {
         space.longTermMemory,
         space.createdAt,
         space.updatedAt,
-        space.promptPreset ?? null
+        space.promptPreset ?? null,
+        space.instructions ?? null
       );
   }
 

@@ -389,6 +389,16 @@ export const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 21,
+    name: 'global settings and space instructions',
+    up(db) {
+      db.exec(`
+        CREATE TABLE settings(key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL);
+        ALTER TABLE spaces ADD COLUMN instructions TEXT;
+      `);
+    },
+  },
 ];
 
 /** Applies pending migrations in version order, tracking progress via `user_version`. */

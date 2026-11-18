@@ -53,7 +53,7 @@
 ### 1.7 Authentication, Authorization & Secret Protection
 
 - **Authenticator port**: Extracts `UserIdentity` from request headers/tokens into request context; business logic never reads identity from payloads.
-- **Role separation**: Space `owner` and `operator` roles govern space resources (`owner` exclusively controls space deletion, member removal, and ownership transfer). Global `admin` (bootstrapped via `MEEPO_ADMIN_USER_IDS`) manages only the global `Models` and `Channels` registries.
+- **Role separation**: Space `owner` and `operator` roles govern space resources (`owner` exclusively controls space deletion, member removal, and ownership transfer). Global `admin` (bootstrapped via `MEEPO_ADMIN_USER_IDS`) manages only the global `Models` and `Channels` registries and the global instructions.
 - **Cryptographic storage boundaries**:
   - Channel `appSecret`s and model `apiKey`s are encrypted at rest with AES-256-GCM using `MEEPO_SECRET_KEY` (mandatory in production).
   - Worker enrollment tokens and space webhook tokens are stored exclusively as SHA-256 hashes; plaintext values are returned once at issuance.

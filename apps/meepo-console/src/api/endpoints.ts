@@ -38,6 +38,7 @@ import type {
 export interface CreateSpaceInput {
   name: string;
   description?: string;
+  instructions?: string;
   requiredTags?: string[];
   timezone?: string;
   promptPreset?: 'general' | 'coding';
@@ -194,6 +195,10 @@ export const api = {
   listModels: () => request<ModelEntry[]>('GET', '/api/models'),
   saveModel: (input: ModelInput) => request<ModelEntry>('PUT', '/api/models', input),
   deleteModel: (id: string) => request<{ deleted: true }>('DELETE', `/api/models/${enc(id)}`),
+  getGlobalInstructions: () =>
+    request<{ instructions: string }>('GET', '/api/settings/instructions'),
+  setGlobalInstructions: (instructions: string) =>
+    request<{ instructions: string }>('PUT', '/api/settings/instructions', { instructions }),
   listChannels: () => request<Channel[]>('GET', '/api/channels'),
   createChannel: (input: ChannelInput) => request<Channel>('POST', '/api/channels', input),
   updateChannel: (id: string, input: Partial<ChannelInput>) =>

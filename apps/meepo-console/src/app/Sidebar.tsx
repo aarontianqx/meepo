@@ -180,6 +180,13 @@ export function Sidebar({
                 current={route.page === 'channels'}
                 onNavigate={onNavigate}
               />
+              <NavLink
+                href='#/instructions'
+                icon='note'
+                label='Instructions'
+                current={route.page === 'instructions'}
+                onNavigate={onNavigate}
+              />
             </>
           ) : null}
         </nav>

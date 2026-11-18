@@ -23,6 +23,8 @@ import { SqliteMemoryRepository } from '../memory-sqlite.js';
 import { SqliteCardOutbox } from '../card-outbox-sqlite.js';
 import { ReliabilityService } from '../../../domain/runs/reliability-service.js';
 import { MemoryService } from '../../../domain/memory/memory-service.js';
+import { SettingsService } from '../../../domain/settings/settings-service.js';
+import { SqliteSettingsRepository } from '../settings-sqlite.js';
 
 class FakeClock {
   value = 100;
@@ -704,5 +706,31 @@ describe('v2 cross-module fault contracts', () => {
     const prepared = await prompt.prepare('sp1', 's1');
     expect(prepared.base).toBe('Frozen long ago.');
     expect(prepared.timezone).toBeUndefined();
+  });
+
+  it('freezes global then space instructions into the session identity and applies edits to new sessions only', async () => {
+    const spaces = new SqliteSpaceRepository(db),
+      sessions = new SqliteSessionRepository(db);
+    const settings = new SettingsService(new SqliteSettingsRepository(db));
+    const prompt = new PromptService(
+      spaces,
+      sessions,
+      new TranscriptService(new SqliteSessionEventRepository(db), sessions),
+      new MemoryService(new SqliteMemoryRepository(db)),
+      settings
+    );
+    await settings.setGlobalInstructions('GLOBAL_RULE');
+    await spaces.save({ ...space, instructions: 'SPACE_RULE' });
+    const first = await prompt.prepare('sp1', 's1');
+    expect(first.base).toContain('Global instructions:\nGLOBAL_RULE');
+    expect(first.base).toContain('Space instructions:\nSPACE_RULE');
+    expect(first.base.indexOf('GLOBAL_RULE')).toBeLessThan(first.base.indexOf('SPACE_RULE'));
+
+    await settings.setGlobalInstructions('');
+    await spaces.save({ ...space, instructions: 'CHANGED' });
+    expect((await prompt.prepare('sp1', 's1')).base).toBe(first.base);
+    const fresh = (await prompt.prepare('sp1')).base;
+    expect(fresh).not.toContain('Global instructions');
+    expect(fresh).toContain('Space instructions:\nCHANGED');
   });
 });

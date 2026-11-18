@@ -8,6 +8,7 @@ import type { DispatchService } from './domain/dispatch/dispatch-service.js';
 import type { EnrollmentService } from './domain/enrollments/enrollment-service.js';
 import type { MembershipService } from './domain/memberships/membership-service.js';
 import type { SchedulerService } from './domain/schedule/scheduler-service.js';
+import type { SettingsService } from './domain/settings/settings-service.js';
 import type { SessionService } from './domain/sessions/session-service.js';
 import type { TranscriptService } from './domain/sessions/transcript-service.js';
 import type { SpaceService } from './domain/spaces/space-service.js';
@@ -22,6 +23,7 @@ export interface ServiceContainer {
   modelService?: ModelService;
   memoryService?: MemoryService;
   channelService?: ChannelService;
+  settingsService?: SettingsService;
   membershipService: MembershipService;
   spaceService: SpaceService;
   enrollmentService: EnrollmentService;
