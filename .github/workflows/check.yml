@@ -1,5 +1,7 @@
 name: Check
-on: [push, pull_request]
+# Temporarily manual-only to avoid spending GitHub Actions minutes; validation runs on the
+# happy1 deployment host. Restore `on: [push, pull_request]` to re-enable.
+on: workflow_dispatch
 jobs:
   check:
     runs-on: ubuntu-latest
