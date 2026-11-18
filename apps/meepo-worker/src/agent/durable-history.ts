@@ -2,11 +2,16 @@ import type { CanonicalEvent, CompactionSnapshot, SessionSnapshot } from '@meepo
 import { boundedText } from '@meepo/protocol';
 import { historyText } from './compaction.js';
 
+/** First line of the note that stands in for a compacted prefix of canonical events. */
+export const SUMMARY_NOTE_PREFIX = '[Summary of earlier events]';
+
 export interface DurableHistoryDeps {
   fetch(afterSeq?: number): Promise<SessionSnapshot>;
   record(snapshot: CompactionSnapshot, degraded: boolean): Promise<void>;
   summarize(text: string): Promise<string>;
   checkpoint?(): Promise<void>;
+  /** Called with each prefix of events about to be replaced by a summary. */
+  dropped?(events: CanonicalEvent[]): void;
   maxBytes?: number;
   maxBufferedBytes?: number;
   maxBufferedEvents?: number;
@@ -87,6 +92,7 @@ export async function loadDurableHistory(deps: DurableHistoryDeps): Promise<Sess
         if (e.type === 'tool_result') open.delete(key);
       }
       if (page.hasMore && open.size) continue;
+      deps.dropped?.(prefix);
       let summary: string;
       let degraded: boolean = degradedChain;
       await deps.checkpoint?.();
@@ -122,7 +128,7 @@ export async function loadDurableHistory(deps: DurableHistoryDeps): Promise<Sess
         {
           seq: cached.coversThroughSeq,
           type: 'system_note',
-          payload: { content: `[Summary of earlier events]\n${cached.summary}` },
+          payload: { content: `${SUMMARY_NOTE_PREFIX}\n${cached.summary}` },
           timestamp: 0,
         },
       ]

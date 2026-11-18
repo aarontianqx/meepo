@@ -1,6 +1,13 @@
-import { loadDurableHistory } from './durable-history.js';
+import { loadDurableHistory, SUMMARY_NOTE_PREFIX } from './durable-history.js';
 import { boundedTools } from './tool-output.js';
-import { ProjectInstructionTracker, withProjectInstructions } from './project-instructions.js';
+import {
+  instructionMarkersInEvents,
+  ProjectInstructionTracker,
+  withCarryOver,
+  withProjectInstructions,
+  type InstructionMarker,
+  type ProjectInstructionLimits,
+} from './project-instructions.js';
 import { codingToolOptions } from './tool-env.js';
 import { reclaimDirectories, touchDirectory } from './retention.js';
 import { loadImages } from './media.js';
@@ -48,6 +55,7 @@ export interface SessionManagerDeps {
   sessionTtlMs: number;
   /** Directory scanned for skills when rendering the cold-start prompt. */
   skillsDir?: string;
+  projectInstructionLimits?: ProjectInstructionLimits;
   /** Worker-global run concurrency limit shared with the ticket runner. */
   slots?: SlotSemaphore;
   now?: () => number;
@@ -130,6 +138,7 @@ export class SessionManager {
   private readonly models = new Map<string, ModelConfig>();
   /** Frozen timezone per warm session; absent means UTC (sessions created before it was frozen). */
   private readonly timezones = new Map<string, string>();
+  private readonly instructions = new Map<string, ProjectInstructionTracker>();
   private readonly runners = new Map<string, SessionRunner>();
   private readonly pendingCreates = new Map<string, Promise<SessionRunner>>();
   private readonly cancelledRuns = new Set<string>();
@@ -185,9 +194,10 @@ export class SessionManager {
     if ((this.generations.get(envelope.sessionId) ?? 0) !== generation)
       throw new Error('Session closed during media loading');
     if (this.cancelledRuns.has(envelope.runId)) throw new Error('Run cancelled during startup');
+    const project = this.instructions.get(envelope.sessionId)?.activeProjectNote();
     runner.runTurn(
       envelope.runId,
-      `${envelope.currentTime ? `<current-time>${formatInstant(envelope.currentTime, this.timezones.get(envelope.sessionId))}</current-time>\n` : ''}${envelope.prompt}\n${media.notes.join('\n')}`,
+      `${envelope.currentTime ? `<current-time>${formatInstant(envelope.currentTime, this.timezones.get(envelope.sessionId))}</current-time>\n` : ''}${project ? `${project}\n` : ''}${envelope.prompt}\n${media.notes.join('\n')}`,
       envelope.delivery,
       envelope.timeoutSeconds,
       media.images
@@ -233,6 +243,7 @@ export class SessionManager {
     this.toolReleases.delete(sessionId);
     this.models.delete(sessionId);
     this.timezones.delete(sessionId);
+    this.instructions.delete(sessionId);
     if (removeDirectory && /^[a-zA-Z0-9_-]+$/.test(sessionId))
       await rm(join(this.deps.sessionsDir, sessionId), { recursive: true, force: true });
   }
@@ -262,6 +273,7 @@ export class SessionManager {
         this.toolReleases.delete(sessionId);
         this.models.delete(sessionId);
         this.timezones.delete(sessionId);
+        this.instructions.delete(sessionId);
       }
     }
   }
@@ -327,8 +339,24 @@ export class SessionManager {
       : ((await this.deps.rpc(WORKER_CHANNEL_METHODS.promptPrepare, {
           sessionId: envelope.sessionId,
         })) as PreparedPrompt);
-    const messages = await this.fetchSnapshot(envelope, prepared?.timezone);
+    // Markers of events a compaction dropped while loading; the tracker needs the work dir first.
+    const dropped: InstructionMarker[] = [];
+    const messages = await this.fetchSnapshot(envelope, dropped, prepared?.timezone);
     const workDir = await this.ensureSessionDir(envelope.sessionId);
+    const instructions = new ProjectInstructionTracker(workDir, this.deps.projectInstructionLimits);
+    instructions.restoreMarkers(dropped);
+    instructions.restore(messages);
+    // A cached summary stands in for earlier history: carry the projects worked in since, and
+    // those a compaction dropped while loading, into it.
+    const [head, ...tail] = messages;
+    if (
+      head?.role === 'user' &&
+      typeof head.content === 'string' &&
+      head.content.startsWith(`<system_note>${SUMMARY_NOTE_PREFIX}`)
+    ) {
+      const carried = await instructions.carryOver(tail);
+      if (carried) messages[0] = withCarryOver(head, carried);
+    }
     const lease = this.deps.acquireTools?.();
     if (lease) this.toolReleases.set(envelope.sessionId, lease.release);
     const executionRpc: RpcFn = (method, params) =>
@@ -336,8 +364,6 @@ export class SessionManager {
         ...(params as Record<string, unknown>),
         runId: this.runners.get(envelope.sessionId)?.currentRunId,
       });
-    const instructions = new ProjectInstructionTracker(workDir);
-    instructions.restore(messages);
     const tools = withProjectInstructions(
       boundedTools(
         [
@@ -361,6 +387,7 @@ export class SessionManager {
       });
     const createAgent = this.deps.createAgent ?? ((options: AgentOptions) => new Agent(options));
     this.models.set(envelope.sessionId, envelope.model);
+    this.instructions.set(envelope.sessionId, instructions);
     if (prepared?.timezone) this.timezones.set(envelope.sessionId, prepared.timezone);
     const agent = createAgent({
       prepareRequest: async () => {
@@ -386,6 +413,11 @@ export class SessionManager {
       },
       now: this.deps.now,
       compactor: createCompactor(envelope.model),
+      afterCompaction: async (compacted) => {
+        const [summary, ...retained] = compacted;
+        const carried = summary && (await instructions.carryOver(retained));
+        return carried ? [withCarryOver(summary, carried), ...retained] : compacted;
+      },
       slots: this.deps.slots,
       checkpoint: this.deps.beforeExecution,
     });
@@ -418,6 +450,7 @@ export class SessionManager {
 
   private async fetchSnapshot(
     envelope: TurnDispatchEnvelope,
+    dropped: InstructionMarker[],
     timezone?: string
   ): Promise<AgentMessage[]> {
     const compactor = createCompactor(envelope.model);
@@ -431,6 +464,7 @@ export class SessionManager {
           afterSeq,
         })) as SessionSnapshot,
       summarize: compactor.summarize,
+      dropped: (events) => dropped.push(...instructionMarkersInEvents(events)),
       checkpoint: async () => {
         if (this.cancelledRuns.has(envelope.runId))
           throw new Error('Run cancelled during history recovery');

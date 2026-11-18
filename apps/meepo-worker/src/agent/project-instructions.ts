@@ -1,5 +1,6 @@
 // Lazy discovery of project AGENTS.md files: the first time a tool touches a project, its
 // instructions are appended to that tool result, so the system prompt (and its cache) never change.
+// When history is compacted they are carried into the summary note, re-read from disk.
 
 import { createHash } from 'node:crypto';
 import { readFile, stat } from 'node:fs/promises';
@@ -7,29 +8,54 @@ import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import { TOOL_PAYLOAD_BYTES } from '@meepo/protocol';
+import { resultText, TOOL_PAYLOAD_BYTES, type CanonicalEvent } from '@meepo/protocol';
 
 import type { AnyAgentTool } from './tools.js';
 
-/** A single instruction file is cut here; the model is told which file to read for the rest. */
-export const PROJECT_INSTRUCTIONS_FILE_BYTES = 16 * 1024;
+/** Size limits for project instructions, in bytes. */
+export interface ProjectInstructionLimits {
+  /** A single instruction file is cut here; the model is told which file to read for the rest. */
+  fileBytes: number;
+  /** All instruction files carried into one compaction summary. */
+  totalBytes: number;
+}
+
+export const DEFAULT_PROJECT_INSTRUCTION_LIMITS: ProjectInstructionLimits = {
+  fileBytes: 16 * 1024,
+  totalBytes: 32 * 1024,
+};
 
 const INSTRUCTIONS_FILE = 'AGENTS.md';
 const FILE_TOOLS = new Set(['read', 'write', 'edit', 'grep', 'find', 'ls']);
 const MAX_BASH_PATHS = 20;
+/** A carried file shorter than this is not worth including. */
+const MIN_CARRIED_BYTES = 1024;
+const CARRY_HEADING = '[Project instructions carried over]';
 const MARKER =
   /^\[Project instructions: (.+?) \(project (.+?), sha256:([0-9a-f]+)\) — applies to files under /gm;
 
+export interface InstructionMarker {
+  file: string;
+  root: string;
+  digest: string;
+}
+
 /** Tracks which project instructions the model has already been shown in one conversation. */
 export class ProjectInstructionTracker {
-  /** Instruction file path to the digest of the content the model last saw. */
-  private readonly seen = new Map<string, string>();
+  /** Instruction file to the digest of the content the conversation currently contains. */
+  private seen = new Map<string, string>();
+  /** Instruction files known to the conversation with their project root, least recent first. */
+  private readonly files = new Map<string, string>();
   /** Project roots, least recently touched first. */
   private readonly projects = new Set<string>();
-
+  /** The project the model was last told is active. */
+  private announced?: string;
   private readonly workDir: string;
 
-  constructor(workDir: string) {
+  constructor(
+    workDir: string,
+    private readonly limits: ProjectInstructionLimits = DEFAULT_PROJECT_INSTRUCTION_LIMITS
+  ) {
     this.workDir = resolve(workDir);
   }
 
@@ -40,49 +66,104 @@ export class ProjectInstructionTracker {
     resultBytes: number
   ): Promise<string | undefined> {
     const blocks: string[] = [];
-    const found: { path: string; digest: string; root: string }[] = [];
+    const delivered: InstructionMarker[] = [];
     let bytes = resultBytes;
     for (const candidate of this.candidatePaths(toolName, args)) {
       const location = await this.locate(candidate);
       if (!location) continue;
-      this.touch(location.root);
+      this.touchProject(location.root);
       for (const dir of directoriesDown(location.root, location.dir)) {
         const file = join(dir, INSTRUCTIONS_FILE);
         const content = await readOptional(file);
         if (content === undefined) continue;
-        const digest = createHash('sha256').update(content).digest('hex').slice(0, 12);
-        if (this.seen.get(file) === digest || found.some((f) => f.path === file)) continue;
-        const block = formatBlock(file, location.root, digest, content);
+        this.touchFile(file, location.root);
+        const digest = digestOf(content);
+        if (this.seen.get(file) === digest || delivered.some((d) => d.file === file)) continue;
+        const block = formatBlock(file, location.root, digest, content, this.limits.fileBytes);
         const total = bytes + Buffer.byteLength(JSON.stringify(block));
         // The journal bounds a whole tool result; never let instructions be cut out of the
         // middle. Leave them unseen so the next touch of the project delivers them.
         if (total > TOOL_PAYLOAD_BYTES) continue;
         bytes = total;
         blocks.push(block);
-        found.push({ path: file, digest, root: location.root });
+        delivered.push({ file, root: location.root, digest });
       }
     }
-    for (const f of found) this.seen.set(f.path, f.digest);
+    for (const d of delivered) this.seen.set(d.file, d.digest);
     return blocks.length ? blocks.join('\n\n') : undefined;
   }
 
   /** Rebuilds what the model has seen from the tool results of a restored conversation. */
   restore(messages: AgentMessage[]): void {
-    for (const message of messages) {
-      if (message.role !== 'toolResult') continue;
-      for (const part of message.content) {
-        if (part.type !== 'text') continue;
-        for (const match of part.text.matchAll(MARKER)) {
-          this.seen.set(match[1], match[3]);
-          this.touch(match[2]);
-        }
-      }
-    }
+    this.restoreMarkers(markersIn(messages));
   }
 
-  private touch(root: string): void {
+  /** Same as {@link restore} for markers already extracted, e.g. from events a compaction dropped. */
+  restoreMarkers(markers: InstructionMarker[]): void {
+    for (const marker of markers) this.remember(marker);
+  }
+
+  /**
+   * After history was replaced by a summary plus the `retained` tail: returns the instructions
+   * of the projects worked in, re-read from disk, to merge into the summary note. Files whose
+   * current content the tail still holds are skipped. Resets what counts as seen to what the
+   * new history contains, so anything left out is delivered again on its next touch.
+   */
+  async carryOver(retained: AgentMessage[]): Promise<string | undefined> {
+    const inTail = new Map(markersIn(retained).map((m) => [m.file, m.digest]));
+    const next = new Map(inTail);
+    const blocks: string[] = [];
+    let remaining = this.limits.totalBytes;
+    for (const file of this.carryOrder()) {
+      const cap = Math.min(this.limits.fileBytes, remaining);
+      if (cap < MIN_CARRIED_BYTES) break;
+      const content = await readOptional(file);
+      if (content === undefined) continue;
+      const digest = digestOf(content);
+      if (inTail.get(file) === digest) continue;
+      const block = formatBlock(file, this.files.get(file)!, digest, content, cap);
+      remaining -= Buffer.byteLength(block);
+      blocks.push(block);
+      next.set(file, digest);
+    }
+    this.seen = next;
+    if (!blocks.length) return undefined;
+    const roots = [...this.projects].reverse();
+    return `${CARRY_HEADING}\nProjects worked in, most recent first: ${roots.join(', ')}\n\n${blocks.join('\n\n')}`;
+  }
+
+  /** A note naming the project the agent is working in, only when it changed since last told. */
+  activeProjectNote(): string | undefined {
+    const active = [...this.projects].at(-1);
+    if (active === undefined || active === this.announced) return undefined;
+    this.announced = active;
+    return `<active-project root=${JSON.stringify(active)}/>`;
+  }
+
+  /** Root files of all projects first (most recent project first), then nested files by recency. */
+  private carryOrder(): string[] {
+    const roots = [...this.projects].reverse();
+    const known = [...this.files.keys()].reverse();
+    const rootFiles = roots
+      .map((root) => join(root, INSTRUCTIONS_FILE))
+      .filter((file) => this.files.has(file));
+    return [...rootFiles, ...known.filter((file) => !rootFiles.includes(file))];
+  }
+
+  private remember(marker: InstructionMarker): void {
+    this.seen.set(marker.file, marker.digest);
+    this.touchFile(marker.file, marker.root);
+    this.touchProject(marker.root);
+  }
+
+  private touchProject(root: string): void {
     this.projects.delete(root);
     this.projects.add(root);
+  }
+
+  private touchFile(file: string, root: string): void {
+    this.files.delete(file);
+    this.files.set(file, root);
   }
 
   private candidatePaths(toolName: string, args: unknown): string[] {
@@ -109,6 +190,25 @@ export class ProjectInstructionTracker {
   }
 }
 
+/** Instruction markers in the tool results of canonical events. */
+export function instructionMarkersInEvents(events: CanonicalEvent[]): InstructionMarker[] {
+  return events.flatMap((event) =>
+    event.type === 'tool_result'
+      ? markersOf(resultText((event.payload as { result?: unknown }).result))
+      : []
+  );
+}
+
+/** Merges carried-over instructions into a compaction summary message (always the first). */
+export function withCarryOver(summary: AgentMessage, carried: string): AgentMessage {
+  if (summary.role !== 'user' || typeof summary.content !== 'string') return summary;
+  const closing = '</system_note>';
+  const content = summary.content.endsWith(closing)
+    ? `${summary.content.slice(0, -closing.length)}\n\n${carried}${closing}`
+    : `${summary.content}\n\n${carried}`;
+  return { ...summary, content };
+}
+
 /** Wraps tools so the first touch of a project appends its AGENTS.md files to the tool result. */
 export function withProjectInstructions(
   tools: AnyAgentTool[],
@@ -130,17 +230,41 @@ export function withProjectInstructions(
   }));
 }
 
-function formatBlock(file: string, root: string, digest: string, content: string): string {
+function digestOf(content: string): string {
+  return createHash('sha256').update(content).digest('hex').slice(0, 12);
+}
+
+function formatBlock(
+  file: string,
+  root: string,
+  digest: string,
+  content: string,
+  maxBytes: number
+): string {
   const bytes = Buffer.from(content);
-  const truncated = bytes.length > PROJECT_INSTRUCTIONS_FILE_BYTES;
+  const truncated = bytes.length > maxBytes;
   const body = truncated
     ? bytes
-        .subarray(0, PROJECT_INSTRUCTIONS_FILE_BYTES)
+        .subarray(0, maxBytes)
         .toString('utf8')
         .replace(/\uFFFD+$/, '')
     : content;
   const header = `[Project instructions: ${file} (project ${root}, sha256:${digest}) — applies to files under ${dirname(file)}]`;
   return `${header}\n${body}${truncated ? `\n[truncated; read ${file} for the rest]` : ''}`;
+}
+
+function markersIn(messages: AgentMessage[]): InstructionMarker[] {
+  return messages.flatMap((message) =>
+    message.role === 'toolResult' || message.role === 'user'
+      ? typeof message.content === 'string'
+        ? markersOf(message.content)
+        : message.content.flatMap((part) => (part.type === 'text' ? markersOf(part.text) : []))
+      : []
+  );
+}
+
+function markersOf(text: string): InstructionMarker[] {
+  return [...text.matchAll(MARKER)].map((m) => ({ file: m[1], root: m[2], digest: m[3] }));
 }
 
 /** Paths a shell command visibly mentions: absolute, `./`, `../`, `~/` and `cd` targets. */

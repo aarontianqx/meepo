@@ -24,6 +24,10 @@ export interface WorkerConfig {
   ticketsDir: string;
   /** Skills scanned at cold start; defaults to `<dataDir>/skills`, never the personal `~/.agents` */
   skillsDir: string;
+  /** Per-file cap for a project's AGENTS.md appended to tool results and carried at compaction */
+  projectInstructionFileBytes: number;
+  /** Total cap for project instructions carried into one compaction summary */
+  projectInstructionTotalBytes: number;
   /** Idle session runners are dropped after this many milliseconds */
   sessionTtlMs: number;
 }
@@ -57,6 +61,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
     sessionsDir:
       env.MEEPO_SESSIONS_DIR ?? file.sessionsDir ?? join(homedir(), '.meepo', 'sessions'),
     ticketsDir: env.MEEPO_TICKETS_DIR ?? file.ticketsDir ?? join(homedir(), '.meepo', 'tickets'),
+    projectInstructionFileBytes: Number(
+      env.MEEPO_PROJECT_INSTRUCTION_FILE_BYTES ?? file.projectInstructionFileBytes ?? 16 * 1024
+    ),
+    projectInstructionTotalBytes: Number(
+      env.MEEPO_PROJECT_INSTRUCTION_TOTAL_BYTES ?? file.projectInstructionTotalBytes ?? 32 * 1024
+    ),
     sessionTtlMs: Number(env.MEEPO_SESSION_TTL_MS ?? file.sessionTtlMs ?? 3_600_000),
   };
   if (
@@ -66,6 +76,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
     throw new Error('Invalid default thinkingLevel');
   if (!Number.isSafeInteger(config.maxSlots) || config.maxSlots < 1 || config.maxSlots > 128)
     throw new Error('maxSlots must be 1–128');
+  if (
+    !Number.isSafeInteger(config.projectInstructionFileBytes) ||
+    config.projectInstructionFileBytes < 1024 ||
+    !Number.isSafeInteger(config.projectInstructionTotalBytes) ||
+    config.projectInstructionTotalBytes < config.projectInstructionFileBytes
+  )
+    throw new Error(
+      'projectInstructionFileBytes must be at least 1024 and not exceed projectInstructionTotalBytes'
+    );
   if (!Number.isFinite(config.sessionTtlMs) || config.sessionTtlMs < 1000)
     throw new Error('sessionTtlMs must be at least 1000');
   if (!['ws:', 'wss:'].includes(new URL(config.serverUrl).protocol))

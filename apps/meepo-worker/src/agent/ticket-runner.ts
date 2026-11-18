@@ -1,5 +1,9 @@
 import { boundedTools } from './tool-output.js';
-import { ProjectInstructionTracker, withProjectInstructions } from './project-instructions.js';
+import {
+  ProjectInstructionTracker,
+  withProjectInstructions,
+  type ProjectInstructionLimits,
+} from './project-instructions.js';
 import { codingToolOptions } from './tool-env.js';
 import { reclaimDirectories, touchDirectory } from './retention.js';
 import { withTicketContext } from './tool-context.js';
@@ -29,6 +33,7 @@ export interface TicketRunnerDeps {
   ticketsDir: string;
   /** Directory scanned for skills when rendering the system prompt. */
   skillsDir?: string;
+  projectInstructionLimits?: ProjectInstructionLimits;
   /** Worker-global run concurrency limit shared with the session manager. */
   slots?: SlotSemaphore;
   /** Factory seam for tests; defaults to mkdir -p under ticketsDir. */
@@ -134,7 +139,7 @@ export class TicketRunner {
           ),
           `${envelope.ticketId}-${envelope.attempt ?? 1}`
         ),
-        new ProjectInstructionTracker(workDir)
+        new ProjectInstructionTracker(workDir, this.deps.projectInstructionLimits)
       );
       const systemPrompt = prepared
         ? await renderPrompt(workDir, prepared, tools, {

@@ -228,6 +228,11 @@ export interface SessionRunnerOptions {
   now?: () => number;
   /** Pre-turn history compaction; omit to disable (tickets, tests). */
   compactor?: SessionCompactor;
+  /**
+   * Adjusts the compacted history before it replaces the live one, e.g. to carry project
+   * instructions into the summary note. A failure keeps the history unadjusted.
+   */
+  afterCompaction?: (compacted: AgentMessage[]) => Promise<AgentMessage[]>;
   /** Worker-global run concurrency limit; omit for unbounded (tests). */
   slots?: SlotSemaphore;
   checkpoint?: (runId?: string) => Promise<void>;
@@ -250,6 +255,7 @@ export class SessionRunner {
   private readonly emit: (event: WorkerStreamEvent) => void;
   private readonly now: () => number;
   private readonly compactor?: SessionCompactor;
+  private readonly afterCompaction?: SessionRunnerOptions['afterCompaction'];
   private readonly slots?: SlotSemaphore;
   private readonly pendingHistory: AgentMessage[] = [];
   private readonly queue: QueuedTurn[] = [];
@@ -269,6 +275,7 @@ export class SessionRunner {
     this.workerId = options.workerId;
     this.now = options.now ?? Date.now;
     this.compactor = options.compactor;
+    this.afterCompaction = options.afterCompaction;
     this.slots = options.slots;
     this.forwarder = new StreamForwarder(options.emit);
     this.idleSince = this.now();
@@ -453,6 +460,13 @@ export class SessionRunner {
         ...(this.compactor.fallback?.(messages) ??
           keepRecentMessages(messages, FALLBACK_KEEP_RECENT_MESSAGES)),
       ];
+    }
+    if (this.afterCompaction) {
+      try {
+        compacted = await this.afterCompaction(compacted);
+      } catch (error) {
+        console.warn('compaction follow-up failed; keeping the compacted history as is', error);
+      }
     }
     this.agent.state.messages = compacted;
   }

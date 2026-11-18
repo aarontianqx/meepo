@@ -73,7 +73,10 @@ class FakeAgent implements RunnerAgent {
   }
 }
 
-function setup(compactor?: SessionCompactor) {
+function setup(
+  compactor?: SessionCompactor,
+  afterCompaction?: (compacted: AgentMessage[]) => Promise<AgentMessage[]>
+) {
   const agent = new FakeAgent();
   const events: WorkerStreamEvent[] = [];
   const runner = new SessionRunner({
@@ -82,6 +85,7 @@ function setup(compactor?: SessionCompactor) {
     workerId: 'w1',
     emit: (event) => events.push(event),
     compactor,
+    afterCompaction,
   });
   return { agent, events, runner };
 }
@@ -379,6 +383,39 @@ describe('SessionRunner compaction', () => {
     expect(agent.state.messages[0]).toMatchObject({
       content: expect.stringContaining('上下文已截断'),
     });
+    expect(agent.prompts).toEqual(['p1']);
+  });
+
+  it('lets the follow-up hook adjust the compacted history, for summaries and for truncation', async () => {
+    const mark = (messages: AgentMessage[]) =>
+      Promise.resolve([userMessage('CARRIED'), ...messages]);
+    const summarized = setup(fakeCompactor().compactor, mark);
+    summarized.agent.state.messages = [userMessage('old')];
+    summarized.runner.runTurn('t1', 'p1', 'wait');
+    await flush();
+    expect(summarized.agent.state.messages).toEqual([
+      userMessage('CARRIED'),
+      userMessage('SUMMARY'),
+    ]);
+
+    const truncated = setup(
+      fakeCompactor({ compact: () => Promise.resolve(undefined) }).compactor,
+      mark
+    );
+    truncated.agent.state.messages = Array.from({ length: 25 }, (_, i) => userMessage(`m${i}`));
+    truncated.runner.runTurn('t1', 'p1', 'wait');
+    await flush();
+    expect(truncated.agent.state.messages[0]).toEqual(userMessage('CARRIED'));
+  });
+
+  it('keeps the compacted history and runs the turn when the follow-up hook fails', async () => {
+    const { agent, runner } = setup(fakeCompactor().compactor, () =>
+      Promise.reject(new Error('disk gone'))
+    );
+    agent.state.messages = [userMessage('old')];
+    runner.runTurn('t1', 'p1', 'wait');
+    await flush();
+    expect(agent.state.messages).toEqual([userMessage('SUMMARY')]);
     expect(agent.prompts).toEqual(['p1']);
   });
 

@@ -1,6 +1,6 @@
 # 项目指令与技能来源方案（提案，2026-11-18）
 
-状态：设计已讨论定稿，未实现。以常青文档和代码为准。起因是在 happy1 部署时发现 worker 把本机 `~/.agents/AGENTS.md` 和 `~/.agents/skills` 无条件拼进所有会话的系统提示词，而 Meepo 是"全局 agent"，没有 pi 那样的启动目录，项目 AGENTS.md 没有可靠的落点。
+状态：S1–S4 均已实现。实现与本文的差异：带入段只列出项目根目录，不含 git 远程和分支；预算数值由 worker 配置（`projectInstructionFileBytes` / `projectInstructionTotalBytes`），不在服务端。以常青文档和代码为准。起因是在 happy1 部署时发现 worker 把本机 `~/.agents/AGENTS.md` 和 `~/.agents/skills` 无条件拼进所有会话的系统提示词，而 Meepo 是"全局 agent"，没有 pi 那样的启动目录，项目 AGENTS.md 没有可靠的落点。
 
 ## 1. 背景与问题
 
@@ -112,7 +112,7 @@ _Rationale：先去了项目 A、后来才发现要谈 B 时，系统提示词�
 规则：
 
 1. **内容从磁盘重读**，不复用之前追加过的文本，保证带入的是此刻的最新版本。目录或文件不存在（例如 worktree 被删、换了 worker）时静默跳过。
-2. **预算**：总量上限 32 KiB，单文件上限 16 KiB，超出单文件上限时截断（保留开头，末尾加一行 `[truncated; read <path> for the rest]`）。两个数值都做成服务端可配置，默认值如上。
+2. **预算**：总量上限 32 KiB，单文件上限 16 KiB，超出单文件上限时截断（保留开头，末尾加一行 `[truncated; read <path> for the rest]`）。两个数值由 worker 配置（`worker.toml` 或环境变量），默认值如上。
 3. **装入顺序**：
    - 第一轮：各项目的根目录 `AGENTS.md`，项目按最近触碰顺序，从新到旧；
    - 第二轮：各项目的子目录 `AGENTS.md`，按最近触碰顺序，从新到旧；

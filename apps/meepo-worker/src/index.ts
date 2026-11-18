@@ -49,6 +49,11 @@ const reportDispatchFailure = (runId: string, err: unknown): void => {
   emit({ type: 'run_failed', runId, error: (err as Error).message, code: 'dispatch_failed' });
 };
 
+const projectInstructionLimits = {
+  fileBytes: config.projectInstructionFileBytes,
+  totalBytes: config.projectInstructionTotalBytes,
+};
+
 const sessionManager = new SessionManager({
   workerId: config.workerId,
   acquireTools: () => mcp.acquire(),
@@ -57,6 +62,7 @@ const sessionManager = new SessionManager({
   sessionsDir: config.sessionsDir,
   sessionTtlMs: config.sessionTtlMs,
   skillsDir: config.skillsDir,
+  projectInstructionLimits,
   slots,
   beforeExecution: (runId) => client.beforeExecution(runId),
 });
@@ -68,6 +74,7 @@ const ticketRunner = new TicketRunner({
   emit,
   ticketsDir: config.ticketsDir,
   skillsDir: config.skillsDir,
+  projectInstructionLimits,
   slots,
   beforeExecution: (runId) => client.beforeExecution(runId),
 });

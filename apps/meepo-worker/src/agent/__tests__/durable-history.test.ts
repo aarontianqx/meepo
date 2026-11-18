@@ -27,8 +27,16 @@ describe('durable history compaction', () => {
     const record = vi.fn(async (c: CompactionSnapshot) => {
       cache = c;
     });
-    const first = await loadDurableHistory({ fetch, record, summarize, maxBytes: 1000 });
+    const dropped: number[] = [];
+    const first = await loadDurableHistory({
+      fetch,
+      record,
+      summarize,
+      maxBytes: 1000,
+      dropped: (events) => dropped.push(...events.map((e) => e.seq)),
+    });
     expect(cache!.coversThroughSeq).toBe(140);
+    expect(dropped).toEqual(raw.slice(0, 140).map((e) => e.seq));
     expect(first.events?.slice(1).map((e) => e.seq)).toEqual(raw.slice(140).map((e) => e.seq));
     expect(raw).toHaveLength(180);
     summarize.mockClear();

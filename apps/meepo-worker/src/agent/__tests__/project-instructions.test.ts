@@ -3,10 +3,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { TOOL_PAYLOAD_BYTES } from '@meepo/protocol';
+import type { AgentMessage } from '@earendil-works/pi-agent-core';
+import { TOOL_PAYLOAD_BYTES, type CanonicalEvent } from '@meepo/protocol';
 import {
-  PROJECT_INSTRUCTIONS_FILE_BYTES,
+  DEFAULT_PROJECT_INSTRUCTION_LIMITS,
+  instructionMarkersInEvents,
   ProjectInstructionTracker,
+  withCarryOver,
   withProjectInstructions,
 } from '../project-instructions.js';
 import type { AnyAgentTool } from '../tools.js';
@@ -95,9 +98,14 @@ describe('project instruction discovery', () => {
   });
 
   it('truncates a large file and names the file to read for the rest', async () => {
-    await writeFile(join(repo, 'AGENTS.md'), 'x'.repeat(PROJECT_INSTRUCTIONS_FILE_BYTES + 100));
+    await writeFile(
+      join(repo, 'AGENTS.md'),
+      'x'.repeat(DEFAULT_PROJECT_INSTRUCTION_LIMITS.fileBytes + 100)
+    );
     const text = await touch(new ProjectInstructionTracker(workDir), repo);
-    expect(Buffer.byteLength(text!)).toBeLessThan(PROJECT_INSTRUCTIONS_FILE_BYTES + 1024);
+    expect(Buffer.byteLength(text!)).toBeLessThan(
+      DEFAULT_PROJECT_INSTRUCTION_LIMITS.fileBytes + 1024
+    );
     expect(text).toContain(`[truncated; read ${join(repo, 'AGENTS.md')} for the rest]`);
   });
 
@@ -170,5 +178,135 @@ describe('withProjectInstructions', () => {
     );
     const result = await wrapped[0].execute('1', { path: base });
     expect(result.content).toEqual([{ type: 'text', text: 'ok' }]);
+  });
+});
+
+describe('project instruction carry-over at compaction', () => {
+  let base: string;
+  let workDir: string;
+  let repo: string;
+  let other: string;
+
+  beforeEach(async () => {
+    base = await realpath(await mkdtemp(join(tmpdir(), 'meepo-carry-')));
+    workDir = join(base, 'work');
+    repo = join(base, 'repo');
+    other = join(base, 'other');
+    for (const dir of [workDir, join(repo, '.git'), join(repo, 'pkg'), join(other, '.git')])
+      await mkdir(dir, { recursive: true });
+    await writeFile(join(repo, 'AGENTS.md'), 'REPO ROOT');
+    await writeFile(join(repo, 'pkg', 'AGENTS.md'), 'REPO PKG');
+    await writeFile(join(other, 'AGENTS.md'), 'OTHER ROOT');
+  });
+  afterEach(() => rm(base, { recursive: true, force: true }));
+
+  const toolResult = (text: string): AgentMessage => ({
+    role: 'toolResult',
+    toolCallId: 't',
+    toolName: 'read',
+    content: [{ type: 'text', text }],
+    isError: false,
+    timestamp: 1,
+  });
+  const summary = (content: string): AgentMessage => ({ role: 'user', content, timestamp: 1 });
+
+  it('carries every worked-in project, root files first and the latest project first', async () => {
+    const tracker = new ProjectInstructionTracker(workDir);
+    await tracker.discover('read', { path: join(repo, 'pkg') }, 0);
+    await tracker.discover('read', { path: other }, 0);
+    const carried = await tracker.carryOver([]);
+    expect(carried).toContain('[Project instructions carried over]');
+    const order = ['OTHER ROOT', 'REPO ROOT', 'REPO PKG'].map((s) => carried!.indexOf(s));
+    expect(order).toEqual([...order].sort((a, b) => a - b));
+    expect(order.every((i) => i > 0)).toBe(true);
+  });
+
+  it('reads fresh content from disk and skips files that vanished', async () => {
+    const tracker = new ProjectInstructionTracker(workDir);
+    await tracker.discover('read', { path: join(repo, 'pkg') }, 0);
+    await writeFile(join(repo, 'AGENTS.md'), 'REPO ROOT v2');
+    await rm(join(repo, 'pkg', 'AGENTS.md'));
+    const carried = await tracker.carryOver([]);
+    expect(carried).toContain('REPO ROOT v2');
+    expect(carried).not.toContain('REPO PKG');
+  });
+
+  it('skips a file whose current content the retained tail still holds', async () => {
+    const tracker = new ProjectInstructionTracker(workDir);
+    const delivered = await tracker.discover('read', { path: join(repo, 'pkg') }, 0);
+    const tail = [toolResult(`body\n${delivered}`)];
+    expect(await tracker.carryOver(tail)).toBeUndefined();
+
+    await writeFile(join(repo, 'AGENTS.md'), 'REPO ROOT v2');
+    const carried = await tracker.carryOver(tail);
+    expect(carried).toContain('REPO ROOT v2');
+    expect(carried).not.toContain('REPO PKG');
+  });
+
+  it('delivers again on the next touch what a compaction left out of the history', async () => {
+    const tracker = new ProjectInstructionTracker(workDir);
+    await tracker.discover('read', { path: other }, 0);
+    await tracker.carryOver([]);
+    // Carried instructions live in the summary now; a later touch must not repeat them.
+    expect(await tracker.discover('read', { path: other }, 0)).toBeUndefined();
+
+    await rm(join(other, 'AGENTS.md'));
+    await tracker.carryOver([]); // nothing carried: the old text is gone from the history
+    await writeFile(join(other, 'AGENTS.md'), 'OTHER ROOT');
+    expect(await tracker.discover('read', { path: other }, 0)).toContain('OTHER ROOT');
+  });
+
+  it('truncates each file and stops at the total budget', async () => {
+    await writeFile(join(repo, 'AGENTS.md'), 'a'.repeat(3000));
+    await writeFile(join(other, 'AGENTS.md'), 'b'.repeat(3000));
+    await writeFile(join(repo, 'pkg', 'AGENTS.md'), 'c'.repeat(3000));
+    const tracker = new ProjectInstructionTracker(workDir, { fileBytes: 2048, totalBytes: 4500 });
+    await tracker.discover('read', { path: join(repo, 'pkg') }, 0);
+    await tracker.discover('read', { path: other }, 0);
+    const carried = await tracker.carryOver([]);
+    expect(carried).toContain('[truncated; read');
+    expect(carried).toContain('b'.repeat(100));
+    expect(carried).toContain('a'.repeat(100));
+    expect(carried).not.toContain('c'.repeat(100));
+  });
+
+  it('rebuilds known files from restored events, including ones a compaction dropped', async () => {
+    const delivered = await new ProjectInstructionTracker(workDir).discover(
+      'read',
+      { path: other },
+      0
+    );
+    const tracker = new ProjectInstructionTracker(workDir);
+    tracker.restoreMarkers(
+      instructionMarkersInEvents([
+        {
+          type: 'tool_result',
+          payload: { result: { content: [{ type: 'text', text: delivered }] } },
+        },
+      ] as CanonicalEvent[])
+    );
+    expect(await tracker.discover('read', { path: other }, 0)).toBeUndefined();
+    expect(await tracker.carryOver([])).toContain('OTHER ROOT');
+  });
+
+  it('announces the active project only when it changes', async () => {
+    const tracker = new ProjectInstructionTracker(workDir);
+    expect(tracker.activeProjectNote()).toBeUndefined();
+    await tracker.discover('read', { path: repo }, 0);
+    expect(tracker.activeProjectNote()).toBe(`<active-project root=${JSON.stringify(repo)}/>`);
+    expect(tracker.activeProjectNote()).toBeUndefined();
+    await tracker.discover('read', { path: other }, 0);
+    expect(tracker.activeProjectNote()).toBe(`<active-project root=${JSON.stringify(other)}/>`);
+    await tracker.discover('read', { path: repo }, 0);
+    expect(tracker.activeProjectNote()).toBe(`<active-project root=${JSON.stringify(repo)}/>`);
+  });
+
+  it('merges carried text into a summary, inside a system note when there is one', () => {
+    expect(withCarryOver(summary('[Summary of the earlier conversation]\nS'), 'C')).toMatchObject({
+      content: '[Summary of the earlier conversation]\nS\n\nC',
+    });
+    expect(
+      withCarryOver(summary('<system_note>[Summary of earlier events]\nS</system_note>'), 'C')
+    ).toMatchObject({ content: '<system_note>[Summary of earlier events]\nS\n\nC</system_note>' });
   });
 });
