@@ -30,10 +30,9 @@ The worker combines `prepared` with local host state in exact section order:
    - Sessions: `CronCreate/CronList/CronDelete manage future wakeups of this session. TicketCreate creates independent work with a self-contained objective. Your reply is delivered to this session's chat window automatically, including after a scheduled wakeup or a ticket receipt; do not send it through other tools (messaging CLIs, APIs) unless the user asks you to contact somewhere else.`
      _Rationale: without this sentence, agents on hosts with messaging skills or CLIs re-send their answer through those tools, producing duplicate messages and slow turns._
    - Tickets: `Complete the objective independently and summarize the outcome.`
-2. **Local host instructions** (optional): Contents of `~/.agents/AGENTS.md` on the worker host (`Local operating instructions:\n...`).
-3. **Local skill index** (optional): Scans `~/.agents/skills/<name>/SKILL.md` (directories and symlinks), extracts YAML frontmatter `description` (`≤ 1,500` chars each), and lists `- <name>: <description> (<path>)` with instruction to read `SKILL.md` before invoking a skill.
-4. **Active tool catalog**: `Available tools:\n- <toolName>: <description>` covering local tools, current MCP generation tools, memory tools, and (for sessions) scheduling/ticket tools.
-5. **Trailing Memory Map suffix**:
+2. **Local skill index** (optional): Scans the worker's skills directory (`skillsDir`; default `<dataDir>/skills`, never the personal `~/.agents`) with pi's skill loader (`<name>/SKILL.md`, standard validation, skills with `disable-model-invocation` omitted), sorted by name so the rendered bytes do not depend on filesystem order, and lists `- <name>: <description> (<path>)` (`≤ 1,500` chars of description each) with the instruction to read `SKILL.md` before invoking a skill.
+3. **Active tool catalog**: `Available tools:\n- <toolName>: <description>` covering local tools, current MCP generation tools, memory tools, and (for sessions) scheduling/ticket tools.
+4. **Trailing Memory Map suffix**:
    ```text
    Memory Map (revision <memoryMapVersion>)
    This map is a snapshot from session start and may be incomplete. Memory tools always return current data — search first; do not answer from this map alone.
@@ -47,7 +46,7 @@ For interactive sessions, the worker persists the rendered `{ base, memoryMap, m
 | Context Layer                                                       | Refresh Cadence                                                       | Rationale                                                                                                                                                                                                  |
 | ------------------------------------------------------------------- | --------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Session identity, `promptPreset` & timezone** (`prompt_identity`) | **Frozen for session life** (only `/new` or a new session changes it) | Prevents persona/workflow drift mid-session and keeps the leading system-prompt prefix byte-identical; a later change of the space timezone must not rewrite how an existing conversation shows its times. |
-| **Host `AGENTS.md`, skills, tools/MCP, and `Memory Map`**           | **Cold starts only** (new session, TTL eviction, restart, rebind)     | Preserves LLM prefix KV-cache hits across warm turns; placing `Memory Map` at the very end bounds cache churn.                                                                                             |
+| **Host skills, tools/MCP, and `Memory Map`**                        | **Cold starts only** (new session, TTL eviction, restart, rebind)     | Preserves LLM prefix KV-cache hits across warm turns; placing `Memory Map` at the very end bounds cache churn.                                                                                             |
 | **Wall-clock time & full Memory entry bodies**                      | **Live per turn / on-demand tool read**                               | Agent always knows exact elapsed time (`<current-time>`) and reads latest memory revisions without prompt edits.                                                                                           |
 
 ## 3. Turn and Ticket Input Framing

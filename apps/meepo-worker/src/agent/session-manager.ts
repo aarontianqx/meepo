@@ -45,6 +45,8 @@ export interface SessionManagerDeps {
   /** Root for neutral per-session working directories (`<sessionsDir>/<sessionId>`). */
   sessionsDir: string;
   sessionTtlMs: number;
+  /** Directory scanned for skills when rendering the cold-start prompt. */
+  skillsDir?: string;
   /** Worker-global run concurrency limit shared with the ticket runner. */
   slots?: SlotSemaphore;
   now?: () => number;
@@ -344,7 +346,7 @@ export class SessionManager {
       workDir
     );
     const systemPrompt = prepared
-      ? await renderPrompt(workDir, prepared, tools)
+      ? await renderPrompt(workDir, prepared, tools, { skillsDir: this.deps.skillsDir })
       : buildSessionSystemPrompt(workDir, envelope.systemPromptContribution);
     if (prepared)
       await this.deps.rpc(WORKER_CHANNEL_METHODS.promptRecord, {

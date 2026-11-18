@@ -22,6 +22,8 @@ export interface WorkerConfig {
   sessionsDir: string;
   /** Root for neutral per-ticket working directories */
   ticketsDir: string;
+  /** Skills scanned at cold start; defaults to `<dataDir>/skills`, never the personal `~/.agents` */
+  skillsDir: string;
   /** Idle session runners are dropped after this many milliseconds */
   sessionTtlMs: number;
 }
@@ -34,6 +36,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
   if (!enrollmentToken) {
     throw new Error('MEEPO_ENROLLMENT_TOKEN is required (issue one via the server API or console)');
   }
+  const dataDir = mergedEnv.MEEPO_DATA_DIR ?? join(homedir(), '.meepo', 'worker');
   const config: WorkerConfig = {
     configPath,
     mcp: file.mcp ?? {},
@@ -44,7 +47,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
     serverUrl: env.MEEPO_SERVER_URL ?? file.serverUrl ?? 'ws://127.0.0.1:8780/ws/worker',
     enrollmentToken,
     workerId: persistentWorkerId(mergedEnv),
-    dataDir: mergedEnv.MEEPO_DATA_DIR ?? join(homedir(), '.meepo', 'worker'),
+    dataDir,
+    skillsDir: env.MEEPO_SKILLS_DIR ?? file.skillsDir ?? join(dataDir, 'skills'),
     tags: (env.MEEPO_TAGS ?? file.tags?.join(',') ?? '')
       .split(',')
       .map((tag) => tag.trim())

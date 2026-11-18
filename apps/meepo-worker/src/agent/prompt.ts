@@ -1,6 +1,4 @@
-import { readFile, readdir } from 'node:fs/promises';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { loadSkillsFromDir } from '@earendil-works/pi-coding-agent';
 import type { AnyAgentTool } from './tools.js';
 
 export const MEMORY_DISCLAIMER =
@@ -21,30 +19,22 @@ export function buildBasePrompt(workDir: string, contribution?: string, session 
       : 'Complete the objective independently and summarize the outcome.',
   ].join('\n\n');
 }
+export interface RenderPromptOptions {
+  /** Ticket prompts omit the chat-delivery rules; defaults to a session prompt. */
+  session?: boolean;
+  /** Directory scanned for skills; no skill index when absent. */
+  skillsDir?: string;
+}
+
+/** Render the cold-start system prompt: base, skill index, tool list and Memory Map. */
 export async function renderPrompt(
   workDir: string,
   prepared: PreparedPrompt,
   tools: AnyAgentTool[],
-  session = true
+  options: RenderPromptOptions = {}
 ) {
-  const parts = [buildBasePrompt(workDir, prepared.base, session)];
-  const root = join(homedir(), '.agents');
-  const rules = await optionalFile(join(root, 'AGENTS.md'));
-  if (rules) parts.push(`Local operating instructions:\n${rules}`);
-  const skills: string[] = [];
-  for (const item of await readdir(join(root, 'skills'), { withFileTypes: true }).catch(() => [])) {
-    if (!item.isDirectory() && !item.isSymbolicLink()) continue;
-    const path = join(root, 'skills', item.name, 'SKILL.md');
-    const source = await optionalFile(path);
-    if (!source) continue;
-    const front = source.match(/^---\r?\n([\s\S]*?)\r?\n---/)?.[1] ?? '';
-    const description = front
-      .match(/^description:\s*(.+(?:\n[ \t]+[^\n]+)*)/m)?.[1]
-      ?.replace(/\n\s+/g, ' ')
-      .replace(/^[>|][+-]?\s*/, '')
-      .replace(/^['"]|['"]$/g, '');
-    if (description) skills.push(`- ${item.name}: ${description.slice(0, 1500)} (${path})`);
-  }
+  const parts = [buildBasePrompt(workDir, prepared.base, options.session ?? true)];
+  const skills = options.skillsDir ? loadSkillIndex(options.skillsDir) : [];
   if (skills.length)
     parts.push(
       'Available skills — read the applicable SKILL.md before using a skill:\n' + skills.join('\n')
@@ -55,11 +45,13 @@ export async function renderPrompt(
   );
   return parts.join('\n\n');
 }
-async function optionalFile(path: string): Promise<string | undefined> {
-  try {
-    return await readFile(path, 'utf8');
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
-    throw err;
-  }
+
+// Sorted by name so the same directory renders the same bytes on every host (prefix cache).
+function loadSkillIndex(dir: string): string[] {
+  const { skills, diagnostics } = loadSkillsFromDir({ dir, source: 'meepo' });
+  for (const d of diagnostics) console.warn(`skills: ${d.message}${d.path ? ` (${d.path})` : ''}`);
+  return skills
+    .filter((skill) => !skill.disableModelInvocation)
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+    .map((skill) => `- ${skill.name}: ${skill.description.slice(0, 1500)} (${skill.filePath})`);
 }

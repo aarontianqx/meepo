@@ -26,6 +26,8 @@ export interface TicketRunnerDeps {
   emit: (event: WorkerStreamEvent) => void;
   /** Root for neutral per-ticket working directories (`<ticketsDir>/<ticketId>`). */
   ticketsDir: string;
+  /** Directory scanned for skills when rendering the system prompt. */
+  skillsDir?: string;
   /** Worker-global run concurrency limit shared with the session manager. */
   slots?: SlotSemaphore;
   /** Factory seam for tests; defaults to mkdir -p under ticketsDir. */
@@ -131,7 +133,10 @@ export class TicketRunner {
         `${envelope.ticketId}-${envelope.attempt ?? 1}`
       );
       const systemPrompt = prepared
-        ? await renderPrompt(workDir, prepared, tools, false)
+        ? await renderPrompt(workDir, prepared, tools, {
+            session: false,
+            skillsDir: this.deps.skillsDir,
+          })
         : buildTicketSystemPrompt(workDir, envelope.systemPromptContribution);
       const createAgent = this.deps.createAgent ?? ((options: AgentOptions) => new Agent(options));
       const agent = createAgent({

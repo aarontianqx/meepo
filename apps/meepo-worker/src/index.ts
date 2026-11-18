@@ -56,6 +56,7 @@ const sessionManager = new SessionManager({
   emit,
   sessionsDir: config.sessionsDir,
   sessionTtlMs: config.sessionTtlMs,
+  skillsDir: config.skillsDir,
   slots,
   beforeExecution: (runId) => client.beforeExecution(runId),
 });
@@ -66,6 +67,7 @@ const ticketRunner = new TicketRunner({
   acquireTools: () => mcp.acquire(),
   emit,
   ticketsDir: config.ticketsDir,
+  skillsDir: config.skillsDir,
   slots,
   beforeExecution: (runId) => client.beforeExecution(runId),
 });
