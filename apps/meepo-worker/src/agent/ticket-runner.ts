@@ -1,4 +1,5 @@
 import { boundedTools } from './tool-output.js';
+import { ProjectInstructionTracker, withProjectInstructions } from './project-instructions.js';
 import { codingToolOptions } from './tool-env.js';
 import { reclaimDirectories, touchDirectory } from './retention.js';
 import { withTicketContext } from './tool-context.js';
@@ -112,25 +113,28 @@ export class TicketRunner {
           : undefined;
       const lease = this.deps.acquireTools?.();
       releaseTools = lease?.release;
-      const tools = withTicketContext(
-        boundedTools(
-          [
-            ...createCodingTools(workDir, codingToolOptions(prepared?.timezone)),
-            ...(lease?.tools ?? this.deps.extraTools?.() ?? []),
-            ...(this.deps.rpc
-              ? buildMemoryTools(
-                  (method, params) =>
-                    this.deps.rpc!(method, {
-                      ...(params as Record<string, unknown>),
-                      runId: envelope.runId,
-                    }),
-                  { ticketId: envelope.ticketId }
-                )
-              : []),
-          ],
-          workDir
+      const tools = withProjectInstructions(
+        withTicketContext(
+          boundedTools(
+            [
+              ...createCodingTools(workDir, codingToolOptions(prepared?.timezone)),
+              ...(lease?.tools ?? this.deps.extraTools?.() ?? []),
+              ...(this.deps.rpc
+                ? buildMemoryTools(
+                    (method, params) =>
+                      this.deps.rpc!(method, {
+                        ...(params as Record<string, unknown>),
+                        runId: envelope.runId,
+                      }),
+                    { ticketId: envelope.ticketId }
+                  )
+                : []),
+            ],
+            workDir
+          ),
+          `${envelope.ticketId}-${envelope.attempt ?? 1}`
         ),
-        `${envelope.ticketId}-${envelope.attempt ?? 1}`
+        new ProjectInstructionTracker(workDir)
       );
       const systemPrompt = prepared
         ? await renderPrompt(workDir, prepared, tools, {

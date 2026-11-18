@@ -50,6 +50,19 @@ Every local, server-backed, and MCP tool is wrapped by an output budget guard be
 - Payloads up to `64 KiB` UTF-8 pass through intact.
 - Results or thrown errors exceeding `64 KiB` write their full serialized JSON to `<taskDir>/.tool-output/<uuid>.json` (`0600`) and return an `8,000`-byte head/tail preview plus the local artifact path to the model and execution journal. `.tool-output/` follows its parent task directory's 7-day lifecycle and is not downloadable from the server.
 
+### Project Instructions (lazy `AGENTS.md` discovery)
+
+A worker has no launch directory, so a project's `AGENTS.md` cannot be loaded at startup; the project only appears once the agent works in it. Sessions and tickets share one tool wrapper (outside the output-budget guard) that discovers instructions on first touch and appends them to that tool result as an extra text block. The system prompt and its prefix cache never change.
+
+- **What counts as a touch**: the `path` of `read`, `write`, `edit`, `grep`, `find`, `ls` (relative paths resolve against the task directory), and for `bash` the absolute, `./`, `../` and `~/` paths in the command plus `cd` targets. The path must exist; shell commands consider at most 20 distinct paths.
+- **Boundary**: the nearest ancestor containing `.git` (a file or directory) is the project root. Without one, only paths inside the task directory count and the task directory is the root. Nothing outside the root, and no `AGENTS.md` above it, is read. Only the exact file name `AGENTS.md` is recognized.
+- **What is appended**: `AGENTS.md` of every directory from the root down to the touched directory, root first, each as `[Project instructions: <file> (project <root>, sha256:<12 hex>) — applies to files under <dir>]` followed by the content. A file is cut at `16 KiB` with `[truncated; read <file> for the rest]`.
+- **Deduplication**: a file is not sent again while its content digest matches what the conversation already contains; an edited file is sent again with its new digest. If appending would push the whole tool result past the `64 KiB` journal bound, the instructions are left for the next touch instead of being truncated.
+- **Restore**: on a cold start the worker rebuilds what the conversation contains by scanning restored tool results for the marker line, so nothing is persisted on the worker. Projects touched before the latest compaction cache and not touched since are sent again on their next touch.
+- **Failure**: discovery never fails a tool call; errors are logged and the result is returned unchanged.
+
+_Rationale: appending to the conversation tail keeps the cached prefix intact and lets the agent that starts in project A and moves to project B pick up each project's conventions where it first uses them. The `.git` boundary stands in for the launch directory that a general agent lacks._
+
 ### Server-Backed Tools
 
 - **Memory tools** (`MemoryList`, `MemorySearch`, `MemoryRead`, `MemoryWrite`, `MemoryDelete`): Available identically in both sessions and tickets; proxy over `memory.call` RPC with the active `runId` so the server enforces lease validity and space ownership.

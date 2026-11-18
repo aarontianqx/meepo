@@ -1,5 +1,6 @@
 import { loadDurableHistory } from './durable-history.js';
 import { boundedTools } from './tool-output.js';
+import { ProjectInstructionTracker, withProjectInstructions } from './project-instructions.js';
 import { codingToolOptions } from './tool-env.js';
 import { reclaimDirectories, touchDirectory } from './retention.js';
 import { loadImages } from './media.js';
@@ -335,15 +336,20 @@ export class SessionManager {
         ...(params as Record<string, unknown>),
         runId: this.runners.get(envelope.sessionId)?.currentRunId,
       });
-    const tools = boundedTools(
-      [
-        ...createCodingTools(workDir, codingToolOptions(prepared?.timezone)),
-        ...(lease?.tools ?? this.deps.extraTools?.() ?? []),
-        ...buildCronTools(executionRpc, envelope.sessionId, prepared?.timezone),
-        ...buildTicketTools(executionRpc, envelope.sessionId, prepared?.timezone),
-        ...buildMemoryTools(executionRpc, { sessionId: envelope.sessionId }),
-      ],
-      workDir
+    const instructions = new ProjectInstructionTracker(workDir);
+    instructions.restore(messages);
+    const tools = withProjectInstructions(
+      boundedTools(
+        [
+          ...createCodingTools(workDir, codingToolOptions(prepared?.timezone)),
+          ...(lease?.tools ?? this.deps.extraTools?.() ?? []),
+          ...buildCronTools(executionRpc, envelope.sessionId, prepared?.timezone),
+          ...buildTicketTools(executionRpc, envelope.sessionId, prepared?.timezone),
+          ...buildMemoryTools(executionRpc, { sessionId: envelope.sessionId }),
+        ],
+        workDir
+      ),
+      instructions
     );
     const systemPrompt = prepared
       ? await renderPrompt(workDir, prepared, tools, { skillsDir: this.deps.skillsDir })
