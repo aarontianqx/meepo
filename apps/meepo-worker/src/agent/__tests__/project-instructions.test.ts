@@ -299,6 +299,8 @@ describe('project instruction carry-over at compaction', () => {
     expect(tracker.activeProjectNote()).toBe(`<active-project root=${JSON.stringify(other)}/>`);
     await tracker.discover('read', { path: repo }, 0);
     expect(tracker.activeProjectNote()).toBe(`<active-project root=${JSON.stringify(repo)}/>`);
+    await tracker.carryOver([]);
+    expect(tracker.activeProjectNote()).toBe(`<active-project root=${JSON.stringify(repo)}/>`);
   });
 
   it('merges carried text into a summary, inside a system note when there is one', () => {

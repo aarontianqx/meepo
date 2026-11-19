@@ -88,7 +88,7 @@ When multiple queued `wait` turns coalesce:
 - Server-side offline queue flush formats items as `[queued message 1]\n...\n\n[queued message 2]\n...`.
 - Worker-side busy queue drain formats items as `[1/N] ...\n\n[2/N] ...`.
 
-Immediately before passing the turn to the model, `SessionManager` prepends `<current-time><ISO 8601 in the session timezone, with offset></current-time>` and appends per-image status lines (`[Image original: <path>]`, `[图片下载失败]`, or `[图片：当前模型不支持图像输入]`) alongside `ImageContent` attachments.
+Immediately before passing the turn to the model, `SessionManager` prepends `<current-time><ISO 8601 in the session timezone, with offset></current-time>`, then `<active-project root="<path>"/>` when the project the agent last worked in changed since it was last announced (and again after a compaction, whose summary may have dropped the earlier announcement), and appends per-image status lines (`[Image original: <path>]`, `[图片下载失败]`, or `[图片：当前模型不支持图像输入]`) alongside `ImageContent` attachments.
 
 ### Ticket Single-Turn Prompt
 

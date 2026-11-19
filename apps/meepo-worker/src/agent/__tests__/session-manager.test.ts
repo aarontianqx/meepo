@@ -1,11 +1,12 @@
 import { existsSync } from 'node:fs';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import type { AgentEvent, AgentMessage, AgentOptions } from '@earendil-works/pi-agent-core';
 import {
   WORKER_CHANNEL_METHODS,
+  type CanonicalEvent,
   type ModelConfig,
   type TurnDispatchEnvelope,
   type TranscriptMessage,
@@ -307,6 +308,68 @@ describe('SessionManager runner creation', () => {
     });
     await manager.handleDispatch(envelope({ currentTime: Date.UTC(2026, 10, 15, 2, 18, 0, 573) }));
     expect(prompts[0]).toMatch(/^<current-time>2026-11-15T02:18:00Z<\/current-time>\nhi/);
+  });
+
+  it('merges project instructions into the cached summary on cold start and announces the project once', async () => {
+    const repo = join(sessionsDir, 'carry-repo');
+    await mkdir(join(repo, '.git'), { recursive: true });
+    await writeFile(join(repo, 'AGENTS.md'), 'RULES v2');
+    const stale = `[Project instructions: ${join(repo, 'AGENTS.md')} (project ${repo}, sha256:000000000000) — applies to files under ${repo}]\nRULES v1`;
+    const events: CanonicalEvent[] = [
+      {
+        seq: 1,
+        type: 'system_note',
+        payload: { content: '[Summary of earlier events]\nS' },
+        timestamp: 1,
+      },
+      {
+        seq: 2,
+        type: 'tool_call',
+        runId: 'r0',
+        payload: { toolCallId: 'c1', toolName: 'read', args: { path: join(repo, 'x') } },
+        timestamp: 2,
+      },
+      {
+        seq: 3,
+        type: 'tool_result',
+        runId: 'r0',
+        payload: { toolCallId: 'c1', result: { content: [{ type: 'text', text: stale }] } },
+        timestamp: 3,
+      },
+    ];
+    const prompts: string[] = [];
+    const state = { messages: [] as AgentMessage[] };
+    const { manager, captured } = setup({
+      rpc: (method) =>
+        Promise.resolve(
+          method === WORKER_CHANNEL_METHODS.sessionSnapshot
+            ? { sessionId: 'carry', version: 3, messages: [], events }
+            : {}
+        ),
+      createAgent: (options) => {
+        captured.push(options);
+        state.messages = [...(options.initialState?.messages ?? [])];
+        return {
+          subscribe: () => () => {},
+          prompt: (input: string) => {
+            prompts.push(input);
+            return Promise.resolve();
+          },
+          steer: () => {},
+          abort: () => {},
+          state,
+        };
+      },
+    });
+    await manager.handleDispatch(envelope({ sessionId: 'carry' }));
+    await manager.handleDispatch(envelope({ sessionId: 'carry', runId: 'run-2' }));
+
+    const head = state.messages[0];
+    expect(head.role === 'user' && head.content).toMatch(
+      /^<system_note>\[Summary of earlier events\]\nS\n\n\[Project instructions carried over\][\s\S]*RULES v2[\s\S]*<\/system_note>$/
+    );
+    expect(prompts[0]).toContain(`<active-project root=${JSON.stringify(repo)}/>`);
+    expect(prompts[1]).not.toContain('<active-project');
   });
 
   it('appends context events to a warm runner as speaker-attributed history, and ignores cold ones', async () => {

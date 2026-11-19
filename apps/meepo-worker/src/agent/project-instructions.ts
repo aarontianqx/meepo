@@ -127,12 +127,14 @@ export class ProjectInstructionTracker {
       next.set(file, digest);
     }
     this.seen = next;
+    // The compacted history may no longer contain the last announcement.
+    this.announced = undefined;
     if (!blocks.length) return undefined;
     const roots = [...this.projects].reverse();
     return `${CARRY_HEADING}\nProjects worked in, most recent first: ${roots.join(', ')}\n\n${blocks.join('\n\n')}`;
   }
 
-  /** A note naming the project the agent is working in, only when it changed since last told. */
+  /** A note naming the project the agent is working in, only when it changed since last told (or since a compaction). */
   activeProjectNote(): string | undefined {
     const active = [...this.projects].at(-1);
     if (active === undefined || active === this.announced) return undefined;
